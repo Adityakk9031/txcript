@@ -191,12 +191,283 @@ pub enum Tool {
         command: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workdir: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        run_in_background: bool,
     },
-    /// MCP tools, harness-private tools, and anything not yet typed.
+    /// MCP tools, harness-private tools, and anything whose input doesn't fit a
+    /// typed variant. Holds the canonical name and the untouched input, so it
+    /// is always lossless.
     Raw {
         tool_name: String,
         input: Value,
     },
+}
+
+impl Tool {
+    /// Build a canonical [`Tool`] from a *canonical* tool name and input — i.e.
+    /// names and argument keys already normalized to the Claude convention
+    /// (`Read`/`Edit`/`Bash`, `file_path`/`old_string`/…). Each harness's codec
+    /// maps its native names onto this convention first, then calls this.
+    ///
+    /// A typed variant is used only when the input fits its schema exactly; any
+    /// unexpected key falls through to [`Tool::Raw`] rather than be dropped, so
+    /// the mapping is always lossless.
+    pub fn from_canonical(name: &str, input: Value) -> Tool {
+        fn typed<A: for<'de> Deserialize<'de>>(input: &Value) -> Option<A> {
+            serde_json::from_value(input.clone()).ok()
+        }
+        match name {
+            "Read" => typed::<ReadArgs>(&input)
+                .map(|a| Tool::Read {
+                    file_path: a.file_path,
+                    offset: a.offset,
+                    limit: a.limit,
+                })
+                .unwrap_or(Tool::Raw {
+                    tool_name: name.to_string(),
+                    input,
+                }),
+            "Write" => typed::<WriteArgs>(&input)
+                .map(|a| Tool::Write {
+                    file_path: a.file_path,
+                    content: a.content,
+                })
+                .unwrap_or(Tool::Raw {
+                    tool_name: name.to_string(),
+                    input,
+                }),
+            "Edit" => typed::<EditArgs>(&input)
+                .map(|a| Tool::Edit {
+                    file_path: a.file_path,
+                    old_string: a.old_string,
+                    new_string: a.new_string,
+                    replace_all: a.replace_all,
+                })
+                .unwrap_or(Tool::Raw {
+                    tool_name: name.to_string(),
+                    input,
+                }),
+            "MultiEdit" => typed::<MultiEditArgs>(&input)
+                .map(|a| Tool::MultiEdit {
+                    file_path: a.file_path,
+                    edits: a.edits,
+                })
+                .unwrap_or(Tool::Raw {
+                    tool_name: name.to_string(),
+                    input,
+                }),
+            "Bash" => typed::<BashArgs>(&input)
+                .map(|a| Tool::Bash {
+                    command: a.command,
+                    workdir: a.workdir,
+                    timeout_ms: a.timeout_ms,
+                    description: a.description,
+                    run_in_background: a.run_in_background,
+                })
+                .unwrap_or(Tool::Raw {
+                    tool_name: name.to_string(),
+                    input,
+                }),
+            other => Tool::Raw {
+                tool_name: other.to_string(),
+                input,
+            },
+        }
+    }
+
+    /// Inverse of [`Tool::from_canonical`]: the canonical name and input for
+    /// this tool, ready for a codec to denormalize into a harness's native
+    /// names and keys.
+    pub fn to_canonical(&self) -> (String, Value) {
+        let value = |v: serde_json::Result<Value>| v.unwrap_or(Value::Null);
+        match self {
+            Tool::Read {
+                file_path,
+                offset,
+                limit,
+            } => (
+                "Read".into(),
+                value(serde_json::to_value(ReadArgs {
+                    file_path: file_path.clone(),
+                    offset: *offset,
+                    limit: *limit,
+                })),
+            ),
+            Tool::Write { file_path, content } => (
+                "Write".into(),
+                value(serde_json::to_value(WriteArgs {
+                    file_path: file_path.clone(),
+                    content: content.clone(),
+                })),
+            ),
+            Tool::Edit {
+                file_path,
+                old_string,
+                new_string,
+                replace_all,
+            } => (
+                "Edit".into(),
+                value(serde_json::to_value(EditArgs {
+                    file_path: file_path.clone(),
+                    old_string: old_string.clone(),
+                    new_string: new_string.clone(),
+                    replace_all: *replace_all,
+                })),
+            ),
+            Tool::MultiEdit { file_path, edits } => (
+                "MultiEdit".into(),
+                value(serde_json::to_value(MultiEditArgs {
+                    file_path: file_path.clone(),
+                    edits: edits.clone(),
+                })),
+            ),
+            Tool::Bash {
+                command,
+                workdir,
+                timeout_ms,
+                description,
+                run_in_background,
+            } => (
+                "Bash".into(),
+                value(serde_json::to_value(BashArgs {
+                    command: command.clone(),
+                    workdir: workdir.clone(),
+                    timeout_ms: *timeout_ms,
+                    description: description.clone(),
+                    run_in_background: *run_in_background,
+                })),
+            ),
+            Tool::Raw { tool_name, input } => (tool_name.clone(), input.clone()),
+        }
+    }
+}
+
+// Argument structs for the typed tools. `deny_unknown_fields` is what makes
+// `from_canonical` lossless: an input carrying a key we don't model fails to
+// parse and falls back to `Tool::Raw` rather than silently losing the key.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadArgs {
+    file_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    limit: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteArgs {
+    file_path: String,
+    content: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditArgs {
+    file_path: String,
+    old_string: String,
+    new_string: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    replace_all: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MultiEditArgs {
+    file_path: String,
+    edits: Vec<EditOp>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BashArgs {
+    command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workdir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    run_in_background: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A known tool with a known schema becomes the typed variant, and round
+    /// trips back to the same canonical name and input.
+    #[test]
+    fn typed_tool_round_trips() {
+        let input = json!({
+            "file_path": "/a/b.rs",
+            "old_string": "x",
+            "new_string": "y",
+        });
+        let tool = Tool::from_canonical("Edit", input.clone());
+        assert!(matches!(tool, Tool::Edit { .. }));
+        let (name, back) = tool.to_canonical();
+        assert_eq!(name, "Edit");
+        assert_eq!(back, input);
+    }
+
+    /// `replace_all` survives the round trip when set.
+    #[test]
+    fn edit_preserves_replace_all() {
+        let input = json!({
+            "file_path": "/a", "old_string": "x", "new_string": "y", "replace_all": true,
+        });
+        let (_, back) = Tool::from_canonical("Edit", input.clone()).to_canonical();
+        assert_eq!(back, input);
+    }
+
+    /// The whole point of `deny_unknown_fields`: an unmodeled key on a known
+    /// tool must NOT be silently dropped. It falls back to `Raw`, which keeps
+    /// the input intact, so the mapping stays lossless.
+    #[test]
+    fn unknown_key_on_known_tool_falls_back_to_raw_losslessly() {
+        let input = json!({"file_path": "/a", "surprise": 1});
+        let tool = Tool::from_canonical("Read", input.clone());
+        match &tool {
+            Tool::Raw {
+                tool_name,
+                input: kept,
+            } => {
+                assert_eq!(tool_name, "Read");
+                assert_eq!(*kept, input);
+            }
+            other => panic!("expected Raw, got {other:?}"),
+        }
+        assert_eq!(tool.to_canonical(), ("Read".to_string(), input));
+    }
+
+    /// MCP and unknown tools pass through as `Raw` with name and input intact.
+    #[test]
+    fn mcp_tool_is_raw() {
+        let input = json!({"q": "hello"});
+        let tool = Tool::from_canonical("mcp__search__query", input.clone());
+        assert_eq!(
+            tool.to_canonical(),
+            ("mcp__search__query".to_string(), input)
+        );
+    }
+
+    /// Bash carries its incidental fields (description/timeout) rather than
+    /// dropping them to match a narrower schema.
+    #[test]
+    fn bash_keeps_incidental_fields() {
+        let input = json!({"command": "ls", "description": "list", "timeout_ms": 5000});
+        let tool = Tool::from_canonical("Bash", input.clone());
+        assert!(matches!(tool, Tool::Bash { .. }));
+        assert_eq!(tool.to_canonical().1, input);
+    }
 }
 
 /// One find/replace within a [`Tool::MultiEdit`].

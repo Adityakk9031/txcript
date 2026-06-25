@@ -9,7 +9,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::common::{Meta, Message};
+use crate::common::{Message, Meta};
 use crate::error::Result;
 
 /// A transcript in some representation `H`.

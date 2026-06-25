@@ -5,7 +5,7 @@
 //! [`Common`](crate::Common), and its [`Store`](crate::Store). They are added
 //! one at a time; the core compiles with none of them present.
 
-// pub mod claude_code;
+pub mod claude_code;
 // pub mod codex;
 // pub mod opencode;
 // pub mod pi;

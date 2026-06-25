@@ -1,0 +1,637 @@
+//! Claude Code: `~/.claude/projects/<encoded-cwd>/<session>.jsonl`.
+//!
+//! Claude's on-disk payload is already the Anthropic Messages shape, so the
+//! codec is close to the identity — it is the reference every other harness
+//! normalizes toward. Each line is one [`Record`]; user/assistant lines carry
+//! an [`ApiMessage`] whose `content` is a string or an array of Anthropic
+//! blocks. Non-message lines (summaries, titles, snapshots) are preserved
+//! verbatim in [`Record::Other`] so native ↔ disk stays lossless even though
+//! the codec ignores them.
+
+use std::collections::HashMap;
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, SecondsFormat, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use uuid::Uuid;
+
+use crate::common::{Block, ImageSource, Message, Meta, Role, StopReason, Tool, ToolOutput, Usage};
+use crate::error::{Error, Result};
+use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, Transcript};
+
+/// The Claude Code harness marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaudeCode;
+
+impl Harness for ClaudeCode {
+    const NAME: &'static str = "claude_code";
+    type Body = Vec<Record>;
+}
+
+// ── native records ─────────────────────────────────────────────────────
+
+/// One JSONL line. Known line types are typed; anything else is kept whole in
+/// [`Record::Other`] so the file round-trips without loss.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Record {
+    Summary(SummaryLine),
+    User(EntryLine),
+    Assistant(EntryLine),
+    Other(Value),
+}
+
+/// A `user` or `assistant` line: the per-line envelope plus the wrapped
+/// Anthropic message. Unknown envelope keys collect in `extra`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntryLine {
+    #[serde(
+        rename = "parentUuid",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parent_uuid: Option<String>,
+    pub uuid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    #[serde(rename = "sessionId", default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(rename = "gitBranch", default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub message: ApiMessage,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// A `summary` line.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SummaryLine {
+    pub summary: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// The wrapped Anthropic message. `content` is preserved as raw JSON (string or
+/// block array); the codec is what turns it into typed [`Block`]s.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    pub content: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Value>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+// Lossless typed <-> Value: classify on the `type` tag, route to a typed line,
+// fall back to `Other(Value)` for anything unrecognized or malformed.
+impl From<Value> for Record {
+    fn from(v: Value) -> Self {
+        match v.get("type").and_then(Value::as_str) {
+            Some("summary") => serde_json::from_value(v.clone())
+                .map(Record::Summary)
+                .unwrap_or(Record::Other(v)),
+            Some("user") => serde_json::from_value(v.clone())
+                .map(Record::User)
+                .unwrap_or(Record::Other(v)),
+            Some("assistant") => serde_json::from_value(v.clone())
+                .map(Record::Assistant)
+                .unwrap_or(Record::Other(v)),
+            _ => Record::Other(v),
+        }
+    }
+}
+
+impl From<Record> for Value {
+    fn from(r: Record) -> Self {
+        fn tagged(line: impl Serialize, ty: &str) -> Value {
+            let mut v = serde_json::to_value(line).unwrap_or(Value::Null);
+            if let Value::Object(obj) = &mut v {
+                obj.insert("type".into(), Value::String(ty.into()));
+            }
+            v
+        }
+        match r {
+            Record::Summary(s) => tagged(s, "summary"),
+            Record::User(e) => tagged(e, "user"),
+            Record::Assistant(e) => tagged(e, "assistant"),
+            Record::Other(v) => v,
+        }
+    }
+}
+
+impl Serialize for Record {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        Value::from(self.clone()).serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Record {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Ok(Record::from(Value::deserialize(d)?))
+    }
+}
+
+// ── codec ──────────────────────────────────────────────────────────────
+
+impl Codec for ClaudeCode {
+    fn to_common(transcript: &Transcript<Self>) -> Result<Transcript<Common>> {
+        let fallback_ts = transcript.meta.timestamp;
+        let mut messages = Vec::new();
+        for record in &transcript.body {
+            let (role, entry) = match record {
+                Record::User(e) => (Role::User, e),
+                Record::Assistant(e) => (Role::Assistant, e),
+                // Summaries, titles, snapshots carry no conversational turn.
+                _ => continue,
+            };
+            let content = parse_blocks(&entry.message.content);
+            if content.is_empty() {
+                continue;
+            }
+            let timestamp = entry
+                .timestamp
+                .as_deref()
+                .and_then(parse_ts)
+                .unwrap_or(fallback_ts);
+            messages.push(Message {
+                role,
+                content,
+                timestamp,
+                model: entry.message.model.clone(),
+                stop_reason: entry.message.stop_reason.as_deref().map(parse_stop_reason),
+                usage: entry.message.usage.as_ref().and_then(parse_usage),
+            });
+        }
+        Ok(Transcript::new(transcript.meta.clone(), messages))
+    }
+
+    fn from_common(transcript: &Transcript<Common>) -> Result<Transcript<Self>> {
+        let meta = &transcript.meta;
+        let session_id = if meta.id.is_empty() {
+            Uuid::new_v4().to_string()
+        } else {
+            meta.id.clone()
+        };
+        let mut records = Vec::with_capacity(transcript.body.len() + 1);
+
+        // A leading summary gives `claude --resume` a friendly title.
+        if let Some(title) = meta.title.as_deref().filter(|t| !t.is_empty()) {
+            records.push(Record::Summary(SummaryLine {
+                summary: title.to_string(),
+                extra: Map::from_iter([(
+                    "leafUuid".into(),
+                    Value::String(entry_uuid(&session_id, usize::MAX)),
+                )]),
+            }));
+        }
+
+        let mut parent_uuid: Option<String> = None;
+        for (i, msg) in transcript.body.iter().enumerate() {
+            let uuid = entry_uuid(&session_id, i);
+            let api = ApiMessage {
+                role: Some(role_str(msg.role).to_string()),
+                content: serialize_blocks(&msg.content),
+                model: msg.model.clone(),
+                stop_reason: msg.stop_reason.as_ref().map(stop_reason_str),
+                usage: msg.usage.as_ref().map(serialize_usage),
+                extra: Map::new(),
+            };
+            let entry = EntryLine {
+                parent_uuid: parent_uuid.clone(),
+                uuid: uuid.clone(),
+                timestamp: Some(msg.timestamp.to_rfc3339_opts(SecondsFormat::Millis, true)),
+                session_id: Some(session_id.clone()),
+                cwd: meta.cwd.clone(),
+                git_branch: meta.git_branch.clone(),
+                version: meta.cli_version.clone(),
+                message: api,
+                extra: Map::new(),
+            };
+            records.push(match msg.role {
+                Role::User => Record::User(entry),
+                Role::Assistant => Record::Assistant(entry),
+            });
+            parent_uuid = Some(uuid);
+        }
+
+        Ok(Transcript::new(meta.clone(), records))
+    }
+}
+
+// ── store ──────────────────────────────────────────────────────────────
+
+/// Reads and writes Claude Code sessions under a projects root (default
+/// `~/.claude/projects`).
+#[derive(Debug, Clone)]
+pub struct ClaudeStore {
+    pub root: PathBuf,
+}
+
+impl ClaudeStore {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// The default projects root, `~/.claude/projects`.
+    pub fn default_root() -> Option<Self> {
+        dirs_home().map(|h| Self::new(h.join(".claude").join("projects")))
+    }
+
+    fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                // Subagent and tool-result side-files aren't top-level sessions.
+                if name == "subagents" || name == "tool-results" {
+                    continue;
+                }
+                Self::collect_jsonl(&path, out);
+            } else if path.extension().is_some_and(|e| e == "jsonl") {
+                out.push(path);
+            }
+        }
+    }
+}
+
+impl Store for ClaudeStore {
+    type H = ClaudeCode;
+    type Ref = PathBuf;
+
+    fn discover(&self) -> Result<Vec<Discovered<PathBuf>>> {
+        if !self.root.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut files = Vec::new();
+        Self::collect_jsonl(&self.root, &mut files);
+        let mut out = Vec::new();
+        for path in files {
+            let Ok(records) = read_records(&path) else {
+                continue;
+            };
+            let meta = meta_from_records(&records, &path);
+            out.push(Discovered {
+                meta,
+                reference: path,
+            });
+        }
+        Ok(out)
+    }
+
+    fn load(&self, reference: &PathBuf) -> Result<Transcript<ClaudeCode>> {
+        let records = read_records(reference)?;
+        let meta = meta_from_records(&records, reference);
+        Ok(Transcript::new(meta, records))
+    }
+
+    fn save(&self, transcript: &Transcript<ClaudeCode>) -> Result<Saved<PathBuf>> {
+        let cwd = transcript.meta.cwd.as_deref().unwrap_or_default();
+        let dir = self.root.join(encode_project_dir(cwd));
+        fs::create_dir_all(&dir)?;
+        let id = transcript.meta.id.clone();
+        let path = dir.join(format!("{id}.jsonl"));
+        let mut file = fs::File::create(&path)?;
+        for record in &transcript.body {
+            let line = serde_json::to_string(record)?;
+            writeln!(file, "{line}")?;
+        }
+        Ok(Saved {
+            id,
+            reference: path,
+        })
+    }
+
+    fn fingerprints(&self, refs: &[PathBuf]) -> Result<HashMap<String, String>> {
+        let mut out = HashMap::with_capacity(refs.len());
+        for path in refs {
+            out.insert(path.to_string_lossy().into_owned(), file_fingerprint(path));
+        }
+        Ok(out)
+    }
+}
+
+// ── block <-> value ────────────────────────────────────────────────────
+
+fn parse_blocks(content: &Value) -> Vec<Block> {
+    match content {
+        Value::String(s) => {
+            if s.is_empty() {
+                Vec::new()
+            } else {
+                vec![Block::Text { text: s.clone() }]
+            }
+        }
+        Value::Array(arr) => arr.iter().filter_map(parse_block).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_block(v: &Value) -> Option<Block> {
+    match v.get("type").and_then(Value::as_str)? {
+        "text" => Some(Block::Text {
+            text: v.get("text")?.as_str()?.to_string(),
+        }),
+        "thinking" => Some(Block::Thinking {
+            text: v.get("thinking")?.as_str()?.to_string(),
+            signature: v.get("signature").and_then(Value::as_str).map(String::from),
+            encrypted: None,
+        }),
+        "tool_use" => {
+            let id = v.get("id")?.as_str()?.to_string();
+            let name = v.get("name")?.as_str()?;
+            let input = v.get("input").cloned().unwrap_or(Value::Object(Map::new()));
+            Some(Block::ToolUse {
+                id,
+                tool: Tool::from_canonical(name, input),
+            })
+        }
+        "tool_result" => Some(Block::ToolResult {
+            tool_use_id: v.get("tool_use_id")?.as_str()?.to_string(),
+            content: parse_tool_output(v.get("content")),
+            is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+        }),
+        "image" => {
+            let source = v.get("source")?;
+            Some(Block::Image {
+                source: ImageSource {
+                    source_type: source
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("base64")
+                        .to_string(),
+                    media_type: source.get("media_type")?.as_str()?.to_string(),
+                    data: source.get("data")?.as_str()?.to_string(),
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
+fn serialize_blocks(blocks: &[Block]) -> Value {
+    Value::Array(blocks.iter().map(serialize_block).collect())
+}
+
+fn serialize_block(block: &Block) -> Value {
+    match block {
+        Block::Text { text } => serde_json::json!({"type": "text", "text": text}),
+        Block::Thinking {
+            text, signature, ..
+        } => {
+            let mut obj = serde_json::json!({"type": "thinking", "thinking": text});
+            if let Some(sig) = signature {
+                obj["signature"] = Value::String(sig.clone());
+            }
+            obj
+        }
+        Block::ToolUse { id, tool } => {
+            let (name, input) = tool.to_canonical();
+            serde_json::json!({"type": "tool_use", "id": id, "name": name, "input": input})
+        }
+        Block::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
+            let mut obj = serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": serialize_tool_output(content),
+            });
+            if *is_error {
+                obj["is_error"] = Value::Bool(true);
+            }
+            obj
+        }
+        Block::Image { source } => serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": source.source_type,
+                "media_type": source.media_type,
+                "data": source.data,
+            },
+        }),
+    }
+}
+
+fn parse_tool_output(content: Option<&Value>) -> ToolOutput {
+    match content {
+        Some(Value::String(s)) => ToolOutput::Text(s.clone()),
+        Some(other) => ToolOutput::Json(other.clone()),
+        None => ToolOutput::Text(String::new()),
+    }
+}
+
+fn serialize_tool_output(out: &ToolOutput) -> Value {
+    match out {
+        ToolOutput::Text(s) => Value::String(s.clone()),
+        ToolOutput::Json(v) => v.clone(),
+    }
+}
+
+fn parse_usage(v: &Value) -> Option<Usage> {
+    Some(Usage {
+        input_tokens: v.get("input_tokens")?.as_u64()?,
+        output_tokens: v.get("output_tokens")?.as_u64()?,
+        cache_read_input_tokens: v.get("cache_read_input_tokens").and_then(Value::as_u64),
+        cache_creation_input_tokens: v.get("cache_creation_input_tokens").and_then(Value::as_u64),
+    })
+}
+
+fn serialize_usage(u: &Usage) -> Value {
+    let mut obj = serde_json::json!({
+        "input_tokens": u.input_tokens,
+        "output_tokens": u.output_tokens,
+    });
+    if let Some(read) = u.cache_read_input_tokens {
+        obj["cache_read_input_tokens"] = read.into();
+    }
+    if let Some(write) = u.cache_creation_input_tokens {
+        obj["cache_creation_input_tokens"] = write.into();
+    }
+    obj
+}
+
+// Claude's stop_reason strings are the canonical Anthropic set.
+fn parse_stop_reason(s: &str) -> StopReason {
+    match s {
+        "end_turn" => StopReason::EndTurn,
+        "tool_use" => StopReason::ToolUse,
+        "max_tokens" => StopReason::MaxTokens,
+        "stop_sequence" => StopReason::StopSequence,
+        other => StopReason::Other(other.to_string()),
+    }
+}
+
+fn stop_reason_str(r: &StopReason) -> String {
+    match r {
+        StopReason::EndTurn => "end_turn".into(),
+        StopReason::ToolUse => "tool_use".into(),
+        StopReason::MaxTokens => "max_tokens".into(),
+        StopReason::StopSequence => "stop_sequence".into(),
+        StopReason::Aborted => "aborted".into(),
+        StopReason::Error => "error".into(),
+        StopReason::Other(s) => s.clone(),
+    }
+}
+
+// ── helpers ────────────────────────────────────────────────────────────
+
+fn role_str(role: Role) -> &'static str {
+    match role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+    }
+}
+
+fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
+    s.parse::<DateTime<Utc>>().ok()
+}
+
+/// Deterministic per-entry uuid, so `from_common` is a pure function of the
+/// transcript (no randomness, reproducible conversions and tests).
+fn entry_uuid(session_id: &str, index: usize) -> String {
+    const NS: Uuid = Uuid::from_bytes([
+        0x9f, 0x0d, 0x98, 0x36, 0x9e, 0xe7, 0x4c, 0x62, 0x83, 0xb4, 0xfb, 0x8e, 0x01, 0x36, 0x5c,
+        0x9f,
+    ]);
+    Uuid::new_v5(&NS, format!("{session_id}:{index}").as_bytes()).to_string()
+}
+
+fn read_records(path: &Path) -> Result<Vec<Record>> {
+    let file = fs::File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut records = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        // A single corrupt line shouldn't sink the whole session.
+        if let Ok(value) = serde_json::from_str::<Value>(&line) {
+            records.push(Record::from(value));
+        }
+    }
+    Ok(records)
+}
+
+fn meta_from_records(records: &[Record], path: &Path) -> Meta {
+    let mut meta = Meta {
+        id: String::new(),
+        timestamp: Utc::now(),
+        cwd: None,
+        git_branch: None,
+        title: None,
+        cli_version: None,
+        model: None,
+    };
+    let mut summary: Option<String> = None;
+    let mut custom_title: Option<String> = None;
+    let mut earliest: Option<DateTime<Utc>> = None;
+
+    for record in records {
+        match record {
+            Record::User(e) => {
+                if meta.id.is_empty() && e.session_id.is_some() {
+                    meta.id = e.session_id.clone().unwrap();
+                }
+                meta.cwd = meta.cwd.take().or_else(|| e.cwd.clone());
+                meta.git_branch = meta.git_branch.take().or_else(|| e.git_branch.clone());
+                meta.cli_version = meta.cli_version.take().or_else(|| e.version.clone());
+                note_ts(&mut earliest, e.timestamp.as_deref());
+            }
+            Record::Assistant(e) => {
+                if meta.model.is_none() {
+                    meta.model = e.message.model.clone();
+                }
+                note_ts(&mut earliest, e.timestamp.as_deref());
+            }
+            Record::Summary(s) => {
+                if summary.is_none() {
+                    summary = Some(s.summary.clone());
+                }
+            }
+            Record::Other(v) => match v.get("type").and_then(Value::as_str) {
+                Some("custom-title") => {
+                    custom_title = v
+                        .get("customTitle")
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                }
+                Some("agent-name") if custom_title.is_none() => {
+                    custom_title = v.get("agentName").and_then(Value::as_str).map(String::from);
+                }
+                _ => {}
+            },
+        }
+    }
+
+    if meta.id.is_empty() {
+        meta.id = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+    }
+    if let Some(ts) = earliest {
+        meta.timestamp = ts;
+    }
+    meta.title = custom_title.or(summary);
+    meta
+}
+
+fn note_ts(earliest: &mut Option<DateTime<Utc>>, ts: Option<&str>) {
+    if let Some(parsed) = ts.and_then(parse_ts)
+        && earliest.is_none_or(|e| parsed < e)
+    {
+        *earliest = Some(parsed);
+    }
+}
+
+/// Claude's project-dir encoding: every `/` and `.` becomes `-`.
+fn encode_project_dir(path: &str) -> String {
+    path.chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect()
+}
+
+fn file_fingerprint(path: &Path) -> String {
+    let Ok(meta) = fs::metadata(path) else {
+        return String::new();
+    };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{mtime}:{}", meta.len())
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+// Surface the canonical-name guard as a typed error for callers that care.
+#[allow(dead_code)]
+fn unconvertible(detail: impl Into<String>) -> Error {
+    Error::Unconvertible {
+        harness: ClaudeCode::NAME,
+        detail: detail.into(),
+    }
+}

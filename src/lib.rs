@@ -36,5 +36,7 @@ pub use common::{
 };
 pub use error::{Error, Result};
 pub use transcript::{
-    convert, Codec, Common, Discovered, Harness, HarnessId, Saved, Store, Transcript,
+    Codec, Common, Discovered, Harness, HarnessId, Saved, Store, Transcript, convert,
 };
+
+pub use harness::claude_code::{ClaudeCode, ClaudeStore};
