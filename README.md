@@ -86,8 +86,8 @@ txcript continue <id>                    # continue <id>, then launch its harnes
 `continue` hands the terminal to the harness when done (on Unix it `exec`s).
 Same-harness continues resume the original in place; `--with` re-synthesizes
 into another harness's native format first. Override the launch command per
-harness with `TXCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template), e.g.
-`TXCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
+harness with `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template), e.g.
+`TRANSCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
 
 ## Use as a WASM module (Bun / Node)
 

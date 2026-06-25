@@ -13,7 +13,7 @@
 //!
 //! By default `continue` hands the terminal to the harness (on Unix it `exec`s,
 //! replacing this process). The resume command is overridable per harness via
-//! `TXCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template).
+//! `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template).
 //!
 //! `<harness>` is one of: claude_code, codex, opencode, pi, campfire.
 
@@ -180,10 +180,10 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
 }
 
 /// The command that resumes a session in its harness, overridable per harness
-/// via `TXCRIPT_<HARNESS>_RESUME_CMD` (a template; `{id}` is substituted).
+/// via `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a template; `{id}` is substituted).
 fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
     let key = format!(
-        "TXCRIPT_{}_RESUME_CMD",
+        "TRANSCRIPT_{}_RESUME_CMD",
         harness.as_str().to_ascii_uppercase()
     );
     if let Ok(template) = std::env::var(&key) {
