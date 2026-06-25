@@ -41,4 +41,5 @@ pub use transcript::{
 
 pub use harness::campfire::{Campfire, CampfireStore};
 pub use harness::claude_code::{ClaudeCode, ClaudeStore};
+pub use harness::codex::{Codex, CodexStore};
 pub use harness::pi::{Pi, PiStore};
