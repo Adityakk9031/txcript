@@ -14,6 +14,10 @@ uuid = { version = "1.23.4", features = ["v4", "v5"] }
 [dev-dependencies]
 tempfile = "3.27.0"
 
+[[bin]]
+name = "transcript"
+path = "src/bin/cli.rs"
+
 [features]
 default = ["opencode"]
 # The OpenCode harness store reads OpenCode's SQLite database. The OpenCode
