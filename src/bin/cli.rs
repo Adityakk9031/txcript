@@ -1,10 +1,12 @@
 //! A small CLI over the `transcript` crate — the offline half of replay's
 //! `continue --local`: discover the AI coding sessions already on this machine
-//! and convert one from its harness into another's native, resumable format.
+//! and continue one in any harness, writing its native, resumable format.
 //!
 //! ```text
 //! transcript list                          # all local sessions, every harness
-//! transcript convert <id> --to <harness>   # convert <id> into <harness>'s format
+//! transcript continue <id>                 # continue <id> in its own harness
+//!     [--on <harness>]                      #   ...or cross over into <harness>
+//!     [--from <harness>]                    #   scope the id lookup to one harness
 //!     [--out <dir>]                         #   write under <dir> instead of the live root
 //! ```
 //!
@@ -42,7 +44,7 @@ fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("list") => cmd_list(),
-        Some("convert") => cmd_convert(&args[1..]),
+        Some("continue") => cmd_continue(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             usage();
             Ok(())
@@ -56,10 +58,11 @@ fn run() -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "transcript — convert local AI coding sessions between harnesses\n\n\
+        "transcript — continue local AI coding sessions in any harness\n\n\
          usage:\n  \
          transcript list\n  \
-         transcript convert <id> --to <harness> [--out <dir>]\n\n\
+         transcript continue <id> [--on <harness>] [--from <harness>] [--out <dir>]\n\n\
+         <id> continues in its own harness; --on crosses over into another.\n\
          harnesses: claude_code, codex, opencode, pi, campfire"
     );
 }
@@ -87,18 +90,28 @@ fn cmd_list() -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_convert(args: &[String]) -> Result<(), String> {
+fn cmd_continue(args: &[String]) -> Result<(), String> {
+    let parse_harness = |v: Option<&String>, flag: &str| -> Result<HarnessId, String> {
+        v.ok_or_else(|| format!("{flag} needs a harness"))?
+            .parse()
+            .map_err(|e: transcript::Error| e.to_string())
+    };
+
     let mut id: Option<String> = None;
-    let mut target: Option<HarnessId> = None;
+    let mut on: Option<HarnessId> = None;
+    let mut from: Option<HarnessId> = None;
     let mut out: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--to" => {
+            "--on" => {
                 i += 1;
-                let v = args.get(i).ok_or("--to needs a harness")?;
-                target = Some(v.parse().map_err(|e: transcript::Error| e.to_string())?);
+                on = Some(parse_harness(args.get(i), "--on")?);
+            }
+            "--from" => {
+                i += 1;
+                from = Some(parse_harness(args.get(i), "--from")?);
             }
             "--out" => {
                 i += 1;
@@ -111,26 +124,46 @@ fn cmd_convert(args: &[String]) -> Result<(), String> {
     }
 
     let id = id.ok_or("missing session id (try `transcript list`)")?;
-    let target = target.ok_or("missing --to <harness>")?;
 
-    // Locate the session by exact id or title across every harness.
+    // Locate the session by exact id or title, optionally scoped to one harness.
     let sessions = discover_all();
     let found = sessions
         .iter()
-        .find(|s| s.meta.id == id || s.meta.title.as_deref() == Some(id.as_str()))
-        .ok_or_else(|| format!("no local session matches `{id}` (try `transcript list`)"))?;
+        .find(|s| {
+            from.is_none_or(|h| s.harness == h)
+                && (s.meta.id == id || s.meta.title.as_deref() == Some(id.as_str()))
+        })
+        .ok_or_else(|| match from {
+            Some(h) => format!("no {h} session matches `{id}` (try `transcript list`)"),
+            None => format!("no local session matches `{id}` (try `transcript list`)"),
+        })?;
+
+    // Default to continuing in the source's own harness.
+    let target = on.unwrap_or(found.harness);
 
     let common = load_common(found)?;
     if found.harness == target {
-        eprintln!("note: source and target are both {target}; converting through Common anyway");
+        eprintln!("continuing {target} session {}", found.meta.id);
     } else {
-        eprintln!("converting {} -> {target}", found.harness);
+        eprintln!("continuing {} session as {target}", found.harness);
     }
 
     let (new_id, location) = save_target(target, &common, out.as_deref())?;
     println!("wrote {target} session {new_id}");
     println!("  at {location}");
+    println!("  resume with: {}", resume_hint(target, &new_id));
     Ok(())
+}
+
+/// Best-effort command to resume a freshly written session in its harness.
+fn resume_hint(harness: HarnessId, id: &str) -> String {
+    match harness {
+        HarnessId::ClaudeCode => format!("claude --resume {id}"),
+        HarnessId::Codex => format!("codex resume {id}"),
+        HarnessId::Pi => format!("pi --session {id}"),
+        HarnessId::Campfire => format!("campfire --session {id}"),
+        HarnessId::OpenCode => format!("opencode --session {id}"),
+    }
 }
 
 // ── discover / load / save across harnesses ────────────────────────────
