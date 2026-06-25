@@ -1,7 +1,7 @@
 # transcript
 
-`transcript` is a small Rust crate for transforming AI coding-agent session
-transcripts between harness formats.
+`transcript` transforms AI coding-agent session transcripts between harness
+formats.
 
 Each harness has its own native transcript shape. This crate maps those shapes
 through a typed common model, then re-emits them for another harness. Native
@@ -9,60 +9,159 @@ load/save stays byte-lossless; cross-harness transformation preserves the
 semantic conversation: messages, reasoning, tool calls, tool results, images,
 metadata, and usage where available.
 
-Supported harnesses:
+Supported harnesses (string ids in parentheses, used by the CLI and WASM):
 
-- Claude Code
-- Codex
-- OpenCode
-- pi
-- Campfire
+- Claude Code (`claude_code`)
+- Codex (`codex`)
+- OpenCode (`opencode`)
+- pi (`pi`)
+- Campfire (`campfire`)
 
-## Example
+It ships three ways: a **Rust library**, a **CLI**, and a **WASM module** for
+Bun / Node / the browser.
 
-```rust
-use transcript::{ClaudeCode, Codex, convert};
+## Use as a library
 
-let codex_session = convert::<ClaudeCode, Codex>(&claude_session)?;
+```toml
+[dependencies]
+transcript = { git = "https://github.com/NishantJoshi00/transcript" }
+# Drops the OpenCode SQLite store (rusqlite); the OpenCode codec stays available.
+# transcript = { git = "...", default-features = false }
 ```
 
-## CLI
+Three layers, smallest to largest:
 
-The `transcript` binary discovers local sessions and continues one in any
-harness — the offline half of replay's `continue --local`:
+- `Codec` — `to_common` / `from_common` per harness; `convert::<A, B>` chains
+  them through the canonical model.
+- `TextCodec` — `from_text` / `to_text`: parse/render a harness's native session
+  text, no I/O.
+- `Store` — discover/load/save against a real backend (session directories, or
+  OpenCode's SQLite DB).
+
+Convert in memory (no filesystem):
+
+```rust
+use transcript::{ClaudeCode, Codex, Codec, TextCodec, convert};
+
+let claude = ClaudeCode::from_text(jsonl_text)?;     // Transcript<ClaudeCode>
+let codex = convert::<ClaudeCode, Codex>(&claude)?;  // Transcript<Codex>
+let codex_text = Codex::to_text(&codex)?;            // native rollout JSONL
+```
+
+Or go through disk with a `Store`:
+
+```rust
+use transcript::{ClaudeStore, CodexStore, Codex, Store, convert};
+
+let store = ClaudeStore::default_root().expect("home dir");
+let found = store.discover()?;                       // cheap metadata scan
+let claude = store.load(&found[0].reference)?;       // Transcript<ClaudeCode>
+
+let codex = convert::<_, Codex>(&claude)?;
+CodexStore::default_root().expect("home dir").save(&codex)?;  // resumable on disk
+```
+
+The canonical model is `Transcript<Common>` — `Meta` + `Vec<Message>`, where a
+`Message` holds typed `Block`s (`Text`, `Thinking`, `ToolUse`, `ToolResult`,
+`Image`) and a typed `Tool` enum.
+
+## Use as a CLI
 
 ```sh
-transcript list                                   # local sessions, every harness
-transcript continue <id> [--with <harness>]       # continue, then launch the harness
+cargo install --git https://github.com/NishantJoshi00/transcript
+```
+
+It discovers local sessions and continues one in any harness — the offline half
+of replay's `continue --local`:
+
+```sh
+transcript list                          # local sessions across every harness
+transcript continue <id>                 # continue <id>, then launch its harness
+    [--with <harness>]                    #   ...continuing in <harness> instead
+    [--from <harness>]                    #   scope the id lookup to one harness
+    [--out <dir>]                         #   write under <dir>; implies --no-resume
+    [--no-resume]                         #   write the session but don't launch
 ```
 
 `continue` hands the terminal to the harness when done (on Unix it `exec`s).
-`--out <dir>` / `--no-resume` write the session without launching.
+Same-harness continues resume the original in place; `--with` re-synthesizes
+into another harness's native format first. Override the launch command per
+harness with `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template), e.g.
+`TRANSCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
 
-## WASM (Bun / Node / browser)
+## Use as a WASM module (Bun / Node)
 
-The pure codec compiles to WebAssembly — the JS host owns I/O and calls in for
-the transformation. The `Store` layer (filesystem, SQLite, subprocess) is native
-and excluded from the WASM build.
+The pure codec compiles to WebAssembly; the JS host owns all I/O and calls in
+for the transformation. The `Store` layer (filesystem, SQLite, subprocess) stays
+native and is excluded from the WASM build.
+
+### Install from git
 
 ```sh
-cargo build --lib --release --target wasm32-unknown-unknown \
-    --no-default-features --features wasm
-wasm-bindgen target/wasm32-unknown-unknown/release/transcript.wasm \
-    --out-dir pkg --target nodejs
+bun add git+ssh://git@github.com/NishantJoshi00/transcript.git
 ```
+
+`prepare` builds the wasm on install, so the machine needs the Rust toolchain.
+Run the one-time toolchain setup, then it builds automatically:
+
+```sh
+# once per machine: wasm32 target + matching wasm-bindgen-cli
+bun --cwd node_modules/transcript run setup
+```
+
+(Bun may ask you to trust the dependency before it runs `prepare`; add
+`"transcript"` to `trustedDependencies` in your `package.json`.)
+
+### Or build from a local checkout
+
+```sh
+git clone https://github.com/NishantJoshi00/transcript.git
+cd transcript
+bun run setup        # once: wasm target + wasm-bindgen-cli
+bun run build        # produces ./pkg
+```
+
+Then import by path (e.g. as a sibling of your project), and wire it as a
+prebuild step:
+
+```jsonc
+// your project's package.json
+{
+  "scripts": {
+    "build:transcript": "cd ../transcript && bun run build",
+    "prebuild": "bun run build:transcript"
+  }
+}
+```
+
+### API
 
 ```ts
-import { convert, toCommon, harnesses } from "./pkg/transcript.js";
+import { convert, toCommon, fromCommon, harnesses } from "transcript";
+// (or "../transcript/pkg/transcript.js" for a local checkout)
+import { readFileSync, writeFileSync } from "node:fs";
 
-const claude = convert(codexJsonl, "codex", "claude_code"); // native -> native
-const common = JSON.parse(toCommon(codexJsonl, "codex"));    // { meta, messages }
+const input = readFileSync("rollout.jsonl", "utf8");
+
+// native -> native (e.g. a Codex rollout into Claude Code's JSONL)
+writeFileSync("session.jsonl", convert(input, "codex", "claude_code"));
+
+// canonical view, and back
+const common = JSON.parse(toCommon(input, "codex"));   // { meta, messages }
+const pi = fromCommon(JSON.stringify(common), "pi");
+
+harnesses(); // ["claude_code","codex","opencode","pi","campfire"]
 ```
 
-Text-in / text-out: `input` is a harness's native session text (JSONL, or the
-`opencode export` JSON for opencode); the result is the target's native text.
+Text-in / text-out: `input` is a harness's native session text (JSONL for
+claude_code/codex/pi/campfire, the `opencode export` JSON for opencode); the
+result is the target's native text. Invalid harness names or unparseable input
+throw a JS `Error`.
 
 ## Development
 
 ```sh
-cargo test
+cargo test                                          # native suite
+cargo test --no-default-features                    # without the SQLite store
+bun run build && bun examples/convert.ts <file> <from> <to>
 ```
