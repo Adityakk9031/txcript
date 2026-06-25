@@ -5,8 +5,8 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use transcript::harness::opencode::Export;
-use transcript::{
+use txcript::harness::opencode::Export;
+use txcript::{
     Block, Codec, Common, Message, Meta, OpenCode, Role, StopReason, Tool, ToolOutput, Transcript,
     Usage,
 };

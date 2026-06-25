@@ -1,10 +1,10 @@
-//! A small CLI over the `transcript` crate — the offline half of replay's
+//! A small CLI over the `txcript` crate — the offline half of replay's
 //! `continue --local`: discover the AI coding sessions already on this machine
 //! and continue one in any harness, writing its native, resumable format.
 //!
 //! ```text
-//! transcript list                          # all local sessions, every harness
-//! transcript continue <id>                 # continue <id>, then launch the harness
+//! txcript list                          # all local sessions, every harness
+//! txcript continue <id>                 # continue <id>, then launch the harness
 //!     [--with <harness>]                    #   ...continuing in <harness> instead
 //!     [--from <harness>]                    #   scope the id lookup to one harness
 //!     [--out <dir>]                         #   write under <dir>; implies --no-resume
@@ -13,13 +13,13 @@
 //!
 //! By default `continue` hands the terminal to the harness (on Unix it `exec`s,
 //! replacing this process). The resume command is overridable per harness via
-//! `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template).
+//! `TXCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template).
 //!
 //! `<harness>` is one of: claude_code, codex, opencode, pi, campfire.
 
 use std::path::PathBuf;
 
-use transcript::{
+use txcript::{
     Campfire, CampfireStore, ClaudeCode, ClaudeStore, Codec, Codex, CodexStore, Common, HarnessId,
     Meta, Pi, PiStore, Store, Transcript,
 };
@@ -63,10 +63,10 @@ fn run() -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "transcript — continue local AI coding sessions in any harness\n\n\
+        "txcript — continue local AI coding sessions in any harness\n\n\
          usage:\n  \
-         transcript list\n  \
-         transcript continue <id> [--with <harness>] [--from <harness>] [--out <dir>] [--no-resume]\n\n\
+         txcript list\n  \
+         txcript continue <id> [--with <harness>] [--from <harness>] [--out <dir>] [--no-resume]\n\n\
          continue launches the harness afterward; --with crosses into another,\n\
          --out/--no-resume write the session without launching.\n\
          harnesses: claude_code, codex, opencode, pi, campfire"
@@ -100,7 +100,7 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
     let parse_harness = |v: Option<&String>, flag: &str| -> Result<HarnessId, String> {
         v.ok_or_else(|| format!("{flag} needs a harness"))?
             .parse()
-            .map_err(|e: transcript::Error| e.to_string())
+            .map_err(|e: txcript::Error| e.to_string())
     };
 
     let mut id: Option<String> = None;
@@ -131,7 +131,7 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
         i += 1;
     }
 
-    let id = id.ok_or("missing session id (try `transcript list`)")?;
+    let id = id.ok_or("missing session id (try `txcript list`)")?;
 
     // Locate the session by exact id or title, optionally scoped to one harness.
     let sessions = discover_all();
@@ -142,8 +142,8 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
                 && (s.meta.id == id || s.meta.title.as_deref() == Some(id.as_str()))
         })
         .ok_or_else(|| match from {
-            Some(h) => format!("no {h} session matches `{id}` (try `transcript list`)"),
-            None => format!("no local session matches `{id}` (try `transcript list`)"),
+            Some(h) => format!("no {h} session matches `{id}` (try `txcript list`)"),
+            None => format!("no local session matches `{id}` (try `txcript list`)"),
         })?;
 
     // Default to continuing in the source's own harness.
@@ -180,10 +180,10 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
 }
 
 /// The command that resumes a session in its harness, overridable per harness
-/// via `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a template; `{id}` is substituted).
+/// via `TXCRIPT_<HARNESS>_RESUME_CMD` (a template; `{id}` is substituted).
 fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
     let key = format!(
-        "TRANSCRIPT_{}_RESUME_CMD",
+        "TXCRIPT_{}_RESUME_CMD",
         harness.as_str().to_ascii_uppercase()
     );
     if let Ok(template) = std::env::var(&key) {
@@ -279,7 +279,7 @@ fn discover_all() -> Vec<Found> {
     #[cfg(feature = "opencode")]
     {
         announce(HarnessId::OpenCode, out.len());
-        if let Some(store) = transcript::OpenCodeStore::default_db() {
+        if let Some(store) = txcript::OpenCodeStore::default_db() {
             for d in store.discover().unwrap_or_default() {
                 out.push(Found {
                     harness: HarnessId::OpenCode,
@@ -296,7 +296,7 @@ fn discover_all() -> Vec<Found> {
 }
 
 fn load_common(found: &Found) -> Result<Transcript<Common>, String> {
-    let err = |e: transcript::Error| e.to_string();
+    let err = |e: txcript::Error| e.to_string();
     match (&found.harness, &found.locator) {
         (HarnessId::ClaudeCode, Locator::Path(p)) => {
             let store = ClaudeStore::default_root().ok_or("no home directory")?;
@@ -316,8 +316,8 @@ fn load_common(found: &Found) -> Result<Transcript<Common>, String> {
         }
         #[cfg(feature = "opencode")]
         (HarnessId::OpenCode, Locator::Id(id)) => {
-            use transcript::OpenCode;
-            let store = transcript::OpenCodeStore::default_db().ok_or("no home directory")?;
+            use txcript::OpenCode;
+            let store = txcript::OpenCodeStore::default_db().ok_or("no home directory")?;
             OpenCode::to_common(&store.load(id).map_err(err)?).map_err(err)
         }
         _ => Err("unsupported source harness/locator combination".into()),
@@ -330,7 +330,7 @@ fn save_target(
     common: &Transcript<Common>,
     out: Option<&std::path::Path>,
 ) -> Result<(String, String), String> {
-    let err = |e: transcript::Error| e.to_string();
+    let err = |e: txcript::Error| e.to_string();
     match target {
         HarnessId::ClaudeCode => {
             let root = file_store_root(out, ClaudeStore::default_root().map(|s| s.root))?;
@@ -358,8 +358,8 @@ fn save_target(
 
 #[cfg(feature = "opencode")]
 fn save_opencode(common: &Transcript<Common>) -> Result<(String, String), String> {
-    use transcript::{OpenCode, OpenCodeStore};
-    let err = |e: transcript::Error| e.to_string();
+    use txcript::{OpenCode, OpenCodeStore};
+    let err = |e: txcript::Error| e.to_string();
     let store = OpenCodeStore::default_db().ok_or("no home directory")?;
     let native = OpenCode::from_common(common).map_err(err)?;
     let saved = store.save(&native).map_err(err)?;
@@ -381,7 +381,7 @@ fn file_store_root(
     }
 }
 
-fn describe<R: std::fmt::Debug>(saved: transcript::Saved<R>) -> Result<(String, String), String> {
+fn describe<R: std::fmt::Debug>(saved: txcript::Saved<R>) -> Result<(String, String), String> {
     Ok((saved.id, format!("{:?}", saved.reference)))
 }
 

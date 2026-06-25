@@ -1,6 +1,6 @@
-# transcript
+# txcript
 
-`transcript` transforms AI coding-agent session transcripts between harness
+`txcript` transforms AI coding-agent session transcripts between harness
 formats.
 
 Each harness has its own native transcript shape. This crate maps those shapes
@@ -24,9 +24,9 @@ Bun / Node / the browser.
 
 ```toml
 [dependencies]
-transcript = { git = "https://github.com/NishantJoshi00/transcript" }
+txcript = "0.1"
 # Drops the OpenCode SQLite store (rusqlite); the OpenCode codec stays available.
-# transcript = { git = "...", default-features = false }
+# txcript = { version = "0.1", default-features = false }
 ```
 
 Three layers, smallest to largest:
@@ -41,7 +41,7 @@ Three layers, smallest to largest:
 Convert in memory (no filesystem):
 
 ```rust
-use transcript::{ClaudeCode, Codex, Codec, TextCodec, convert};
+use txcript::{ClaudeCode, Codex, Codec, TextCodec, convert};
 
 let claude = ClaudeCode::from_text(jsonl_text)?;     // Transcript<ClaudeCode>
 let codex = convert::<ClaudeCode, Codex>(&claude)?;  // Transcript<Codex>
@@ -51,7 +51,7 @@ let codex_text = Codex::to_text(&codex)?;            // native rollout JSONL
 Or go through disk with a `Store`:
 
 ```rust
-use transcript::{ClaudeStore, CodexStore, Codex, Store, convert};
+use txcript::{ClaudeStore, CodexStore, Codex, Store, convert};
 
 let store = ClaudeStore::default_root().expect("home dir");
 let found = store.discover()?;                       // cheap metadata scan
@@ -68,15 +68,15 @@ The canonical model is `Transcript<Common>` — `Meta` + `Vec<Message>`, where a
 ## Use as a CLI
 
 ```sh
-cargo install --git https://github.com/NishantJoshi00/transcript
+cargo install txcript        # installs the `txcript` binary
 ```
 
 It discovers local sessions and continues one in any harness — the offline half
 of replay's `continue --local`:
 
 ```sh
-transcript list                          # local sessions across every harness
-transcript continue <id>                 # continue <id>, then launch its harness
+txcript list                             # local sessions across every harness
+txcript continue <id>                    # continue <id>, then launch its harness
     [--with <harness>]                    #   ...continuing in <harness> instead
     [--from <harness>]                    #   scope the id lookup to one harness
     [--out <dir>]                         #   write under <dir>; implies --no-resume
@@ -86,8 +86,8 @@ transcript continue <id>                 # continue <id>, then launch its harnes
 `continue` hands the terminal to the harness when done (on Unix it `exec`s).
 Same-harness continues resume the original in place; `--with` re-synthesizes
 into another harness's native format first. Override the launch command per
-harness with `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template), e.g.
-`TRANSCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
+harness with `TXCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template), e.g.
+`TXCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
 
 ## Use as a WASM module (Bun / Node)
 
@@ -98,7 +98,7 @@ native and is excluded from the WASM build.
 ### Install from git
 
 ```sh
-bun add git+ssh://git@github.com/NishantJoshi00/transcript.git
+bun add git+ssh://git@github.com/NishantJoshi00/txcript.git
 ```
 
 `prepare` builds the wasm on install, so the machine needs the Rust toolchain.
@@ -106,17 +106,17 @@ Run the one-time toolchain setup, then it builds automatically:
 
 ```sh
 # once per machine: wasm32 target + matching wasm-bindgen-cli
-bun --cwd node_modules/transcript run setup
+bun --cwd node_modules/txcript run setup
 ```
 
 (Bun may ask you to trust the dependency before it runs `prepare`; add
-`"transcript"` to `trustedDependencies` in your `package.json`.)
+`"txcript"` to `trustedDependencies` in your `package.json`.)
 
 ### Or build from a local checkout
 
 ```sh
-git clone https://github.com/NishantJoshi00/transcript.git
-cd transcript
+git clone https://github.com/NishantJoshi00/txcript.git
+cd txcript
 bun run setup        # once: wasm target + wasm-bindgen-cli
 bun run build        # produces ./pkg
 ```
@@ -128,8 +128,8 @@ prebuild step:
 // your project's package.json
 {
   "scripts": {
-    "build:transcript": "cd ../transcript && bun run build",
-    "prebuild": "bun run build:transcript"
+    "build:txcript": "cd ../txcript && bun run build",
+    "prebuild": "bun run build:txcript"
   }
 }
 ```
@@ -137,8 +137,8 @@ prebuild step:
 ### API
 
 ```ts
-import { convert, toCommon, fromCommon, harnesses } from "transcript";
-// (or "../transcript/pkg/transcript.js" for a local checkout)
+import { convert, toCommon, fromCommon, harnesses } from "txcript";
+// (or "../txcript/pkg/txcript.js" for a local checkout)
 import { readFileSync, writeFileSync } from "node:fs";
 
 const input = readFileSync("rollout.jsonl", "utf8");

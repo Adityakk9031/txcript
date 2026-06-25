@@ -5,7 +5,7 @@
 //
 // e.g. bun examples/convert.ts ~/.codex/sessions/.../rollout-*.jsonl codex claude_code
 
-import { convert, toCommon, harnesses } from "../pkg/transcript.js";
+import { convert, toCommon, harnesses } from "../pkg/txcript.js";
 import { readFileSync } from "node:fs";
 
 const [file, from, to] = process.argv.slice(2);

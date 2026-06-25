@@ -9,7 +9,7 @@
 //! conversation does not. The signature below captures exactly that invariant.
 
 use chrono::{DateTime, Utc};
-use transcript::{
+use txcript::{
     Block, Campfire, ClaudeCode, Codec, Codex, Common, Message, Meta, OpenCode, Pi, Role, Tool,
     ToolOutput, Transcript, convert,
 };

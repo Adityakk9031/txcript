@@ -4,7 +4,7 @@
 //! codec fixpoint through Common.
 
 use chrono::{DateTime, Utc};
-use transcript::{
+use txcript::{
     Block, Codec, Codex, CodexStore, Common, Message, Meta, Role, Store, Tool, ToolOutput,
     Transcript, Usage,
 };

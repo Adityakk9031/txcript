@@ -1,7 +1,13 @@
 [package]
-name = "transcript"
+name = "txcript"
 version = "0.1.0"
 edition = "2024"
+description = "A typed intermediate representation for converting AI coding-agent session transcripts between harness formats (Claude Code, Codex, OpenCode, pi)."
+license = "Apache-2.0"
+repository = "https://github.com/NishantJoshi00/txcript"
+readme = "README.md"
+keywords = ["transcript", "claude", "codex", "agent", "wasm"]
+categories = ["command-line-utilities", "wasm"]
 
 [dependencies]
 chrono = { version = "0.4.45", features = ["serde"] }
@@ -16,11 +22,13 @@ wasm-bindgen = { version = "0.2.126", optional = true }
 tempfile = "3.27.0"
 
 # cdylib for the WASM/C-ABI output; rlib so the bin and tests still link it.
+# Library name follows the package: `use txcript::…`, WASM artifact `txcript.wasm`.
 [lib]
+name = "txcript"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "transcript"
+name = "txcript"
 path = "src/bin/cli.rs"
 
 [features]

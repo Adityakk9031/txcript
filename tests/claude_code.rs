@@ -7,7 +7,7 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use transcript::{
+use txcript::{
     Block, ClaudeCode, ClaudeStore, Codec, Common, Message, Meta, Role, StopReason, Store, Tool,
     ToolOutput, Transcript, Usage,
 };

@@ -3,7 +3,7 @@
 //! only stamped as a different harness.
 
 use serde_json::json;
-use transcript::{Block, Campfire, CampfireStore, Codec, Harness, Role, Store, Tool};
+use txcript::{Block, Campfire, CampfireStore, Codec, Harness, Role, Store, Tool};
 
 fn sample_jsonl() -> String {
     [

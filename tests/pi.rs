@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use transcript::{
+use txcript::{
     Block, Codec, Common, Message, Meta, Pi, PiStore, Role, StopReason, Store, Tool, ToolOutput,
     Transcript, Usage,
 };
