@@ -5,7 +5,7 @@
 //! ```text
 //! transcript list                          # all local sessions, every harness
 //! transcript continue <id>                 # continue <id> in its own harness
-//!     [--on <harness>]                      #   ...or cross over into <harness>
+//!     [--with <harness>]                    #   ...or cross over into <harness>
 //!     [--from <harness>]                    #   scope the id lookup to one harness
 //!     [--out <dir>]                         #   write under <dir> instead of the live root
 //! ```
@@ -61,8 +61,8 @@ fn usage() {
         "transcript — continue local AI coding sessions in any harness\n\n\
          usage:\n  \
          transcript list\n  \
-         transcript continue <id> [--on <harness>] [--from <harness>] [--out <dir>]\n\n\
-         <id> continues in its own harness; --on crosses over into another.\n\
+         transcript continue <id> [--with <harness>] [--from <harness>] [--out <dir>]\n\n\
+         <id> continues in its own harness; --with crosses over into another.\n\
          harnesses: claude_code, codex, opencode, pi, campfire"
     );
 }
@@ -98,16 +98,16 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
     };
 
     let mut id: Option<String> = None;
-    let mut on: Option<HarnessId> = None;
+    let mut with: Option<HarnessId> = None;
     let mut from: Option<HarnessId> = None;
     let mut out: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--on" => {
+            "--with" => {
                 i += 1;
-                on = Some(parse_harness(args.get(i), "--on")?);
+                with = Some(parse_harness(args.get(i), "--with")?);
             }
             "--from" => {
                 i += 1;
@@ -139,7 +139,7 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
         })?;
 
     // Default to continuing in the source's own harness.
-    let target = on.unwrap_or(found.harness);
+    let target = with.unwrap_or(found.harness);
 
     let common = load_common(found)?;
     if found.harness == target {
