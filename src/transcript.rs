@@ -1,0 +1,222 @@
+//! The generic [`Transcript<H>`] and the three traits that act on it:
+//! [`Harness`] (what representation a transcript is in), [`Codec`] (mapping a
+//! native representation to and from [`Common`]), and [`Store`] (procuring and
+//! persisting native transcripts against a real backend).
+
+use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
+
+use crate::common::{Meta, Message};
+use crate::error::Result;
+
+/// A transcript in some representation `H`.
+///
+/// `H` selects the body type: [`Common`] holds `Vec<Message>`, the canonical
+/// model; a harness marker holds that harness's faithful native records. `meta`
+/// is always the cross-harness [`Meta`]; harness-specific header detail lives
+/// inside `body`.
+pub struct Transcript<H: Harness = Common> {
+    pub meta: Meta,
+    pub body: H::Body,
+}
+
+impl<H: Harness> Transcript<H> {
+    pub fn new(meta: Meta, body: H::Body) -> Self {
+        Self { meta, body }
+    }
+}
+
+// Hand-written because deriving would wrongly demand `H: Clone`/`Debug`/`Eq`;
+// the bounds belong on the associated `Body`, not the marker `H`.
+impl<H: Harness> Clone for Transcript<H>
+where
+    H::Body: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            meta: self.meta.clone(),
+            body: self.body.clone(),
+        }
+    }
+}
+
+impl<H: Harness> fmt::Debug for Transcript<H>
+where
+    H::Body: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Transcript")
+            .field("harness", &H::NAME)
+            .field("meta", &self.meta)
+            .field("body", &self.body)
+            .finish()
+    }
+}
+
+impl<H: Harness> PartialEq for Transcript<H>
+where
+    H::Body: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.meta == other.meta && self.body == other.body
+    }
+}
+
+/// A transcript representation. Implemented by [`Common`] and by each harness
+/// marker. The marker is a zero-size type; the representation is its `Body`.
+pub trait Harness {
+    /// Stable lowercase identifier, e.g. `"common"`, `"claude_code"`, `"codex"`.
+    const NAME: &'static str;
+
+    /// The body representation for this harness. `Common::Body = Vec<Message>`;
+    /// a harness's `Body` is its faithful native record set.
+    type Body;
+}
+
+/// The canonical hub representation. Every cross-harness conversion routes
+/// through `Transcript<Common>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Common;
+
+impl Harness for Common {
+    const NAME: &'static str = "common";
+    type Body = Vec<Message>;
+}
+
+/// Maps a harness's native representation to and from [`Common`].
+///
+/// `to_common` may *canonicalize* representation (so the result is functional
+/// in another harness) but must not *discard* detail — anything a same-harness
+/// round-trip needs is preserved in [`Common`]'s typed fields. The lossless
+/// guarantee for `to_common`→`from_common` on the same harness is therefore
+/// semantic equality, not byte equality; byte-exactness lives at the native
+/// representation ↔ disk boundary in [`Store`].
+pub trait Codec: Harness + Sized {
+    fn to_common(transcript: &Transcript<Self>) -> Result<Transcript<Common>>;
+    fn from_common(transcript: &Transcript<Common>) -> Result<Transcript<Self>>;
+}
+
+impl Codec for Common {
+    fn to_common(transcript: &Transcript<Common>) -> Result<Transcript<Common>> {
+        Ok(transcript.clone())
+    }
+    fn from_common(transcript: &Transcript<Common>) -> Result<Transcript<Common>> {
+        Ok(transcript.clone())
+    }
+}
+
+/// Convert a transcript from one harness to another through the [`Common`] hub.
+///
+/// ```ignore
+/// let codex_session = convert::<ClaudeCode, Codex>(&claude_session)?;
+/// ```
+pub fn convert<A, B>(transcript: &Transcript<A>) -> Result<Transcript<B>>
+where
+    A: Codec,
+    B: Codec,
+{
+    B::from_common(&A::to_common(transcript)?)
+}
+
+/// Procuring and persisting native transcripts against a real backend (a
+/// session directory, a SQLite database, an `import` subprocess).
+///
+/// Kept separate from [`Codec`] because the mechanism is wildly asymmetric per
+/// harness — JSONL files vs. reading SQLite but writing through an external
+/// importer — while the semantic mapping in [`Codec`] is uniform.
+pub trait Store {
+    /// The harness this store reads and writes.
+    type H: Harness;
+    /// A locator for one transcript at rest: a file path, a database id, a slug.
+    type Ref;
+
+    /// Cheap metadata scan — no full message parsing.
+    fn discover(&self) -> Result<Vec<Discovered<Self::Ref>>>;
+
+    /// Load and parse one transcript into its faithful native representation.
+    fn load(&self, reference: &Self::Ref) -> Result<Transcript<Self::H>>;
+
+    /// Persist a native transcript so the harness can resume it.
+    fn save(&self, transcript: &Transcript<Self::H>) -> Result<Saved<Self::Ref>>;
+
+    /// Per-reference change cursors, for callers that cache parsed transcripts.
+    /// Default: no fingerprints, forcing a re-parse. Backends with a cheap
+    /// change signal (file mtime, a `MAX(updated)` query) should override.
+    fn fingerprints(&self, _refs: &[Self::Ref]) -> Result<HashMap<String, String>> {
+        Ok(HashMap::new())
+    }
+}
+
+/// A transcript found by [`Store::discover`]: its metadata and how to load it.
+#[derive(Debug, Clone)]
+pub struct Discovered<R> {
+    pub meta: Meta,
+    pub reference: R,
+}
+
+/// The outcome of [`Store::save`]: the id the harness will resume by, and where
+/// it landed.
+#[derive(Debug, Clone)]
+pub struct Saved<R> {
+    pub id: String,
+    pub reference: R,
+}
+
+/// Runtime tag for the harnesses this crate implements. Distinct from the
+/// type-level [`Harness`] markers — this is for dispatch on a string the user
+/// typed (`--with codex`), not for selecting a `Body`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessId {
+    ClaudeCode,
+    Codex,
+    OpenCode,
+    Pi,
+    Campfire,
+}
+
+impl HarnessId {
+    pub const ALL: [HarnessId; 5] = [
+        HarnessId::ClaudeCode,
+        HarnessId::Codex,
+        HarnessId::OpenCode,
+        HarnessId::Pi,
+        HarnessId::Campfire,
+    ];
+
+    /// The stable lowercase name, matching the corresponding [`Harness::NAME`].
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            HarnessId::ClaudeCode => "claude_code",
+            HarnessId::Codex => "codex",
+            HarnessId::OpenCode => "opencode",
+            HarnessId::Pi => "pi",
+            HarnessId::Campfire => "campfire",
+        }
+    }
+}
+
+impl fmt::Display for HarnessId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for HarnessId {
+    type Err = crate::error::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        // Accept a few friendly aliases alongside the canonical names.
+        match s.trim().to_ascii_lowercase().as_str() {
+            "claude" | "claude_code" | "claude-code" | "claudecode" => Ok(HarnessId::ClaudeCode),
+            "codex" => Ok(HarnessId::Codex),
+            "opencode" | "open_code" | "open-code" => Ok(HarnessId::OpenCode),
+            "pi" => Ok(HarnessId::Pi),
+            "campfire" => Ok(HarnessId::Campfire),
+            other => Err(crate::error::Error::UnknownHarness(other.to_string())),
+        }
+    }
+}
