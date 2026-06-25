@@ -13,7 +13,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -23,7 +22,8 @@ use uuid::Uuid;
 
 use crate::common::{Block, ImageSource, Message, Meta, Role, StopReason, Tool, ToolOutput, Usage};
 use crate::error::Result;
-use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, Transcript};
+use crate::harness::jsonl;
+use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
 
 /// The pi harness marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +148,17 @@ impl Codec for Pi {
             transcript.meta.clone(),
             messages_to_records(&transcript.meta, &transcript.body),
         ))
+    }
+}
+
+impl TextCodec for Pi {
+    fn from_text(text: &str) -> Result<Transcript<Self>> {
+        let records: Vec<Record> = jsonl::parse(text);
+        Ok(Transcript::new(meta_from_records(&records), records))
+    }
+
+    fn to_text(transcript: &Transcript<Self>) -> Result<String> {
+        jsonl::render(&transcript.body)
     }
 }
 
@@ -392,9 +403,7 @@ impl Store for PiStore {
     }
 
     fn load(&self, reference: &PathBuf) -> Result<Transcript<Pi>> {
-        let records = read_records(reference)?;
-        let meta = meta_from_records(&records, reference);
-        Ok(Transcript::new(meta, records))
+        load_session(reference, Pi::from_text)
     }
 
     fn save(&self, transcript: &Transcript<Pi>) -> Result<Saved<PathBuf>> {
@@ -408,6 +417,20 @@ impl Store for PiStore {
 
 // ── shared store helpers (also used by Campfire) ───────────────────────
 
+/// Read a pi/Campfire file and parse it with the given harness's `from_text`,
+/// filling an empty id from the filename. Shared by both stores' `load`.
+pub(crate) fn load_session<H, F>(path: &Path, from_text: F) -> Result<Transcript<H>>
+where
+    H: Harness,
+    F: Fn(&str) -> Result<Transcript<H>>,
+{
+    let mut transcript = from_text(&fs::read_to_string(path)?)?;
+    if transcript.meta.id.is_empty() {
+        transcript.meta.id = jsonl::file_id(path);
+    }
+    Ok(transcript)
+}
+
 pub(crate) fn discover_format(sessions_dir: &Path) -> Result<Vec<Discovered<PathBuf>>> {
     if !sessions_dir.is_dir() {
         return Ok(Vec::new());
@@ -416,14 +439,18 @@ pub(crate) fn discover_format(sessions_dir: &Path) -> Result<Vec<Discovered<Path
     collect_jsonl(sessions_dir, &mut files);
     let mut out = Vec::new();
     for path in files {
-        let Ok(records) = read_records(&path) else {
+        let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
+        let records: Vec<Record> = jsonl::parse(&text);
         // A pi file's first record must be a session header, else skip it.
         if !matches!(records.first(), Some(Record::Session(_))) {
             continue;
         }
-        let meta = meta_from_records(&records, &path);
+        let mut meta = meta_from_records(&records);
+        if meta.id.is_empty() {
+            meta.id = jsonl::file_id(&path);
+        }
         out.push(Discovered {
             meta,
             reference: path,
@@ -446,32 +473,14 @@ pub(crate) fn write_session(
         .to_rfc3339_opts(SecondsFormat::Millis, true)
         .replace([':', '.'], "-");
     let path = dir.join(format!("{file_ts}_{id}.jsonl"));
-    let mut file = fs::File::create(&path)?;
-    for record in records {
-        writeln!(file, "{}", serde_json::to_string(record)?)?;
-    }
+    fs::write(&path, jsonl::render(records)?)?;
     Ok(Saved {
         id,
         reference: path,
     })
 }
 
-pub(crate) fn read_records(path: &Path) -> Result<Vec<Record>> {
-    let reader = BufReader::new(fs::File::open(path)?);
-    let mut records = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<Value>(&line) {
-            records.push(Record::from(value));
-        }
-    }
-    Ok(records)
-}
-
-pub(crate) fn meta_from_records(records: &[Record], path: &Path) -> Meta {
+pub(crate) fn meta_from_records(records: &[Record]) -> Meta {
     let mut meta = Meta {
         id: String::new(),
         timestamp: Utc::now(),
@@ -509,12 +518,6 @@ pub(crate) fn meta_from_records(records: &[Record], path: &Path) -> Meta {
             },
             _ => {}
         }
-    }
-    if meta.id.is_empty() {
-        meta.id = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
     }
     meta
 }

@@ -17,7 +17,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, SecondsFormat, Utc};
@@ -26,7 +25,8 @@ use serde_json::{Map, Value, json};
 
 use crate::common::{Block, ImageSource, Message, Meta, Role, Tool, ToolOutput, Usage};
 use crate::error::Result;
-use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, Transcript};
+use crate::harness::jsonl;
+use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
 
 /// The Codex harness marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +77,18 @@ impl Codec for Codex {
             transcript.meta.clone(),
             messages_to_lines(&transcript.meta, &transcript.body),
         ))
+    }
+}
+
+impl TextCodec for Codex {
+    fn from_text(text: &str) -> Result<Transcript<Self>> {
+        let lines: Vec<Line> = jsonl::parse(text);
+        let meta = meta_from_lines(&lines);
+        Ok(Transcript::new(meta, lines))
+    }
+
+    fn to_text(transcript: &Transcript<Self>) -> Result<String> {
+        jsonl::render(&transcript.body)
     }
 }
 
@@ -653,28 +665,29 @@ impl Store for CodexStore {
         collect_rollouts(&self.sessions_dir, &mut files);
         let mut out = Vec::new();
         for path in files {
-            let Ok(lines) = read_lines(&path) else {
+            // A rollout must carry a session_meta with an id.
+            let Ok(transcript) = self.load(&path) else {
                 continue;
             };
-            // A rollout must carry a session_meta with an id.
-            let has_meta = lines.iter().any(|l| {
+            let has_meta = transcript.body.iter().any(|l| {
                 l.kind == "session_meta" && l.payload.get("id").and_then(Value::as_str).is_some()
             });
-            if !has_meta {
-                continue;
+            if has_meta {
+                out.push(Discovered {
+                    meta: transcript.meta,
+                    reference: path,
+                });
             }
-            out.push(Discovered {
-                meta: meta_from_lines(&lines, &path),
-                reference: path,
-            });
         }
         Ok(out)
     }
 
     fn load(&self, reference: &PathBuf) -> Result<Transcript<Codex>> {
-        let lines = read_lines(reference)?;
-        let meta = meta_from_lines(&lines, reference);
-        Ok(Transcript::new(meta, lines))
+        let mut transcript = Codex::from_text(&fs::read_to_string(reference)?)?;
+        if transcript.meta.id.is_empty() {
+            transcript.meta.id = jsonl::file_id(reference);
+        }
+        Ok(transcript)
     }
 
     fn save(&self, transcript: &Transcript<Codex>) -> Result<Saved<PathBuf>> {
@@ -688,10 +701,7 @@ impl Store for CodexStore {
         let id = transcript.meta.id.clone();
         let compact = t.format("%Y-%m-%dT%H-%M-%S").to_string();
         let path = dir.join(format!("rollout-{compact}-{id}.jsonl"));
-        let mut file = fs::File::create(&path)?;
-        for line in &transcript.body {
-            writeln!(file, "{}", serde_json::to_string(line)?)?;
-        }
+        fs::write(&path, Codex::to_text(transcript)?)?;
         Ok(Saved {
             id,
             reference: path,
@@ -706,7 +716,7 @@ impl Store for CodexStore {
     }
 }
 
-fn meta_from_lines(lines: &[Line], path: &Path) -> Meta {
+fn meta_from_lines(lines: &[Line]) -> Meta {
     let mut meta = Meta {
         id: String::new(),
         timestamp: Utc::now(),
@@ -749,28 +759,7 @@ fn meta_from_lines(lines: &[Line], path: &Path) -> Meta {
             break;
         }
     }
-    if meta.id.is_empty() {
-        meta.id = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-    }
     meta
-}
-
-fn read_lines(path: &Path) -> Result<Vec<Line>> {
-    let reader = BufReader::new(fs::File::open(path)?);
-    let mut lines = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(parsed) = serde_json::from_str::<Line>(&line) {
-            lines.push(parsed);
-        }
-    }
-    Ok(lines)
 }
 
 fn collect_rollouts(dir: &Path, out: &mut Vec<PathBuf>) {

@@ -472,6 +472,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "uuid",
+ "wasm-bindgen",
 ]
 
 [[package]]

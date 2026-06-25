@@ -6,8 +6,9 @@
 use std::path::PathBuf;
 
 use crate::error::Result;
+use crate::harness::jsonl;
 use crate::harness::pi::{self, Record};
-use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, Transcript};
+use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
 
 /// The Campfire harness marker. Shares pi's native [`Record`] body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,18 @@ impl Codec for Campfire {
             transcript.meta.clone(),
             pi::messages_to_records(&transcript.meta, &transcript.body),
         ))
+    }
+}
+
+impl TextCodec for Campfire {
+    fn from_text(text: &str) -> Result<Transcript<Self>> {
+        // Identical format to pi — reuse its parser and metadata extraction.
+        let records: Vec<Record> = jsonl::parse(text);
+        Ok(Transcript::new(pi::meta_from_records(&records), records))
+    }
+
+    fn to_text(transcript: &Transcript<Self>) -> Result<String> {
+        jsonl::render(&transcript.body)
     }
 }
 
@@ -62,9 +75,7 @@ impl Store for CampfireStore {
     }
 
     fn load(&self, reference: &PathBuf) -> Result<Transcript<Campfire>> {
-        let records = pi::read_records(reference)?;
-        let meta = pi::meta_from_records(&records, reference);
-        Ok(Transcript::new(meta, records))
+        pi::load_session(reference, Campfire::from_text)
     }
 
     fn save(&self, transcript: &Transcript<Campfire>) -> Result<Saved<PathBuf>> {

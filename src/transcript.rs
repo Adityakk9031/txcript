@@ -121,6 +121,20 @@ where
     B::from_common(&A::to_common(transcript)?)
 }
 
+/// Parsing and rendering a harness's native session *text* — free of any
+/// filesystem or database. This is the format layer: [`Store`] is location
+/// built on top of it (read a file, then `from_text`; `to_text`, then write a
+/// file), and the WASM bindings use it directly so the browser/Bun side owns
+/// the I/O.
+pub trait TextCodec: Harness + Sized {
+    /// Parse native session text into a transcript. `meta.id` may be empty when
+    /// the text carries no internal id; a [`Store`] fills it from the filename.
+    fn from_text(text: &str) -> Result<Transcript<Self>>;
+
+    /// Render a transcript back to native session text.
+    fn to_text(transcript: &Transcript<Self>) -> Result<String>;
+}
+
 /// Procuring and persisting native transcripts against a real backend (a
 /// session directory, a SQLite database, an `import` subprocess).
 ///

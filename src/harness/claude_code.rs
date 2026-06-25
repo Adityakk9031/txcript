@@ -10,7 +10,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -20,7 +19,8 @@ use uuid::Uuid;
 
 use crate::common::{Block, ImageSource, Message, Meta, Role, StopReason, Tool, ToolOutput, Usage};
 use crate::error::{Error, Result};
-use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, Transcript};
+use crate::harness::jsonl;
+use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
 
 /// The Claude Code harness marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,6 +230,18 @@ impl Codec for ClaudeCode {
     }
 }
 
+impl TextCodec for ClaudeCode {
+    fn from_text(text: &str) -> Result<Transcript<Self>> {
+        let records: Vec<Record> = jsonl::parse(text);
+        let meta = meta_from_records(&records);
+        Ok(Transcript::new(meta, records))
+    }
+
+    fn to_text(transcript: &Transcript<Self>) -> Result<String> {
+        jsonl::render(&transcript.body)
+    }
+}
+
 // ── store ──────────────────────────────────────────────────────────────
 
 /// Reads and writes Claude Code sessions under a projects root (default
@@ -282,22 +294,22 @@ impl Store for ClaudeStore {
         Self::collect_jsonl(&self.root, &mut files);
         let mut out = Vec::new();
         for path in files {
-            let Ok(records) = read_records(&path) else {
-                continue;
-            };
-            let meta = meta_from_records(&records, &path);
-            out.push(Discovered {
-                meta,
-                reference: path,
-            });
+            if let Ok(transcript) = self.load(&path) {
+                out.push(Discovered {
+                    meta: transcript.meta,
+                    reference: path,
+                });
+            }
         }
         Ok(out)
     }
 
     fn load(&self, reference: &PathBuf) -> Result<Transcript<ClaudeCode>> {
-        let records = read_records(reference)?;
-        let meta = meta_from_records(&records, reference);
-        Ok(Transcript::new(meta, records))
+        let mut transcript = ClaudeCode::from_text(&fs::read_to_string(reference)?)?;
+        if transcript.meta.id.is_empty() {
+            transcript.meta.id = jsonl::file_id(reference);
+        }
+        Ok(transcript)
     }
 
     fn save(&self, transcript: &Transcript<ClaudeCode>) -> Result<Saved<PathBuf>> {
@@ -306,11 +318,7 @@ impl Store for ClaudeStore {
         fs::create_dir_all(&dir)?;
         let id = transcript.meta.id.clone();
         let path = dir.join(format!("{id}.jsonl"));
-        let mut file = fs::File::create(&path)?;
-        for record in &transcript.body {
-            let line = serde_json::to_string(record)?;
-            writeln!(file, "{line}")?;
-        }
+        fs::write(&path, ClaudeCode::to_text(transcript)?)?;
         Ok(Saved {
             id,
             reference: path,
@@ -514,24 +522,9 @@ fn entry_uuid(session_id: &str, index: usize) -> String {
     Uuid::new_v5(&NS, format!("{session_id}:{index}").as_bytes()).to_string()
 }
 
-fn read_records(path: &Path) -> Result<Vec<Record>> {
-    let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut records = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        // A single corrupt line shouldn't sink the whole session.
-        if let Ok(value) = serde_json::from_str::<Value>(&line) {
-            records.push(Record::from(value));
-        }
-    }
-    Ok(records)
-}
-
-fn meta_from_records(records: &[Record], path: &Path) -> Meta {
+/// Extract session metadata from the records. `id` is left empty when no
+/// `sessionId` is present; a [`Store`] fills it from the filename.
+fn meta_from_records(records: &[Record]) -> Meta {
     let mut meta = Meta {
         id: String::new(),
         timestamp: Utc::now(),
@@ -584,12 +577,6 @@ fn meta_from_records(records: &[Record], path: &Path) -> Meta {
         }
     }
 
-    if meta.id.is_empty() {
-        meta.id = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-    }
     if let Some(ts) = earliest {
         meta.timestamp = ts;
     }

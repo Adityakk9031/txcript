@@ -182,9 +182,17 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
 /// The command that resumes a session in its harness, overridable per harness
 /// via `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a template; `{id}` is substituted).
 fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
-    let key = format!("TRANSCRIPT_{}_RESUME_CMD", harness.as_str().to_ascii_uppercase());
+    let key = format!(
+        "TRANSCRIPT_{}_RESUME_CMD",
+        harness.as_str().to_ascii_uppercase()
+    );
     if let Ok(template) = std::env::var(&key) {
-        let mut parts = template.replace("{id}", id).split_whitespace().map(String::from).collect::<Vec<_>>().into_iter();
+        let mut parts = template
+            .replace("{id}", id)
+            .split_whitespace()
+            .map(String::from)
+            .collect::<Vec<_>>()
+            .into_iter();
         if let Some(bin) = parts.next() {
             return (bin, parts.collect());
         }
@@ -411,8 +419,7 @@ mod spin {
             let handle = active.then(|| {
                 let (running, label) = (running.clone(), label.clone());
                 thread::spawn(move || {
-                    const FRAMES: [&str; 10] =
-                        ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                     let mut err = std::io::stderr();
                     let mut i = 0;
                     while running.load(Ordering::Relaxed) {

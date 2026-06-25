@@ -31,12 +31,15 @@ pub mod error;
 pub mod harness;
 mod transcript;
 
+#[cfg(feature = "wasm")]
+mod wasm;
+
 pub use common::{
     Block, EditOp, ImageSource, Message, Meta, Role, StopReason, Tool, ToolOutput, Usage,
 };
 pub use error::{Error, Result};
 pub use transcript::{
-    Codec, Common, Discovered, Harness, HarnessId, Saved, Store, Transcript, convert,
+    Codec, Common, Discovered, Harness, HarnessId, Saved, Store, TextCodec, Transcript, convert,
 };
 
 pub use harness::campfire::{Campfire, CampfireStore};

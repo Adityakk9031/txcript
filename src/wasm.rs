@@ -1,0 +1,109 @@
+//! WebAssembly bindings (feature `wasm`).
+//!
+//! The boundary is text-in / text-out: the JS host (Bun, a browser, Node) owns
+//! all I/O — reading session files, writing the result — and calls these pure
+//! functions for the transformation. Only the codec crosses into WASM; the
+//! `Store` layer (filesystem, SQLite, subprocess) stays native.
+//!
+//! Build: `wasm-pack build --target nodejs --no-default-features --features wasm`
+//! (Bun imports the generated ES module directly), or
+//! `cargo build --lib --target wasm32-unknown-unknown --no-default-features --features wasm`.
+
+use serde::{Deserialize, Serialize};
+use wasm_bindgen::prelude::*;
+
+use crate::Campfire;
+use crate::ClaudeCode;
+use crate::Codex;
+use crate::OpenCode;
+use crate::Pi;
+use crate::common::{Message, Meta};
+use crate::transcript::{Codec, Common, HarnessId, TextCodec, Transcript};
+
+/// Continue/convert a session from one harness's native text into another's.
+///
+/// `input` is the source session text (JSONL for claude_code/codex/pi/campfire,
+/// the `opencode export` JSON for opencode); `from`/`to` are harness names
+/// (`"claude_code"`, `"codex"`, `"opencode"`, `"pi"`, `"campfire"`). Returns the
+/// target harness's native text.
+#[wasm_bindgen]
+pub fn convert(input: &str, from: &str, to: &str) -> Result<String, JsError> {
+    let from = parse_harness(from)?;
+    let to = parse_harness(to)?;
+    let common = parse_to_common(from, input).map_err(js)?;
+    render_from_common(to, &common).map_err(js)
+}
+
+/// Parse a session into the canonical model as JSON (`{ meta, messages }`).
+#[wasm_bindgen(js_name = toCommon)]
+pub fn to_common(input: &str, from: &str) -> Result<String, JsError> {
+    let from = parse_harness(from)?;
+    let common = parse_to_common(from, input).map_err(js)?;
+    serde_json::to_string(&CommonJson {
+        meta: common.meta,
+        messages: common.body,
+    })
+    .map_err(js)
+}
+
+/// Render a canonical model (`{ meta, messages }` JSON) into a harness's native
+/// text — the inverse of [`to_common`].
+#[wasm_bindgen(js_name = fromCommon)]
+pub fn from_common(common_json: &str, to: &str) -> Result<String, JsError> {
+    let to = parse_harness(to)?;
+    let parsed: CommonJson = serde_json::from_str(common_json).map_err(js)?;
+    let common = Transcript::new(parsed.meta, parsed.messages);
+    render_from_common(to, &common).map_err(js)
+}
+
+/// The harness names this build understands.
+#[wasm_bindgen]
+pub fn harnesses() -> Vec<String> {
+    HarnessId::ALL
+        .iter()
+        .map(|h| h.as_str().to_string())
+        .collect()
+}
+
+// ── dispatch ───────────────────────────────────────────────────────────
+
+/// Canonical model on the wire: a flat `{ meta, messages }` object.
+#[derive(Serialize, Deserialize)]
+struct CommonJson {
+    meta: Meta,
+    messages: Vec<Message>,
+}
+
+fn parse_to_common(harness: HarnessId, text: &str) -> crate::Result<Transcript<Common>> {
+    fn go<H: TextCodec + Codec>(text: &str) -> crate::Result<Transcript<Common>> {
+        H::to_common(&H::from_text(text)?)
+    }
+    match harness {
+        HarnessId::ClaudeCode => go::<ClaudeCode>(text),
+        HarnessId::Codex => go::<Codex>(text),
+        HarnessId::OpenCode => go::<OpenCode>(text),
+        HarnessId::Pi => go::<Pi>(text),
+        HarnessId::Campfire => go::<Campfire>(text),
+    }
+}
+
+fn render_from_common(harness: HarnessId, common: &Transcript<Common>) -> crate::Result<String> {
+    fn go<H: TextCodec + Codec>(common: &Transcript<Common>) -> crate::Result<String> {
+        H::to_text(&H::from_common(common)?)
+    }
+    match harness {
+        HarnessId::ClaudeCode => go::<ClaudeCode>(common),
+        HarnessId::Codex => go::<Codex>(common),
+        HarnessId::OpenCode => go::<OpenCode>(common),
+        HarnessId::Pi => go::<Pi>(common),
+        HarnessId::Campfire => go::<Campfire>(common),
+    }
+}
+
+fn parse_harness(name: &str) -> Result<HarnessId, JsError> {
+    name.parse().map_err(js)
+}
+
+fn js<E: std::fmt::Display>(e: E) -> JsError {
+    JsError::new(&e.to_string())
+}

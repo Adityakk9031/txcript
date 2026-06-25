@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::common::{Block, ImageSource, Message, Meta, Role, StopReason, Tool, ToolOutput, Usage};
 use crate::error::Result;
-use crate::transcript::{Codec, Common, Harness, Transcript};
+use crate::transcript::{Codec, Common, Harness, TextCodec, Transcript};
 
 /// The OpenCode harness marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +71,52 @@ impl Codec for OpenCode {
             transcript.meta.clone(),
             build_export(&transcript.meta, &transcript.body),
         ))
+    }
+}
+
+impl TextCodec for OpenCode {
+    /// The text form is the `opencode export` JSON document.
+    fn from_text(text: &str) -> Result<Transcript<Self>> {
+        let export: Export = serde_json::from_str(text)?;
+        let meta = meta_from_info(&export.info);
+        Ok(Transcript::new(meta, export))
+    }
+
+    fn to_text(transcript: &Transcript<Self>) -> Result<String> {
+        Ok(serde_json::to_string(&transcript.body)?)
+    }
+}
+
+/// Session metadata from an export's `info` object (the WASM/text path; the
+/// SQLite store derives the same fields from `session` columns).
+fn meta_from_info(info: &Value) -> Meta {
+    let string = |key: &str| {
+        info.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    let title = string("title").filter(|t| !t.starts_with("New session - "));
+    let timestamp = info
+        .get("time")
+        .and_then(|t| t.get("created"))
+        .and_then(Value::as_i64)
+        .and_then(DateTime::from_timestamp_millis)
+        .unwrap_or_else(Utc::now);
+    let model = info
+        .get("model")
+        .and_then(|m| m.get("id"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    Meta {
+        id: string("id").unwrap_or_default(),
+        timestamp,
+        cwd: string("directory"),
+        git_branch: None,
+        title,
+        cli_version: string("version"),
+        model,
     }
 }
 
