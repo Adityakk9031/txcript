@@ -4,11 +4,16 @@
 //!
 //! ```text
 //! transcript list                          # all local sessions, every harness
-//! transcript continue <id>                 # continue <id> in its own harness
-//!     [--with <harness>]                    #   ...or cross over into <harness>
+//! transcript continue <id>                 # continue <id>, then launch the harness
+//!     [--with <harness>]                    #   ...continuing in <harness> instead
 //!     [--from <harness>]                    #   scope the id lookup to one harness
-//!     [--out <dir>]                         #   write under <dir> instead of the live root
+//!     [--out <dir>]                         #   write under <dir>; implies --no-resume
+//!     [--no-resume]                         #   write the session but don't launch
 //! ```
+//!
+//! By default `continue` hands the terminal to the harness (on Unix it `exec`s,
+//! replacing this process). The resume command is overridable per harness via
+//! `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template).
 //!
 //! `<harness>` is one of: claude_code, codex, opencode, pi, campfire.
 
@@ -61,8 +66,9 @@ fn usage() {
         "transcript — continue local AI coding sessions in any harness\n\n\
          usage:\n  \
          transcript list\n  \
-         transcript continue <id> [--with <harness>] [--from <harness>] [--out <dir>]\n\n\
-         <id> continues in its own harness; --with crosses over into another.\n\
+         transcript continue <id> [--with <harness>] [--from <harness>] [--out <dir>] [--no-resume]\n\n\
+         continue launches the harness afterward; --with crosses into another,\n\
+         --out/--no-resume write the session without launching.\n\
          harnesses: claude_code, codex, opencode, pi, campfire"
     );
 }
@@ -101,6 +107,7 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
     let mut with: Option<HarnessId> = None;
     let mut from: Option<HarnessId> = None;
     let mut out: Option<PathBuf> = None;
+    let mut no_resume = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -117,6 +124,7 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
                 i += 1;
                 out = Some(PathBuf::from(args.get(i).ok_or("--out needs a directory")?));
             }
+            "--no-resume" => no_resume = true,
             other if id.is_none() => id = Some(other.to_string()),
             other => return Err(format!("unexpected argument `{other}`")),
         }
@@ -141,29 +149,73 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
     // Default to continuing in the source's own harness.
     let target = with.unwrap_or(found.harness);
 
-    let common = load_common(found)?;
-    if found.harness == target {
-        eprintln!("continuing {target} session {}", found.meta.id);
-    } else {
-        eprintln!("continuing {} session as {target}", found.harness);
-    }
+    // Resuming an `--out` copy can't work — the harness reads its live root, not
+    // our redirect — so a redirect implies "write only".
+    let resume = out.is_none() && !no_resume;
 
-    let (new_id, location) = save_target(target, &common, out.as_deref())?;
-    println!("wrote {target} session {new_id}");
-    println!("  at {location}");
-    println!("  resume with: {}", resume_hint(target, &new_id));
-    Ok(())
+    let resume_id = if target == found.harness && out.is_none() {
+        // Fast path: same harness, live root — the session is already on disk.
+        // Don't re-synthesize over it (that would round-trip through Common and
+        // could shed detail); resume the original in place.
+        eprintln!("continuing existing {target} session {}", found.meta.id);
+        found.meta.id.clone()
+    } else {
+        let common = load_common(found)?;
+        eprintln!("continuing {} session as {target}", found.harness);
+        let (new_id, location) = save_target(target, &common, out.as_deref())?;
+        println!("wrote {target} session {new_id}");
+        println!("  at {location}");
+        new_id
+    };
+
+    let (bin, args) = resume_command(target, &resume_id);
+    if resume {
+        // Hand the terminal to the harness — replaces this process on Unix.
+        eprintln!("resuming: {} {}", bin, args.join(" "));
+        handoff(&bin, &args)
+    } else {
+        println!("  resume with: {} {}", bin, args.join(" "));
+        Ok(())
+    }
 }
 
-/// Best-effort command to resume a freshly written session in its harness.
-fn resume_hint(harness: HarnessId, id: &str) -> String {
-    match harness {
-        HarnessId::ClaudeCode => format!("claude --resume {id}"),
-        HarnessId::Codex => format!("codex resume {id}"),
-        HarnessId::Pi => format!("pi --session {id}"),
-        HarnessId::Campfire => format!("campfire --session {id}"),
-        HarnessId::OpenCode => format!("opencode --session {id}"),
+/// The command that resumes a session in its harness, overridable per harness
+/// via `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a template; `{id}` is substituted).
+fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
+    let key = format!("TRANSCRIPT_{}_RESUME_CMD", harness.as_str().to_ascii_uppercase());
+    if let Ok(template) = std::env::var(&key) {
+        let mut parts = template.replace("{id}", id).split_whitespace().map(String::from).collect::<Vec<_>>().into_iter();
+        if let Some(bin) = parts.next() {
+            return (bin, parts.collect());
+        }
     }
+    let id = id.to_string();
+    match harness {
+        HarnessId::ClaudeCode => ("claude".into(), vec!["--resume".into(), id]),
+        HarnessId::Codex => ("codex".into(), vec!["resume".into(), id]),
+        HarnessId::OpenCode => ("opencode".into(), vec!["--session".into(), id]),
+        HarnessId::Pi => ("pi".into(), vec!["--session".into(), id]),
+        HarnessId::Campfire => ("campfire".into(), vec!["--session".into(), id]),
+    }
+}
+
+/// Replace this process with the harness so it owns the terminal (a true
+/// handoff). On non-Unix, spawn-and-wait, then exit with the child's code.
+#[cfg(unix)]
+fn handoff(bin: &str, args: &[String]) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    // `exec` only returns if it failed to launch.
+    let e = std::process::Command::new(bin).args(args).exec();
+    Err(format!("failed to launch `{bin}`: {e} (is it on PATH?)"))
+}
+
+#[cfg(not(unix))]
+fn handoff(bin: &str, args: &[String]) -> Result<(), String> {
+    let status = std::process::Command::new(bin)
+        .args(args)
+        .status()
+        .map_err(|e| format!("failed to launch `{bin}`: {e} (is it on PATH?)"))?;
+    std::process::exit(status.code().unwrap_or(0));
 }
 
 // ── discover / load / save across harnesses ────────────────────────────
