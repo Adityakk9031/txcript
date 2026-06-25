@@ -221,8 +221,14 @@ fn handoff(bin: &str, args: &[String]) -> Result<(), String> {
 // ── discover / load / save across harnesses ────────────────────────────
 
 fn discover_all() -> Vec<Found> {
+    let spinner = spin::Spinner::start("searching local sessions…");
     let mut out = Vec::new();
 
+    let announce = |harness: HarnessId, count: usize| {
+        spinner.set(format!("scanning {harness}… ({count} found)"));
+    };
+
+    announce(HarnessId::ClaudeCode, out.len());
     if let Some(store) = ClaudeStore::default_root() {
         for d in store.discover().unwrap_or_default() {
             out.push(Found {
@@ -232,6 +238,7 @@ fn discover_all() -> Vec<Found> {
             });
         }
     }
+    announce(HarnessId::Codex, out.len());
     if let Some(store) = CodexStore::default_root() {
         for d in store.discover().unwrap_or_default() {
             out.push(Found {
@@ -241,6 +248,7 @@ fn discover_all() -> Vec<Found> {
             });
         }
     }
+    announce(HarnessId::Pi, out.len());
     if let Some(store) = PiStore::default_root() {
         for d in store.discover().unwrap_or_default() {
             out.push(Found {
@@ -250,6 +258,7 @@ fn discover_all() -> Vec<Found> {
             });
         }
     }
+    announce(HarnessId::Campfire, out.len());
     if let Some(store) = CampfireStore::default_root() {
         for d in store.discover().unwrap_or_default() {
             out.push(Found {
@@ -260,16 +269,20 @@ fn discover_all() -> Vec<Found> {
         }
     }
     #[cfg(feature = "opencode")]
-    if let Some(store) = transcript::OpenCodeStore::default_db() {
-        for d in store.discover().unwrap_or_default() {
-            out.push(Found {
-                harness: HarnessId::OpenCode,
-                meta: d.meta,
-                locator: Locator::Id(d.reference),
-            });
+    {
+        announce(HarnessId::OpenCode, out.len());
+        if let Some(store) = transcript::OpenCodeStore::default_db() {
+            for d in store.discover().unwrap_or_default() {
+                out.push(Found {
+                    harness: HarnessId::OpenCode,
+                    meta: d.meta,
+                    locator: Locator::Id(d.reference),
+                });
+            }
         }
     }
 
+    spinner.stop(&format!("found {} local session(s)", out.len()));
     out.sort_by_key(|f| std::cmp::Reverse(f.meta.timestamp));
     out
 }
@@ -371,5 +384,74 @@ fn truncate(s: &str, max: usize) -> String {
         let mut t: String = s.chars().take(max.saturating_sub(1)).collect();
         t.push('…');
         t
+    }
+}
+
+/// A tiny background spinner on stderr, so a slow scan shows it's alive.
+/// No-op when stderr isn't a terminal (piped or redirected output stays clean).
+mod spin {
+    use std::io::{IsTerminal, Write};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
+
+    pub struct Spinner {
+        running: Arc<AtomicBool>,
+        label: Arc<Mutex<String>>,
+        handle: Option<JoinHandle<()>>,
+        active: bool,
+    }
+
+    impl Spinner {
+        pub fn start(initial: &str) -> Self {
+            let active = std::io::stderr().is_terminal();
+            let running = Arc::new(AtomicBool::new(true));
+            let label = Arc::new(Mutex::new(initial.to_string()));
+            let handle = active.then(|| {
+                let (running, label) = (running.clone(), label.clone());
+                thread::spawn(move || {
+                    const FRAMES: [&str; 10] =
+                        ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                    let mut err = std::io::stderr();
+                    let mut i = 0;
+                    while running.load(Ordering::Relaxed) {
+                        let text = label.lock().map(|g| g.clone()).unwrap_or_default();
+                        let _ = write!(err, "\r\x1b[2K{} {text}", FRAMES[i % FRAMES.len()]);
+                        let _ = err.flush();
+                        i += 1;
+                        thread::sleep(Duration::from_millis(80));
+                    }
+                })
+            });
+            Self {
+                running,
+                label,
+                handle,
+                active,
+            }
+        }
+
+        pub fn set(&self, text: String) {
+            if self.active
+                && let Ok(mut g) = self.label.lock()
+            {
+                *g = text;
+            }
+        }
+
+        /// Stop the animation, clear the line, and print a one-line summary.
+        pub fn stop(self, summary: &str) {
+            self.running.store(false, Ordering::Relaxed);
+            if let Some(h) = self.handle {
+                let _ = h.join();
+            }
+            if self.active {
+                let mut err = std::io::stderr();
+                let _ = write!(err, "\r\x1b[2K");
+                let _ = err.flush();
+            }
+            eprintln!("{summary}");
+        }
     }
 }
