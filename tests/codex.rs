@@ -52,11 +52,15 @@ fn to_common_runs_the_full_aggregation() {
     assert_eq!(msgs.len(), 9);
 
     // user: text + image
-    assert!(matches!(&msgs[0].content[0], Block::Text { text } if text == "Please inspect this image"));
+    assert!(
+        matches!(&msgs[0].content[0], Block::Text { text } if text == "Please inspect this image")
+    );
     assert!(matches!(&msgs[0].content[1], Block::Image { .. }));
 
     // reasoning summary -> thinking (encrypted_content dropped)
-    assert!(matches!(&msgs[1].content[0], Block::Thinking { text, .. } if text == "Inspecting project files"));
+    assert!(
+        matches!(&msgs[1].content[0], Block::Thinking { text, .. } if text == "Inspecting project files")
+    );
 
     // exec_command -> typed Bash
     assert!(matches!(
@@ -191,7 +195,9 @@ fn sample_common() -> Transcript<Common> {
     let body = vec![
         Message {
             role: Role::User,
-            content: vec![Block::Text { text: "inspect".into() }],
+            content: vec![Block::Text {
+                text: "inspect".into(),
+            }],
             timestamp: ts("2026-01-02T03:04:06.000Z"),
             model: None,
             stop_reason: None,
@@ -240,7 +246,9 @@ fn sample_common() -> Transcript<Common> {
         },
         Message {
             role: Role::Assistant,
-            content: vec![Block::Text { text: "Done.".into() }],
+            content: vec![Block::Text {
+                text: "Done.".into(),
+            }],
             timestamp: ts("2026-01-02T03:04:10.000Z"),
             model: model(),
             stop_reason: None,
