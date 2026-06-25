@@ -548,8 +548,10 @@ fn meta_from_records(records: &[Record], path: &Path) -> Meta {
     for record in records {
         match record {
             Record::User(e) => {
-                if meta.id.is_empty() && e.session_id.is_some() {
-                    meta.id = e.session_id.clone().unwrap();
+                if let Some(id) = &e.session_id
+                    && meta.id.is_empty()
+                {
+                    meta.id = id.clone();
                 }
                 meta.cwd = meta.cwd.take().or_else(|| e.cwd.clone());
                 meta.git_branch = meta.git_branch.take().or_else(|| e.git_branch.clone());

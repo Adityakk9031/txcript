@@ -39,4 +39,6 @@ pub use transcript::{
     Codec, Common, Discovered, Harness, HarnessId, Saved, Store, Transcript, convert,
 };
 
+pub use harness::campfire::{Campfire, CampfireStore};
 pub use harness::claude_code::{ClaudeCode, ClaudeStore};
+pub use harness::pi::{Pi, PiStore};
