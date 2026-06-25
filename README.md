@@ -1,5 +1,3 @@
-<img align="right" width="132" src="assets/logo.png" alt="transcript logo">
-
 # transcript
 
 `transcript` transforms AI coding-agent session transcripts between harness
