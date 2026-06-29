@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 //! Integration tests for the Codex harness — on-disk Store fidelity, the full
 //! stateful `to_common` aggregation (shell + apply_patch normalization,
 //! web-search pairing, usage/model backfill, fallback-result dedup), and the

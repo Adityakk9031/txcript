@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 //! Integration tests for the Claude Code harness.
 //!
 //! These check the two fidelity guarantees from the crate docs — native ↔ disk

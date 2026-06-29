@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 //! Integration tests for the OpenCode codec — the part→block transform
 //! (synthetic/bookkeeping parts dropped, tool parts split into use+result,
 //! turn usage/finish attached) and the codec fixpoint through Common. The

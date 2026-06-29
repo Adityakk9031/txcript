@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 //! Campfire is pi under a different home. These tests confirm the delegation:
 //! it reads/writes the identical format and produces the identical conversion,
 //! only stamped as a different harness.

@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 //! Integration tests for the pi harness — on-disk Store fidelity, metadata
 //! discovery, the tool-normalization and bashExecution-expansion transforms,
 //! and the codec fixpoint through Common.

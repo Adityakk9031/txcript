@@ -40,3 +40,9 @@ opencode = ["dep:rusqlite"]
 # for the rare empty-id fallback; build with --no-default-features so rusqlite
 # (native SQLite) is excluded.
 wasm = ["dep:wasm-bindgen", "uuid/js"]
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

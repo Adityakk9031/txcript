@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 //! The whole point of the crate: a transcript converts between harnesses
 //! through the Common hub without losing the conversation. This chains one
 //! transcript Claude -> Codex -> OpenCode -> pi -> Campfire and checks that the
