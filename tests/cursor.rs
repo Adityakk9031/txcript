@@ -327,6 +327,96 @@ fn from_common_writes_cursor_shell_tool_calls() {
 }
 
 #[test]
+fn from_common_writes_cursor_edit_tool_calls_with_diff_payload() {
+    let mut common = sample_common();
+    common.body = vec![
+        Message {
+            role: Role::User,
+            content: vec![Block::Text {
+                text: "update readme".into(),
+            }],
+            timestamp: ts("2026-01-02T03:04:06.000Z"),
+            model: None,
+            stop_reason: None,
+            usage: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![Block::ToolUse {
+                id: "edit-1".into(),
+                tool: Tool::Edit {
+                    file_path: "/repo/README.md".into(),
+                    old_string: "old title\n".into(),
+                    new_string: "new title\n".into(),
+                    replace_all: false,
+                },
+            }],
+            timestamp: ts("2026-01-02T03:04:07.000Z"),
+            model: None,
+            stop_reason: None,
+            usage: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![Block::ToolResult {
+                tool_use_id: "edit-1".into(),
+                content: ToolOutput::Text(
+                    "The file /repo/README.md has been updated successfully.".into(),
+                ),
+                is_error: false,
+            }],
+            timestamp: ts("2026-01-02T03:04:08.000Z"),
+            model: None,
+            stop_reason: None,
+            usage: None,
+        },
+    ];
+
+    let native = Cursor::from_common(&common).unwrap();
+    let tool_call = first_tool_call(&native.body).expect("edit tool call");
+    let edit = len_fields(&tool_call, 12);
+    assert_eq!(edit.len(), 1);
+    assert_eq!(string_fields(&tool_call, 57), vec!["edit-1".to_string()]);
+
+    let args = len_fields(&edit[0], 1);
+    let result = len_fields(&edit[0], 2);
+    assert_eq!(args.len(), 1);
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+        string_fields(&args[0], 1),
+        vec!["/repo/README.md".to_string()]
+    );
+    assert_eq!(string_fields(&args[0], 6), vec!["new title\n".to_string()]);
+
+    let success = len_fields(&result[0], 1);
+    assert_eq!(success.len(), 1);
+    assert_eq!(
+        string_fields(&success[0], 1),
+        vec!["/repo/README.md".to_string()]
+    );
+    assert_eq!(varint_fields(&success[0], 3), vec![1]);
+    assert_eq!(varint_fields(&success[0], 4), vec![1]);
+
+    let diff = string_fields(&success[0], 5)
+        .into_iter()
+        .next()
+        .expect("diff string");
+    assert!(diff.contains("--- a//repo/README.md"));
+    assert!(diff.contains("+++ b//repo/README.md"));
+    assert!(diff.contains("-old title"));
+    assert!(diff.contains("+new title"));
+    assert!(!diff.contains("updated successfully"));
+    assert_eq!(
+        string_fields(&success[0], 6),
+        vec!["old title\n".to_string()]
+    );
+    assert_eq!(
+        string_fields(&success[0], 7),
+        vec!["new title\n".to_string()]
+    );
+}
+
+#[test]
 #[cfg(feature = "opencode")]
 fn store_round_trip_preserves_non_json_blobs() {
     let src = tempfile::tempdir().unwrap();
@@ -481,6 +571,44 @@ fn string_fields(data: &[u8], wanted_field: u64) -> Vec<String> {
         .collect()
 }
 
+fn varint_fields(data: &[u8], wanted_field: u64) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < data.len() {
+        let Some(key) = read_varint(data, &mut i) else {
+            break;
+        };
+        let field = key >> 3;
+        match key & 0x07 {
+            0 => {
+                let Some(value) = read_varint(data, &mut i) else {
+                    break;
+                };
+                if field == wanted_field {
+                    out.push(value);
+                }
+            }
+            1 => i = i.saturating_add(8),
+            2 => {
+                let Some(len) = read_varint(data, &mut i).and_then(|v| usize::try_from(v).ok())
+                else {
+                    break;
+                };
+                let Some(end) = i.checked_add(len) else {
+                    break;
+                };
+                if end > data.len() {
+                    break;
+                }
+                i = end;
+            }
+            5 => i = i.saturating_add(4),
+            _ => break,
+        }
+    }
+    out
+}
+
 fn len_fields(data: &[u8], wanted_field: u64) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     let mut i = 0usize;
@@ -495,17 +623,21 @@ fn len_fields(data: &[u8], wanted_field: u64) -> Vec<Vec<u8>> {
             }
             1 => i = i.saturating_add(8),
             2 => {
-                let Some(len) = read_varint(data, &mut i).map(|v| v as usize) else {
+                let Some(len) = read_varint(data, &mut i).and_then(|v| usize::try_from(v).ok())
+                else {
                     break;
                 };
-                if i + len > data.len() {
+                let Some(end) = i.checked_add(len) else {
+                    break;
+                };
+                if end > data.len() {
                     break;
                 }
-                let value = data[i..i + len].to_vec();
+                let value = data[i..end].to_vec();
                 if field == wanted_field {
                     out.push(value);
                 }
-                i += len;
+                i = end;
             }
             5 => i = i.saturating_add(4),
             _ => break,

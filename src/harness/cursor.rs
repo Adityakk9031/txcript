@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use crate::common::{Block, ImageSource, Message, Meta, Role, Tool, ToolOutput};
+use crate::common::{Block, EditOp, ImageSource, Message, Meta, Role, Tool, ToolOutput};
 use crate::error::{Error, Result};
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
 
@@ -778,26 +778,28 @@ fn cursor_tool_call_proto(meta: &Meta, call: &CursorStateToolCall) -> Option<Vec
             old_string,
             new_string,
             ..
-        } => (
-            12,
-            cursor_edit_tool_call_proto(
-                file_path,
-                &edit_stream_content(old_string, new_string),
-                call.result.as_ref(),
-            ),
-        ),
-        Tool::Write { file_path, content } => (
-            12,
-            cursor_edit_tool_call_proto(file_path, content, call.result.as_ref()),
-        ),
-        Tool::MultiEdit { file_path, edits } => (
-            12,
-            cursor_edit_tool_call_proto(
-                file_path,
-                &serde_json::to_string_pretty(edits).unwrap_or_else(|_| "[]".to_string()),
-                call.result.as_ref(),
-            ),
-        ),
+        } => {
+            let payload =
+                CursorEditPayload::replace(file_path, old_string, new_string, call.result.as_ref());
+            (
+                12,
+                cursor_edit_tool_call_proto(file_path, &payload, call.result.as_ref()),
+            )
+        }
+        Tool::Write { file_path, content } => {
+            let payload = CursorEditPayload::write(file_path, content, call.result.as_ref());
+            (
+                12,
+                cursor_edit_tool_call_proto(file_path, &payload, call.result.as_ref()),
+            )
+        }
+        Tool::MultiEdit { file_path, edits } => {
+            let payload = CursorEditPayload::multi_edit(file_path, edits, call.result.as_ref());
+            (
+                12,
+                cursor_edit_tool_call_proto(file_path, &payload, call.result.as_ref()),
+            )
+        }
         Tool::Raw { .. } => return None,
     };
 
@@ -935,12 +937,12 @@ fn cursor_read_result_proto(
 
 fn cursor_edit_tool_call_proto(
     path: &str,
-    stream_content: &str,
+    payload: &CursorEditPayload,
     result: Option<&CursorStateToolResult>,
 ) -> Vec<u8> {
     let mut args = Vec::new();
     pb_string(&mut args, 1, path);
-    pb_string(&mut args, 6, stream_content);
+    pb_string(&mut args, 6, &payload.stream_content);
 
     let mut edit = Vec::new();
     pb_len(&mut edit, 1, &args);
@@ -948,7 +950,7 @@ fn cursor_edit_tool_call_proto(
         pb_len(
             &mut edit,
             2,
-            &cursor_edit_result_proto(path, stream_content, result),
+            &cursor_edit_result_proto(path, payload, result),
         );
     }
     edit
@@ -956,7 +958,7 @@ fn cursor_edit_tool_call_proto(
 
 fn cursor_edit_result_proto(
     path: &str,
-    stream_content: &str,
+    payload: &CursorEditPayload,
     result: &CursorStateToolResult,
 ) -> Vec<u8> {
     let output = tool_output_text(&result.content);
@@ -970,19 +972,160 @@ fn cursor_edit_result_proto(
     } else {
         let mut success = Vec::new();
         pb_string(&mut success, 1, path);
-        pb_string(&mut success, 5, &output);
-        pb_string(&mut success, 7, stream_content);
-        pb_string(&mut success, 8, &output);
+        if let Some(lines_added) = payload.lines_added {
+            pb_varint_field(&mut success, 3, lines_added);
+        }
+        if let Some(lines_removed) = payload.lines_removed {
+            pb_varint_field(&mut success, 4, lines_removed);
+        }
+        if let Some(diff_string) = &payload.diff_string {
+            pb_string(&mut success, 5, diff_string);
+        }
+        if let Some(before_full_file_content) = &payload.before_full_file_content {
+            pb_string(&mut success, 6, before_full_file_content);
+        }
+        pb_string(&mut success, 7, &payload.after_full_file_content);
+        pb_string(&mut success, 8, &payload.message);
         pb_len(&mut edit_result, 1, &success);
     }
     edit_result
 }
 
-fn edit_stream_content(old_string: &str, new_string: &str) -> String {
-    if old_string.is_empty() {
-        new_string.to_string()
-    } else {
-        format!("<<<<<<< SEARCH\n{old_string}\n=======\n{new_string}\n>>>>>>> REPLACE")
+#[derive(Debug)]
+struct CursorEditPayload {
+    stream_content: String,
+    diff_string: Option<String>,
+    before_full_file_content: Option<String>,
+    after_full_file_content: String,
+    lines_added: Option<u64>,
+    lines_removed: Option<u64>,
+    message: String,
+}
+
+impl CursorEditPayload {
+    fn replace(
+        path: &str,
+        old_string: &str,
+        new_string: &str,
+        result: Option<&CursorStateToolResult>,
+    ) -> Self {
+        Self {
+            stream_content: new_string.to_string(),
+            diff_string: Some(unified_replace_diff(path, old_string, new_string)),
+            before_full_file_content: Some(old_string.to_string()),
+            after_full_file_content: new_string.to_string(),
+            lines_added: Some(line_count(new_string)),
+            lines_removed: Some(line_count(old_string)),
+            message: edit_success_message(path, result, "updated"),
+        }
+    }
+
+    fn write(path: &str, content: &str, result: Option<&CursorStateToolResult>) -> Self {
+        Self {
+            stream_content: content.to_string(),
+            diff_string: Some(unified_write_diff(path, content)),
+            before_full_file_content: None,
+            after_full_file_content: content.to_string(),
+            lines_added: Some(line_count(content)),
+            lines_removed: Some(0),
+            message: edit_success_message(path, result, "written"),
+        }
+    }
+
+    fn multi_edit(path: &str, edits: &[EditOp], result: Option<&CursorStateToolResult>) -> Self {
+        let stream_content = edits
+            .iter()
+            .map(|edit| edit.new_string.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let diff_string = edits
+            .iter()
+            .map(|edit| unified_replace_diff(path, &edit.old_string, &edit.new_string))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let before_full_file_content = edits
+            .iter()
+            .map(|edit| edit.old_string.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let after_full_file_content = if stream_content.is_empty() {
+            serde_json::to_string_pretty(edits).unwrap_or_else(|_| "[]".to_string())
+        } else {
+            stream_content.clone()
+        };
+        Self {
+            stream_content,
+            diff_string: (!diff_string.is_empty()).then_some(diff_string),
+            before_full_file_content: (!before_full_file_content.is_empty())
+                .then_some(before_full_file_content),
+            after_full_file_content,
+            lines_added: Some(
+                edits
+                    .iter()
+                    .map(|edit| line_count(&edit.new_string))
+                    .sum::<u64>(),
+            ),
+            lines_removed: Some(
+                edits
+                    .iter()
+                    .map(|edit| line_count(&edit.old_string))
+                    .sum::<u64>(),
+            ),
+            message: edit_success_message(path, result, "updated"),
+        }
+    }
+}
+
+fn edit_success_message(
+    path: &str,
+    result: Option<&CursorStateToolResult>,
+    fallback_action: &str,
+) -> String {
+    result
+        .filter(|result| !result.is_error)
+        .map(|result| tool_output_text(&result.content))
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| match fallback_action {
+            "written" => format!("Wrote contents to {path}"),
+            _ => format!("The file {path} has been updated."),
+        })
+}
+
+fn unified_replace_diff(path: &str, old_string: &str, new_string: &str) -> String {
+    let old_len = line_count(old_string);
+    let new_len = line_count(new_string);
+    let old_range = diff_range(old_len);
+    let new_range = diff_range(new_len);
+    let mut out = format!("--- a/{path}\n+++ b/{path}\n@@ -{old_range} +{new_range} @@\n");
+    append_diff_lines(&mut out, '-', old_string);
+    append_diff_lines(&mut out, '+', new_string);
+    out
+}
+
+fn unified_write_diff(path: &str, content: &str) -> String {
+    let new_len = line_count(content);
+    let new_range = diff_range(new_len);
+    let mut out = format!("--- /dev/null\n+++ b/{path}\n@@ -0,0 +{new_range} @@\n");
+    append_diff_lines(&mut out, '+', content);
+    out
+}
+
+fn diff_range(lines: u64) -> String {
+    match lines {
+        0 => "0,0".to_string(),
+        1 => "1".to_string(),
+        _ => format!("1,{lines}"),
+    }
+}
+
+fn append_diff_lines(out: &mut String, prefix: char, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    for line in text.lines() {
+        out.push(prefix);
+        out.push_str(line);
+        out.push('\n');
     }
 }
 
