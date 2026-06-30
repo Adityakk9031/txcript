@@ -219,13 +219,111 @@ fn from_common_writes_cursor_resume_state_turns() {
         native.body.blobs.iter().any(|blob| blob.id == user_id),
         "user message blob exists"
     );
+    let mut read_tool_call = None;
     for step_ref in step_refs {
         let step_id = hex_encode_test(&step_ref);
-        assert!(
-            native.body.blobs.iter().any(|blob| blob.id == step_id),
-            "step blob {step_id} exists"
-        );
+        let step_blob = native
+            .body
+            .blobs
+            .iter()
+            .find(|blob| blob.id == step_id)
+            .unwrap_or_else(|| panic!("step blob {step_id} exists"));
+        if let Some(tool_call) = len_fields(&step_blob.data, 2).into_iter().next() {
+            assert_eq!(string_fields(&tool_call, 57), vec!["tool-1".to_string()]);
+            read_tool_call = len_fields(&tool_call, 8).into_iter().next();
+        }
     }
+
+    let read_tool_call = read_tool_call.expect("read tool call step exists");
+    let read_args = len_fields(&read_tool_call, 1);
+    let read_result = len_fields(&read_tool_call, 2);
+    assert_eq!(read_args.len(), 1);
+    assert_eq!(read_result.len(), 1);
+    assert_eq!(
+        string_fields(&read_args[0], 1),
+        vec!["/repo/README.md".to_string()]
+    );
+
+    let read_success = len_fields(&read_result[0], 1);
+    assert_eq!(read_success.len(), 1);
+    assert_eq!(
+        string_fields(&read_success[0], 1),
+        vec!["contents".to_string()]
+    );
+    assert_eq!(
+        string_fields(&read_success[0], 7),
+        vec!["/repo/README.md".to_string()]
+    );
+}
+
+#[test]
+fn from_common_writes_cursor_shell_tool_calls() {
+    let mut common = sample_common();
+    common.body = vec![
+        Message {
+            role: Role::User,
+            content: vec![Block::Text {
+                text: "check git".into(),
+            }],
+            timestamp: ts("2026-01-02T03:04:06.000Z"),
+            model: None,
+            stop_reason: None,
+            usage: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![Block::ToolUse {
+                id: "shell-1".into(),
+                tool: Tool::Bash {
+                    command: "git status --short".into(),
+                    workdir: Some("/repo".into()),
+                    timeout_ms: None,
+                    description: Some("Show status".into()),
+                    run_in_background: false,
+                },
+            }],
+            timestamp: ts("2026-01-02T03:04:07.000Z"),
+            model: None,
+            stop_reason: None,
+            usage: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![Block::ToolResult {
+                tool_use_id: "shell-1".into(),
+                content: ToolOutput::Text(" M src/main.rs".into()),
+                is_error: false,
+            }],
+            timestamp: ts("2026-01-02T03:04:08.000Z"),
+            model: None,
+            stop_reason: None,
+            usage: None,
+        },
+    ];
+
+    let native = Cursor::from_common(&common).unwrap();
+    let tool_call = first_tool_call(&native.body).expect("shell tool call");
+    let shell = len_fields(&tool_call, 1);
+    assert_eq!(shell.len(), 1);
+    assert_eq!(string_fields(&tool_call, 57), vec!["shell-1".to_string()]);
+
+    let args = len_fields(&shell[0], 1);
+    let result = len_fields(&shell[0], 2);
+    assert_eq!(args.len(), 1);
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+        string_fields(&args[0], 1),
+        vec!["git status --short".to_string()]
+    );
+    assert_eq!(string_fields(&args[0], 2), vec!["/repo".to_string()]);
+    assert_eq!(string_fields(&args[0], 4), vec!["shell-1".to_string()]);
+
+    let success = len_fields(&result[0], 1);
+    assert_eq!(success.len(), 1);
+    assert_eq!(
+        string_fields(&success[0], 5),
+        vec![" M src/main.rs".to_string()]
+    );
 }
 
 #[test]
@@ -354,6 +452,33 @@ fn cursor_meta_json(body: &txcript::harness::cursor::CursorDb) -> serde_json::Va
         .as_str();
     let decoded = hex_decode_test(raw);
     serde_json::from_slice(&decoded).expect("cursor meta json")
+}
+
+fn first_tool_call(body: &txcript::harness::cursor::CursorDb) -> Option<Vec<u8>> {
+    let root = latest_root_blob(body);
+    for turn_ref in len_fields(&root.data, 8) {
+        let turn_id = hex_encode_test(&turn_ref);
+        let turn_blob = body.blobs.iter().find(|blob| blob.id == turn_id)?;
+        for agent_turn in len_fields(&turn_blob.data, 1) {
+            for step_ref in len_fields(&agent_turn, 2) {
+                let step_id = hex_encode_test(&step_ref);
+                let Some(step_blob) = body.blobs.iter().find(|blob| blob.id == step_id) else {
+                    continue;
+                };
+                if let Some(tool_call) = len_fields(&step_blob.data, 2).into_iter().next() {
+                    return Some(tool_call);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn string_fields(data: &[u8], wanted_field: u64) -> Vec<String> {
+    len_fields(data, wanted_field)
+        .into_iter()
+        .map(|bytes| String::from_utf8(bytes).expect("utf-8 field"))
+        .collect()
 }
 
 fn len_fields(data: &[u8], wanted_field: u64) -> Vec<Vec<u8>> {

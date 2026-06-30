@@ -5,7 +5,7 @@
 //! carry Cursor's internal graph state. This harness preserves every blob byte
 //! for native load/save, while converting JSON message blobs through `Common`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -487,6 +487,20 @@ struct CursorStateTurn {
 enum CursorStateStep {
     Assistant(String),
     Thinking(String),
+    Tool(CursorStateToolCall),
+}
+
+#[derive(Debug)]
+struct CursorStateToolCall {
+    id: String,
+    tool: Tool,
+    result: Option<CursorStateToolResult>,
+}
+
+#[derive(Debug, Clone)]
+struct CursorStateToolResult {
+    content: ToolOutput,
+    is_error: bool,
 }
 
 fn cursor_state_blobs(
@@ -508,6 +522,7 @@ fn cursor_state_blobs(
             let data = match step {
                 CursorStateStep::Assistant(text) => cursor_assistant_step_proto(text),
                 CursorStateStep::Thinking(text) => cursor_thinking_step_proto(text),
+                CursorStateStep::Tool(call) => cursor_tool_step_proto(meta, call),
             };
             if data.is_empty() {
                 continue;
@@ -529,6 +544,8 @@ fn cursor_state_blobs(
 fn cursor_state_turns(meta: &Meta, messages: &[Message]) -> Vec<CursorStateTurn> {
     let mut turns = Vec::new();
     let mut current: Option<CursorStateTurn> = None;
+    let tool_results = cursor_tool_results(messages);
+    let known_tool_uses = cursor_tool_use_ids(messages);
 
     for message in messages {
         match message.role {
@@ -544,7 +561,8 @@ fn cursor_state_turns(meta: &Meta, messages: &[Message]) -> Vec<CursorStateTurn>
                     });
                 }
 
-                let tool_result_text = tool_result_state_text(&message.content);
+                let tool_result_text =
+                    orphan_tool_result_state_text(&message.content, &known_tool_uses);
                 if !tool_result_text.is_empty() {
                     let turn = current.get_or_insert_with(|| CursorStateTurn {
                         user_text: "Tool result".to_string(),
@@ -562,7 +580,8 @@ fn cursor_state_turns(meta: &Meta, messages: &[Message]) -> Vec<CursorStateTurn>
                         .unwrap_or_else(|| "Continue.".to_string()),
                     steps: Vec::new(),
                 });
-                turn.steps.extend(assistant_state_steps(&message.content));
+                turn.steps
+                    .extend(assistant_state_steps(&message.content, &tool_results));
             }
         }
     }
@@ -573,6 +592,41 @@ fn cursor_state_turns(meta: &Meta, messages: &[Message]) -> Vec<CursorStateTurn>
     turns
         .into_iter()
         .filter(|turn| !turn.user_text.trim().is_empty() || !turn.steps.is_empty())
+        .collect()
+}
+
+fn cursor_tool_results(messages: &[Message]) -> HashMap<String, CursorStateToolResult> {
+    let mut out = HashMap::new();
+    for message in messages {
+        for block in &message.content {
+            let Block::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = block
+            else {
+                continue;
+            };
+            out.insert(
+                tool_use_id.clone(),
+                CursorStateToolResult {
+                    content: content.clone(),
+                    is_error: *is_error,
+                },
+            );
+        }
+    }
+    out
+}
+
+fn cursor_tool_use_ids(messages: &[Message]) -> HashSet<String> {
+    messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            Block::ToolUse { id, .. } => Some(id.clone()),
+            _ => None,
+        })
         .collect()
 }
 
@@ -592,7 +646,10 @@ fn user_state_text(blocks: &[Block]) -> String {
         .join("\n\n")
 }
 
-fn assistant_state_steps(blocks: &[Block]) -> Vec<CursorStateStep> {
+fn assistant_state_steps(
+    blocks: &[Block],
+    tool_results: &HashMap<String, CursorStateToolResult>,
+) -> Vec<CursorStateStep> {
     blocks
         .iter()
         .filter_map(|block| match block {
@@ -602,9 +659,11 @@ fn assistant_state_steps(blocks: &[Block]) -> Vec<CursorStateStep> {
             Block::Thinking { text, .. } if !text.trim().is_empty() => {
                 Some(CursorStateStep::Thinking(text.trim().to_string()))
             }
-            Block::ToolUse { id, tool } => {
-                Some(CursorStateStep::Assistant(tool_use_state_text(id, tool)))
-            }
+            Block::ToolUse { id, tool } => Some(CursorStateStep::Tool(CursorStateToolCall {
+                id: id.clone(),
+                tool: tool.clone(),
+                result: tool_results.get(id).cloned(),
+            })),
             Block::Image { source } => Some(CursorStateStep::Assistant(format!(
                 "[image: {}]",
                 source.media_type
@@ -620,7 +679,7 @@ fn tool_use_state_text(id: &str, tool: &Tool) -> String {
     format!("Tool call {name} ({id}):\n{args}")
 }
 
-fn tool_result_state_text(blocks: &[Block]) -> String {
+fn orphan_tool_result_state_text(blocks: &[Block], known_tool_uses: &HashSet<String>) -> String {
     blocks
         .iter()
         .filter_map(|block| {
@@ -632,6 +691,9 @@ fn tool_result_state_text(blocks: &[Block]) -> String {
             else {
                 return None;
             };
+            if known_tool_uses.contains(tool_use_id) {
+                return None;
+            }
             let status = if *is_error { "error" } else { "result" };
             Some(format!(
                 "Tool {status} for {tool_use_id}:\n{}",
@@ -669,6 +731,267 @@ fn cursor_thinking_step_proto(text: &str) -> Vec<u8> {
     let mut step = Vec::new();
     pb_len(&mut step, 3, &thinking);
     step
+}
+
+fn cursor_tool_step_proto(meta: &Meta, call: &CursorStateToolCall) -> Vec<u8> {
+    let Some(tool_call) = cursor_tool_call_proto(meta, call) else {
+        return cursor_assistant_step_proto(&tool_use_state_text(&call.id, &call.tool));
+    };
+    let mut step = Vec::new();
+    pb_len(&mut step, 2, &tool_call);
+    step
+}
+
+fn cursor_tool_call_proto(meta: &Meta, call: &CursorStateToolCall) -> Option<Vec<u8>> {
+    let (field, tool_data) = match &call.tool {
+        Tool::Bash {
+            command,
+            workdir,
+            timeout_ms,
+            description,
+            run_in_background,
+        } => (
+            1,
+            cursor_shell_tool_call_proto(
+                command,
+                workdir
+                    .as_deref()
+                    .or(meta.cwd.as_deref())
+                    .unwrap_or_default(),
+                *timeout_ms,
+                description.as_deref(),
+                *run_in_background,
+                &call.id,
+                call.result.as_ref(),
+            ),
+        ),
+        Tool::Read {
+            file_path,
+            offset,
+            limit,
+        } => (
+            8,
+            cursor_read_tool_call_proto(file_path, *offset, *limit, call.result.as_ref()),
+        ),
+        Tool::Edit {
+            file_path,
+            old_string,
+            new_string,
+            ..
+        } => (
+            12,
+            cursor_edit_tool_call_proto(
+                file_path,
+                &edit_stream_content(old_string, new_string),
+                call.result.as_ref(),
+            ),
+        ),
+        Tool::Write { file_path, content } => (
+            12,
+            cursor_edit_tool_call_proto(file_path, content, call.result.as_ref()),
+        ),
+        Tool::MultiEdit { file_path, edits } => (
+            12,
+            cursor_edit_tool_call_proto(
+                file_path,
+                &serde_json::to_string_pretty(edits).unwrap_or_else(|_| "[]".to_string()),
+                call.result.as_ref(),
+            ),
+        ),
+        Tool::Raw { .. } => return None,
+    };
+
+    let mut out = Vec::new();
+    pb_len(&mut out, field, &tool_data);
+    pb_string(&mut out, 57, &call.id);
+    Some(out)
+}
+
+fn cursor_shell_tool_call_proto(
+    command: &str,
+    workdir: &str,
+    timeout_ms: Option<u64>,
+    description: Option<&str>,
+    run_in_background: bool,
+    tool_call_id: &str,
+    result: Option<&CursorStateToolResult>,
+) -> Vec<u8> {
+    let mut args = Vec::new();
+    pb_string(&mut args, 1, command);
+    pb_string(&mut args, 2, workdir);
+    if let Some(timeout_ms) = timeout_ms.and_then(|v| u32::try_from(v).ok()) {
+        pb_varint_field(&mut args, 3, timeout_ms as u64);
+    }
+    pb_string(&mut args, 4, tool_call_id);
+    if run_in_background {
+        pb_bool_field(&mut args, 11, true);
+        pb_varint_field(&mut args, 13, 2);
+    }
+    if let Some(description) = description {
+        pb_string(&mut args, 15, description);
+    }
+
+    let mut shell = Vec::new();
+    pb_len(&mut shell, 1, &args);
+    if let Some(result) = result {
+        pb_len(
+            &mut shell,
+            2,
+            &cursor_shell_result_proto(command, workdir, result),
+        );
+    }
+    if let Some(description) = description {
+        pb_string(&mut shell, 3, description);
+    }
+    shell
+}
+
+fn cursor_shell_result_proto(
+    command: &str,
+    workdir: &str,
+    result: &CursorStateToolResult,
+) -> Vec<u8> {
+    let output = tool_output_text(&result.content);
+    let mut shell_result = Vec::new();
+    if result.is_error {
+        let mut failure = Vec::new();
+        pb_string(&mut failure, 1, command);
+        pb_string(&mut failure, 2, workdir);
+        pb_varint_field(&mut failure, 3, 1);
+        pb_string(&mut failure, 6, &output);
+        pb_len(&mut shell_result, 2, &failure);
+    } else {
+        let mut success = Vec::new();
+        pb_string(&mut success, 1, command);
+        pb_string(&mut success, 2, workdir);
+        pb_varint_field(&mut success, 3, 0);
+        pb_string(&mut success, 5, &output);
+        pb_len(&mut shell_result, 1, &success);
+    }
+    shell_result
+}
+
+fn cursor_read_tool_call_proto(
+    path: &str,
+    offset: Option<u64>,
+    limit: Option<u64>,
+    result: Option<&CursorStateToolResult>,
+) -> Vec<u8> {
+    let offset_u32 = offset.and_then(|v| u32::try_from(v).ok());
+    let limit_u32 = limit.and_then(|v| u32::try_from(v).ok());
+    let mut args = Vec::new();
+    pb_string(&mut args, 1, path);
+    if let Some(offset) = offset_u32 {
+        pb_varint_field(&mut args, 2, offset as u64);
+    }
+    if let Some(limit) = limit_u32 {
+        pb_varint_field(&mut args, 3, limit as u64);
+    }
+
+    let mut read = Vec::new();
+    pb_len(&mut read, 1, &args);
+    if let Some(result) = result {
+        pb_len(
+            &mut read,
+            2,
+            &cursor_read_result_proto(path, offset_u32, result),
+        );
+    }
+    read
+}
+
+fn cursor_read_result_proto(
+    path: &str,
+    offset: Option<u32>,
+    result: &CursorStateToolResult,
+) -> Vec<u8> {
+    let mut read_result = Vec::new();
+    let text = tool_output_text(&result.content);
+    if result.is_error {
+        let mut error = Vec::new();
+        pb_string(&mut error, 1, &text);
+        pb_len(&mut read_result, 2, &error);
+    } else {
+        let mut success = Vec::new();
+        pb_string(&mut success, 1, &text);
+        if text.is_empty() {
+            pb_bool_field(&mut success, 2, true);
+        }
+        pb_varint_field(&mut success, 4, line_count(&text));
+        pb_varint_field(&mut success, 5, text.len() as u64);
+        pb_string(&mut success, 7, path);
+        if let Some(offset) = offset {
+            let mut range = Vec::new();
+            let start = offset.saturating_add(1);
+            let end = start.saturating_add(line_count(&text).saturating_sub(1) as u32);
+            pb_varint_field(&mut range, 1, start as u64);
+            pb_varint_field(&mut range, 2, end as u64);
+            pb_len(&mut success, 8, &range);
+        }
+        pb_len(&mut read_result, 1, &success);
+    }
+    read_result
+}
+
+fn cursor_edit_tool_call_proto(
+    path: &str,
+    stream_content: &str,
+    result: Option<&CursorStateToolResult>,
+) -> Vec<u8> {
+    let mut args = Vec::new();
+    pb_string(&mut args, 1, path);
+    pb_string(&mut args, 6, stream_content);
+
+    let mut edit = Vec::new();
+    pb_len(&mut edit, 1, &args);
+    if let Some(result) = result {
+        pb_len(
+            &mut edit,
+            2,
+            &cursor_edit_result_proto(path, stream_content, result),
+        );
+    }
+    edit
+}
+
+fn cursor_edit_result_proto(
+    path: &str,
+    stream_content: &str,
+    result: &CursorStateToolResult,
+) -> Vec<u8> {
+    let output = tool_output_text(&result.content);
+    let mut edit_result = Vec::new();
+    if result.is_error {
+        let mut error = Vec::new();
+        pb_string(&mut error, 1, path);
+        pb_string(&mut error, 2, &output);
+        pb_string(&mut error, 5, &output);
+        pb_len(&mut edit_result, 7, &error);
+    } else {
+        let mut success = Vec::new();
+        pb_string(&mut success, 1, path);
+        pb_string(&mut success, 5, &output);
+        pb_string(&mut success, 7, stream_content);
+        pb_string(&mut success, 8, &output);
+        pb_len(&mut edit_result, 1, &success);
+    }
+    edit_result
+}
+
+fn edit_stream_content(old_string: &str, new_string: &str) -> String {
+    if old_string.is_empty() {
+        new_string.to_string()
+    } else {
+        format!("<<<<<<< SEARCH\n{old_string}\n=======\n{new_string}\n>>>>>>> REPLACE")
+    }
+}
+
+fn line_count(text: &str) -> u64 {
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count() as u64
+    }
 }
 
 fn cursor_turn_structure_proto(user_id: &[u8; 32], step_ids: &[[u8; 32]]) -> Vec<u8> {
@@ -719,6 +1042,10 @@ fn pb_len(out: &mut Vec<u8>, field: u32, bytes: &[u8]) {
 fn pb_varint_field(out: &mut Vec<u8>, field: u32, value: u64) {
     pb_key(out, field, 0);
     pb_varint(out, value);
+}
+
+fn pb_bool_field(out: &mut Vec<u8>, field: u32, value: bool) {
+    pb_varint_field(out, field, u64::from(value));
 }
 
 fn pb_key(out: &mut Vec<u8>, field: u32, wire_type: u8) {
