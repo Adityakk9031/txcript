@@ -16,6 +16,7 @@ Supported harnesses (string ids in parentheses, used by the CLI and WASM):
 - OpenCode (`opencode`)
 - pi (`pi`)
 - Campfire (`campfire`)
+- Cursor (`cursor`)
 
 It ships three ways: a **Rust library**, a **CLI**, and a **WASM module** for
 Bun / Node / the browser.
@@ -36,7 +37,7 @@ Three layers, smallest to largest:
 - `TextCodec` — `from_text` / `to_text`: parse/render a harness's native session
   text, no I/O.
 - `Store` — discover/load/save against a real backend (session directories, or
-  OpenCode's SQLite DB).
+  SQLite DBs for OpenCode and Cursor).
 
 Convert in memory (no filesystem):
 
@@ -150,13 +151,13 @@ writeFileSync("session.jsonl", convert(input, "codex", "claude_code"));
 const common = JSON.parse(toCommon(input, "codex"));   // { meta, messages }
 const pi = fromCommon(JSON.stringify(common), "pi");
 
-harnesses(); // ["claude_code","codex","opencode","pi","campfire"]
+harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor"]
 ```
 
 Text-in / text-out: `input` is a harness's native session text (JSONL for
-claude_code/codex/pi/campfire, the `opencode export` JSON for opencode); the
-result is the target's native text. Invalid harness names or unparseable input
-throw a JS `Error`.
+claude_code/codex/pi/campfire, the `opencode export` JSON for opencode, and a
+JSON export of Cursor's `store.db` for cursor); the result is the target's
+native text. Invalid harness names or unparseable input throw a JS `Error`.
 
 ## Development
 

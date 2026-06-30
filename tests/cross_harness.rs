@@ -12,8 +12,8 @@
 
 use chrono::{DateTime, Utc};
 use txcript::{
-    Block, Campfire, ClaudeCode, Codec, Codex, Common, Message, Meta, OpenCode, Pi, Role, Tool,
-    ToolOutput, Transcript, convert,
+    Block, Campfire, ClaudeCode, Codec, Codex, Common, Cursor, Message, Meta, OpenCode, Pi, Role,
+    Tool, ToolOutput, Transcript, convert,
 };
 
 fn ts(s: &str) -> DateTime<Utc> {
@@ -169,8 +169,15 @@ fn conversation_survives_every_hop() {
         "campfire"
     );
 
+    let cursor = convert::<Campfire, Cursor>(&campfire).unwrap();
+    assert_eq!(
+        signature(&Cursor::to_common(&cursor).unwrap()),
+        expected,
+        "cursor"
+    );
+
     // And all the way back to Claude.
-    let round = convert::<Campfire, ClaudeCode>(&campfire).unwrap();
+    let round = convert::<Cursor, ClaudeCode>(&cursor).unwrap();
     assert_eq!(
         signature(&ClaudeCode::to_common(&round).unwrap()),
         expected,

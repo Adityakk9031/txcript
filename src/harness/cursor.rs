@@ -1,0 +1,1601 @@
+//! Cursor agent sessions: `~/.cursor/chats/<md5(workspace)>/<id>/store.db`.
+//!
+//! Cursor's resumable store is a small SQLite database with content-addressed
+//! blobs. JSON message blobs carry the conversation; non-JSON/protobuf blobs
+//! carry Cursor's internal graph state. This harness preserves every blob byte
+//! for native load/save, while converting JSON message blobs through `Common`.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+use uuid::Uuid;
+
+use crate::common::{Block, ImageSource, Message, Meta, Role, Tool, ToolOutput};
+use crate::error::{Error, Result};
+use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
+
+#[cfg(feature = "opencode")]
+use rusqlite::{Connection, OpenFlags, params};
+#[cfg(feature = "opencode")]
+use std::fs;
+
+/// The Cursor harness marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cursor;
+
+impl Harness for Cursor {
+    const NAME: &'static str = "cursor";
+    type Body = CursorDb;
+}
+
+/// Faithful in-memory representation of `store.db`, plus sibling `meta.json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CursorDb {
+    pub blobs: Vec<CursorBlob>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub meta: Vec<CursorMetaEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_meta: Option<Value>,
+}
+
+/// One row in Cursor's `blobs` table. `id` is SHA-256 of `data`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CursorBlob {
+    pub id: String,
+    #[serde(with = "serde_hex")]
+    pub data: Vec<u8>,
+}
+
+/// One row in Cursor's `meta` table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorMetaEntry {
+    pub key: String,
+    pub value: String,
+}
+
+impl Codec for Cursor {
+    fn to_common(transcript: &Transcript<Self>) -> Result<Transcript<Common>> {
+        Ok(Transcript::new(
+            transcript.meta.clone(),
+            db_to_messages(&transcript.body, &transcript.meta),
+        ))
+    }
+
+    fn from_common(transcript: &Transcript<Common>) -> Result<Transcript<Self>> {
+        Ok(Transcript::new(
+            transcript.meta.clone(),
+            db_from_messages(&transcript.meta, &transcript.body)?,
+        ))
+    }
+}
+
+impl TextCodec for Cursor {
+    fn from_text(text: &str) -> Result<Transcript<Self>> {
+        let body: CursorDb = serde_json::from_str(text)?;
+        let meta = meta_from_db(&body, None);
+        Ok(Transcript::new(meta, body))
+    }
+
+    fn to_text(transcript: &Transcript<Self>) -> Result<String> {
+        Ok(serde_json::to_string_pretty(&transcript.body)?)
+    }
+}
+
+/// Reads and writes Cursor chat stores under a chats root
+/// (default `~/.cursor/chats`).
+#[derive(Debug, Clone)]
+pub struct CursorStore {
+    pub chats_dir: PathBuf,
+}
+
+impl CursorStore {
+    pub fn new(chats_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            chats_dir: chats_dir.into(),
+        }
+    }
+
+    /// The default Cursor chats root, `~/.cursor/chats`.
+    pub fn default_root() -> Option<Self> {
+        dirs_home().map(|h| Self::new(h.join(".cursor").join("chats")))
+    }
+
+    #[cfg(feature = "opencode")]
+    fn collect_sessions(&self) -> Vec<PathBuf> {
+        let Ok(workspaces) = fs::read_dir(&self.chats_dir) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for workspace in workspaces.flatten() {
+            let workspace_dir = workspace.path();
+            if !workspace_dir.is_dir() {
+                continue;
+            }
+            let Ok(sessions) = fs::read_dir(workspace_dir) else {
+                continue;
+            };
+            for session in sessions.flatten() {
+                let db = session.path().join("store.db");
+                if db.is_file() {
+                    out.push(db);
+                }
+            }
+        }
+        out
+    }
+
+    #[cfg(feature = "opencode")]
+    fn file_timestamp(path: &Path) -> DateTime<Utc> {
+        fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos()))
+            .unwrap_or_else(Utc::now)
+    }
+}
+
+#[cfg(feature = "opencode")]
+impl Store for CursorStore {
+    type H = Cursor;
+    type Ref = PathBuf;
+
+    fn discover(&self) -> Result<Vec<Discovered<PathBuf>>> {
+        let mut out = Vec::new();
+        for db_path in self.collect_sessions() {
+            let Ok(body) = read_db(&db_path) else {
+                continue;
+            };
+            let mut meta = meta_from_db(&body, Some(&db_path));
+            if meta.timestamp.timestamp_millis() == 0 {
+                meta.timestamp = Self::file_timestamp(&db_path);
+            }
+            out.push(Discovered {
+                meta,
+                reference: db_path,
+            });
+        }
+        Ok(out)
+    }
+
+    fn load(&self, reference: &PathBuf) -> Result<Transcript<Cursor>> {
+        let body = read_db(reference)?;
+        let mut meta = meta_from_db(&body, Some(reference));
+        if meta.timestamp.timestamp_millis() == 0 {
+            meta.timestamp = Self::file_timestamp(reference);
+        }
+        Ok(Transcript::new(meta, body))
+    }
+
+    fn save(&self, transcript: &Transcript<Cursor>) -> Result<Saved<PathBuf>> {
+        let id = if transcript.meta.id.is_empty() {
+            Uuid::new_v4().to_string()
+        } else {
+            transcript.meta.id.clone()
+        };
+        let cwd = transcript
+            .meta
+            .cwd
+            .clone()
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default();
+        let workspace = md5_hex(cwd.as_bytes());
+        let session_dir = self.chats_dir.join(workspace).join(&id);
+        fs::create_dir_all(&session_dir)?;
+
+        let mut body = transcript.body.clone();
+        ensure_cursor_meta(&mut body, &transcript.meta, &id);
+        let db_path = session_dir.join("store.db");
+        write_db(&db_path, &body)?;
+        write_session_files(&session_dir, &body, &transcript.meta, &id)?;
+
+        Ok(Saved {
+            id,
+            reference: db_path,
+        })
+    }
+
+    fn fingerprints(&self, refs: &[PathBuf]) -> Result<HashMap<String, String>> {
+        let mut out = HashMap::with_capacity(refs.len());
+        for path in refs {
+            out.insert(path.to_string_lossy().into_owned(), file_fingerprint(path));
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(not(feature = "opencode"))]
+impl Store for CursorStore {
+    type H = Cursor;
+    type Ref = PathBuf;
+
+    fn discover(&self) -> Result<Vec<Discovered<PathBuf>>> {
+        Ok(Vec::new())
+    }
+
+    fn load(&self, _reference: &PathBuf) -> Result<Transcript<Cursor>> {
+        Err(sqlite_unavailable())
+    }
+
+    fn save(&self, _transcript: &Transcript<Cursor>) -> Result<Saved<PathBuf>> {
+        Err(sqlite_unavailable())
+    }
+}
+
+// -- sqlite store --------------------------------------------------------
+
+#[cfg(feature = "opencode")]
+fn read_db(db_path: &Path) -> Result<CursorDb> {
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(sqlite_err)?;
+    let mut blobs_stmt = conn
+        .prepare("SELECT id, data FROM blobs ORDER BY rowid")
+        .map_err(sqlite_err)?;
+    let blobs = blobs_stmt
+        .query_map([], |row| {
+            Ok(CursorBlob {
+                id: row.get(0)?,
+                data: row.get(1)?,
+            })
+        })
+        .map_err(sqlite_err)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(sqlite_err)?;
+
+    let mut meta = Vec::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT key, value FROM meta ORDER BY key") {
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(CursorMetaEntry {
+                    key: row.get(0)?,
+                    value: row.get(1)?,
+                })
+            })
+            .map_err(sqlite_err)?;
+        meta = rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sqlite_err)?;
+    }
+
+    let session_meta = db_path
+        .parent()
+        .and_then(|p| fs::read_to_string(p.join("meta.json")).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+
+    Ok(CursorDb {
+        blobs,
+        meta,
+        session_meta,
+    })
+}
+
+#[cfg(feature = "opencode")]
+fn write_db(db_path: &Path, body: &CursorDb) -> Result<()> {
+    let conn = Connection::open(db_path).map_err(sqlite_err)?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS blobs (id TEXT PRIMARY KEY, data BLOB);
+         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+         DELETE FROM blobs;
+         DELETE FROM meta;",
+    )
+    .map_err(sqlite_err)?;
+    for blob in &body.blobs {
+        conn.execute(
+            "INSERT OR REPLACE INTO blobs (id, data) VALUES (?1, ?2)",
+            params![blob.id, blob.data],
+        )
+        .map_err(sqlite_err)?;
+    }
+    for entry in &body.meta {
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            params![entry.key, entry.value],
+        )
+        .map_err(sqlite_err)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "opencode")]
+fn sqlite_err(e: rusqlite::Error) -> Error {
+    Error::Malformed {
+        harness: Cursor::NAME,
+        detail: e.to_string(),
+    }
+}
+
+#[cfg(not(feature = "opencode"))]
+fn sqlite_unavailable() -> Error {
+    Error::Unconvertible {
+        harness: Cursor::NAME,
+        detail: "Cursor store support requires the `opencode` feature for SQLite".to_string(),
+    }
+}
+
+// -- db <-> common -------------------------------------------------------
+
+fn db_to_messages(db: &CursorDb, meta: &Meta) -> Vec<Message> {
+    let fallback_ts = meta.timestamp;
+    let mut messages = Vec::new();
+    let mut message_idx = 0usize;
+
+    for blob in &db.blobs {
+        let Ok(obj) = serde_json::from_slice::<Value>(&blob.data) else {
+            continue;
+        };
+        let Some(role) = obj.get("role").and_then(Value::as_str) else {
+            continue;
+        };
+        match role {
+            "system" => {}
+            "user" => {
+                if is_context_injection(&obj) {
+                    continue;
+                }
+                let content = parse_user_content(&obj);
+                if content.is_empty() {
+                    continue;
+                }
+                messages.push(Message {
+                    role: Role::User,
+                    content,
+                    timestamp: timestamp_from_obj(&obj).unwrap_or(fallback_ts),
+                    model: None,
+                    stop_reason: None,
+                    usage: None,
+                });
+                message_idx += 1;
+            }
+            "assistant" => {
+                let content = parse_assistant_content(&obj, &meta.id, message_idx);
+                if content.is_empty() {
+                    continue;
+                }
+                messages.push(Message {
+                    role: Role::Assistant,
+                    content,
+                    timestamp: timestamp_from_obj(&obj).unwrap_or(fallback_ts),
+                    model: cursor_model(&obj).or_else(|| meta.model.clone()),
+                    stop_reason: None,
+                    usage: None,
+                });
+                message_idx += 1;
+            }
+            "tool" => {
+                let content = parse_tool_content(&obj);
+                if content.is_empty() {
+                    continue;
+                }
+                messages.push(Message {
+                    role: Role::User,
+                    content,
+                    timestamp: timestamp_from_obj(&obj).unwrap_or(fallback_ts),
+                    model: None,
+                    stop_reason: None,
+                    usage: None,
+                });
+                message_idx += 1;
+            }
+            _ => {}
+        }
+    }
+    messages
+}
+
+fn db_from_messages(meta: &Meta, messages: &[Message]) -> Result<CursorDb> {
+    let mut values = Vec::new();
+    let mut tool_names = HashMap::new();
+
+    for message in messages {
+        match message.role {
+            Role::User => {
+                let mut user_blocks = Vec::new();
+                for block in &message.content {
+                    match block {
+                        Block::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } => {
+                            let tool_name = tool_names
+                                .get(tool_use_id)
+                                .cloned()
+                                .unwrap_or_else(|| "tool".to_string());
+                            values.push(json!({
+                                "role": "tool",
+                                "content": [{
+                                    "type": "tool-result",
+                                    "toolCallId": tool_use_id,
+                                    "toolName": tool_name,
+                                    "result": tool_output_text(content),
+                                }],
+                                "createdAt": message.timestamp.timestamp_millis(),
+                                "isError": is_error,
+                            }));
+                        }
+                        other => {
+                            user_blocks.push(serialize_user_block(other));
+                        }
+                    }
+                }
+                if !user_blocks.is_empty() {
+                    values.push(json!({
+                        "role": "user",
+                        "content": user_blocks,
+                        "createdAt": message.timestamp.timestamp_millis(),
+                    }));
+                }
+            }
+            Role::Assistant => {
+                let mut content = Vec::new();
+                for block in &message.content {
+                    if let Some(v) = serialize_assistant_block(block, &mut tool_names) {
+                        content.push(v);
+                    }
+                }
+                if !content.is_empty() {
+                    let mut obj = json!({
+                        "role": "assistant",
+                        "content": content,
+                        "createdAt": message.timestamp.timestamp_millis(),
+                    });
+                    if let Some(model) = message.model.as_ref().or(meta.model.as_ref()) {
+                        obj["providerOptions"] = json!({"cursor": {"modelName": model}});
+                    }
+                    values.push(obj);
+                }
+            }
+        }
+    }
+
+    let mut blobs = Vec::new();
+    let mut message_ids = Vec::new();
+    for value in values {
+        let data = serde_json::to_vec(&value)?;
+        let id = sha256_hex(&data);
+        message_ids.push(id.clone());
+        blobs.push(CursorBlob { id, data });
+    }
+    blobs.extend(cursor_state_blobs(meta, messages, &message_ids)?);
+
+    let mut body = CursorDb {
+        blobs,
+        meta: Vec::new(),
+        session_meta: None,
+    };
+    ensure_cursor_meta(&mut body, meta, &meta.id);
+    Ok(body)
+}
+
+#[derive(Debug, Default)]
+struct CursorStateTurn {
+    user_text: String,
+    steps: Vec<CursorStateStep>,
+}
+
+#[derive(Debug)]
+enum CursorStateStep {
+    Assistant(String),
+    Thinking(String),
+}
+
+fn cursor_state_blobs(
+    meta: &Meta,
+    messages: &[Message],
+    _message_ids: &[String],
+) -> Result<Vec<CursorBlob>> {
+    let turns = cursor_state_turns(meta, messages);
+    let mut blobs = Vec::new();
+    let mut turn_ids = Vec::new();
+
+    for (turn_idx, turn) in turns.iter().enumerate() {
+        let user_blob = cursor_blob(cursor_user_message_proto(meta, turn_idx, &turn.user_text));
+        let user_id = sha256(&user_blob.data);
+        blobs.push(user_blob);
+
+        let mut step_ids = Vec::new();
+        for step in &turn.steps {
+            let data = match step {
+                CursorStateStep::Assistant(text) => cursor_assistant_step_proto(text),
+                CursorStateStep::Thinking(text) => cursor_thinking_step_proto(text),
+            };
+            if data.is_empty() {
+                continue;
+            }
+            let step_blob = cursor_blob(data);
+            step_ids.push(sha256(&step_blob.data));
+            blobs.push(step_blob);
+        }
+
+        let turn_blob = cursor_blob(cursor_turn_structure_proto(&user_id, &step_ids));
+        turn_ids.push(sha256(&turn_blob.data));
+        blobs.push(turn_blob);
+    }
+
+    blobs.push(cursor_blob(cursor_root_state_proto(meta, &turn_ids)));
+    Ok(blobs)
+}
+
+fn cursor_state_turns(meta: &Meta, messages: &[Message]) -> Vec<CursorStateTurn> {
+    let mut turns = Vec::new();
+    let mut current: Option<CursorStateTurn> = None;
+
+    for message in messages {
+        match message.role {
+            Role::User => {
+                let user_text = user_state_text(&message.content);
+                if !user_text.is_empty() {
+                    if let Some(turn) = current.take() {
+                        turns.push(turn);
+                    }
+                    current = Some(CursorStateTurn {
+                        user_text,
+                        steps: Vec::new(),
+                    });
+                }
+
+                let tool_result_text = tool_result_state_text(&message.content);
+                if !tool_result_text.is_empty() {
+                    let turn = current.get_or_insert_with(|| CursorStateTurn {
+                        user_text: "Tool result".to_string(),
+                        steps: Vec::new(),
+                    });
+                    turn.steps
+                        .push(CursorStateStep::Assistant(tool_result_text));
+                }
+            }
+            Role::Assistant => {
+                let turn = current.get_or_insert_with(|| CursorStateTurn {
+                    user_text: meta
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| "Continue.".to_string()),
+                    steps: Vec::new(),
+                });
+                turn.steps.extend(assistant_state_steps(&message.content));
+            }
+        }
+    }
+
+    if let Some(turn) = current {
+        turns.push(turn);
+    }
+    turns
+        .into_iter()
+        .filter(|turn| !turn.user_text.trim().is_empty() || !turn.steps.is_empty())
+        .collect()
+}
+
+fn user_state_text(blocks: &[Block]) -> String {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Text { text } => Some(text.trim().to_string()),
+            Block::Image { source } => Some(format!("[image: {}]", source.media_type)),
+            Block::Thinking { text, .. } if !text.trim().is_empty() => {
+                Some(text.trim().to_string())
+            }
+            Block::Thinking { .. } | Block::ToolUse { .. } | Block::ToolResult { .. } => None,
+        })
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn assistant_state_steps(blocks: &[Block]) -> Vec<CursorStateStep> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Text { text } if !text.trim().is_empty() => {
+                Some(CursorStateStep::Assistant(text.trim().to_string()))
+            }
+            Block::Thinking { text, .. } if !text.trim().is_empty() => {
+                Some(CursorStateStep::Thinking(text.trim().to_string()))
+            }
+            Block::ToolUse { id, tool } => {
+                Some(CursorStateStep::Assistant(tool_use_state_text(id, tool)))
+            }
+            Block::Image { source } => Some(CursorStateStep::Assistant(format!(
+                "[image: {}]",
+                source.media_type
+            ))),
+            Block::Text { .. } | Block::Thinking { .. } | Block::ToolResult { .. } => None,
+        })
+        .collect()
+}
+
+fn tool_use_state_text(id: &str, tool: &Tool) -> String {
+    let (name, input) = denormalize_tool(tool);
+    let args = serde_json::to_string_pretty(&input).unwrap_or_else(|_| input.to_string());
+    format!("Tool call {name} ({id}):\n{args}")
+}
+
+fn tool_result_state_text(blocks: &[Block]) -> String {
+    blocks
+        .iter()
+        .filter_map(|block| {
+            let Block::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = block
+            else {
+                return None;
+            };
+            let status = if *is_error { "error" } else { "result" };
+            Some(format!(
+                "Tool {status} for {tool_use_id}:\n{}",
+                tool_output_text(content)
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn cursor_blob(data: Vec<u8>) -> CursorBlob {
+    let id = sha256_hex(&data);
+    CursorBlob { id, data }
+}
+
+fn cursor_user_message_proto(meta: &Meta, turn_idx: usize, text: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    pb_string(&mut out, 1, text);
+    pb_string(&mut out, 2, &cursor_message_id(&meta.id, turn_idx, text));
+    pb_varint_field(&mut out, 4, 1);
+    out
+}
+
+fn cursor_assistant_step_proto(text: &str) -> Vec<u8> {
+    let mut assistant = Vec::new();
+    pb_string(&mut assistant, 1, text);
+    let mut step = Vec::new();
+    pb_len(&mut step, 1, &assistant);
+    step
+}
+
+fn cursor_thinking_step_proto(text: &str) -> Vec<u8> {
+    let mut thinking = Vec::new();
+    pb_string(&mut thinking, 1, text);
+    let mut step = Vec::new();
+    pb_len(&mut step, 3, &thinking);
+    step
+}
+
+fn cursor_turn_structure_proto(user_id: &[u8; 32], step_ids: &[[u8; 32]]) -> Vec<u8> {
+    let mut agent_turn = Vec::new();
+    pb_len(&mut agent_turn, 1, user_id);
+    for step_id in step_ids {
+        pb_len(&mut agent_turn, 2, step_id);
+    }
+
+    let mut turn = Vec::new();
+    pb_len(&mut turn, 1, &agent_turn);
+    turn
+}
+
+fn cursor_root_state_proto(meta: &Meta, turn_ids: &[[u8; 32]]) -> Vec<u8> {
+    let mut root = Vec::new();
+    for turn_id in turn_ids {
+        pb_len(&mut root, 8, turn_id);
+    }
+    pb_varint_field(&mut root, 10, 1);
+    let started_ms = meta.timestamp.timestamp_millis();
+    if started_ms > 0 {
+        pb_varint_field(&mut root, 26, started_ms as u64);
+    }
+    root
+}
+
+fn cursor_message_id(session_id: &str, turn_idx: usize, text: &str) -> String {
+    const NS: Uuid = Uuid::from_bytes([
+        0x7a, 0x63, 0x24, 0x1e, 0x88, 0x0d, 0x4d, 0xc9, 0xa7, 0x99, 0x3b, 0x25, 0x9f, 0x64, 0x12,
+        0x02,
+    ]);
+    Uuid::new_v5(&NS, format!("{session_id}:{turn_idx}:{text}").as_bytes()).to_string()
+}
+
+fn pb_string(out: &mut Vec<u8>, field: u32, value: &str) {
+    if !value.is_empty() {
+        pb_len(out, field, value.as_bytes());
+    }
+}
+
+fn pb_len(out: &mut Vec<u8>, field: u32, bytes: &[u8]) {
+    pb_key(out, field, 2);
+    pb_varint(out, bytes.len() as u64);
+    out.extend(bytes);
+}
+
+fn pb_varint_field(out: &mut Vec<u8>, field: u32, value: u64) {
+    pb_key(out, field, 0);
+    pb_varint(out, value);
+}
+
+fn pb_key(out: &mut Vec<u8>, field: u32, wire_type: u8) {
+    pb_varint(out, ((field as u64) << 3) | wire_type as u64);
+}
+
+fn pb_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn parse_user_content(obj: &Value) -> Vec<Block> {
+    match obj.get("content") {
+        Some(Value::String(s)) => text_blocks_from_str(s, true),
+        Some(Value::Array(arr)) => arr.iter().filter_map(parse_user_block).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_user_block(v: &Value) -> Option<Block> {
+    match v.get("type").and_then(Value::as_str)? {
+        "text" => {
+            let text = strip_user_query(v.get("text")?.as_str()?);
+            let text = clean_redacted_text(&text);
+            (!text.is_empty()).then_some(Block::Text { text })
+        }
+        "image" => parse_image(v),
+        _ => None,
+    }
+}
+
+fn parse_assistant_content(obj: &Value, session_id: &str, message_idx: usize) -> Vec<Block> {
+    let Some(Value::Array(arr)) = obj.get("content") else {
+        return Vec::new();
+    };
+    arr.iter()
+        .enumerate()
+        .filter_map(|(i, v)| parse_assistant_block(v, session_id, message_idx, i))
+        .collect()
+}
+
+fn parse_assistant_block(
+    v: &Value,
+    session_id: &str,
+    message_idx: usize,
+    block_idx: usize,
+) -> Option<Block> {
+    match v.get("type").and_then(Value::as_str)? {
+        "text" => {
+            let text = clean_redacted_text(v.get("text")?.as_str()?);
+            (!text.is_empty()).then_some(Block::Text { text })
+        }
+        "reasoning" | "thinking" => Some(Block::Thinking {
+            text: v
+                .get("text")
+                .or_else(|| v.get("thinking"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            signature: v.get("signature").and_then(Value::as_str).map(String::from),
+            encrypted: v.get("data").and_then(Value::as_str).map(String::from),
+        }),
+        "redacted-reasoning" => Some(Block::Thinking {
+            text: String::new(),
+            signature: None,
+            encrypted: v.get("data").and_then(Value::as_str).map(String::from),
+        }),
+        "tool-call" => {
+            let name = v.get("toolName")?.as_str()?;
+            let input = v.get("args").cloned().unwrap_or(Value::Object(Map::new()));
+            let id = v
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .map(String::from)
+                .unwrap_or_else(|| tool_use_id(session_id, message_idx, block_idx, name));
+            Some(Block::ToolUse {
+                id,
+                tool: cursor_tool(name, input),
+            })
+        }
+        "image" => parse_image(v),
+        _ => None,
+    }
+}
+
+fn parse_tool_content(obj: &Value) -> Vec<Block> {
+    let Some(Value::Array(arr)) = obj.get("content") else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|v| {
+            if v.get("type").and_then(Value::as_str)? != "tool-result" {
+                return None;
+            }
+            let tool_use_id = v.get("toolCallId")?.as_str()?.to_string();
+            let content = match v.get("result") {
+                Some(Value::String(s)) => ToolOutput::Text(s.clone()),
+                Some(other) => ToolOutput::Json(other.clone()),
+                None => ToolOutput::Text(String::new()),
+            };
+            let is_error = v
+                .get("isError")
+                .or_else(|| obj.get("isError"))
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| matches!(&content, ToolOutput::Text(s) if looks_error(s)));
+            Some(Block::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            })
+        })
+        .collect()
+}
+
+fn serialize_user_block(block: &Block) -> Value {
+    match block {
+        Block::Text { text } => json!({"type": "text", "text": wrap_user_query(text)}),
+        Block::Image { source } => serialize_image(source),
+        other => {
+            let text = match other {
+                Block::Thinking { text, .. } => text.clone(),
+                Block::ToolUse { tool, .. } => format!("{tool:?}"),
+                Block::ToolResult { content, .. } => tool_output_text(content),
+                Block::Text { .. } | Block::Image { .. } => String::new(),
+            };
+            json!({"type": "text", "text": text})
+        }
+    }
+}
+
+fn serialize_assistant_block(
+    block: &Block,
+    tool_names: &mut HashMap<String, String>,
+) -> Option<Value> {
+    match block {
+        Block::Text { text } => Some(json!({"type": "text", "text": text})),
+        Block::Thinking {
+            text,
+            signature,
+            encrypted,
+        } => {
+            if let Some(data) = encrypted {
+                Some(json!({"type": "redacted-reasoning", "data": data}))
+            } else {
+                let mut obj = json!({"type": "reasoning", "text": text});
+                if let Some(sig) = signature {
+                    obj["signature"] = Value::String(sig.clone());
+                }
+                Some(obj)
+            }
+        }
+        Block::ToolUse { id, tool } => {
+            let (name, args) = denormalize_tool(tool);
+            tool_names.insert(id.clone(), name.clone());
+            Some(json!({
+                "type": "tool-call",
+                "toolCallId": id,
+                "toolName": name,
+                "args": args,
+            }))
+        }
+        Block::Image { source } => Some(serialize_image(source)),
+        Block::ToolResult { .. } => None,
+    }
+}
+
+fn parse_image(v: &Value) -> Option<Block> {
+    let source = v.get("source")?;
+    Some(Block::Image {
+        source: ImageSource {
+            source_type: source
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("base64")
+                .to_string(),
+            media_type: source.get("media_type")?.as_str()?.to_string(),
+            data: source.get("data")?.as_str()?.to_string(),
+        },
+    })
+}
+
+fn serialize_image(source: &ImageSource) -> Value {
+    json!({
+        "type": "image",
+        "source": {
+            "type": source.source_type,
+            "media_type": source.media_type,
+            "data": source.data,
+        },
+    })
+}
+
+// -- metadata ------------------------------------------------------------
+
+fn meta_from_db(db: &CursorDb, db_path: Option<&Path>) -> Meta {
+    let db_meta = cursor_meta_value(db);
+    let session_meta = db.session_meta.as_ref();
+    let created_ms = session_meta
+        .and_then(|v| v.get("createdAtMs"))
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            db_meta
+                .as_ref()
+                .and_then(|v| v.get("createdAt"))
+                .and_then(Value::as_i64)
+        })
+        .unwrap_or(0);
+    let timestamp = DateTime::from_timestamp_millis(created_ms)
+        .unwrap_or_else(|| DateTime::from_timestamp_millis(0).unwrap_or_else(Utc::now));
+
+    let mut title = session_meta
+        .and_then(|v| v.get("title"))
+        .and_then(Value::as_str)
+        .map(String::from)
+        .or_else(|| {
+            db_meta
+                .as_ref()
+                .and_then(|v| v.get("name"))
+                .and_then(Value::as_str)
+                .map(String::from)
+        });
+    let mut cwd = None;
+    let mut model = db_meta
+        .as_ref()
+        .and_then(|v| v.get("lastUsedModel"))
+        .and_then(Value::as_str)
+        .map(String::from);
+    let mut first_user_text = None;
+
+    if cwd.is_none() {
+        cwd = db_meta
+            .as_ref()
+            .and_then(|v| v.get("workspacePath"))
+            .and_then(Value::as_str)
+            .map(String::from);
+    }
+
+    for blob in &db.blobs {
+        let Ok(obj) = serde_json::from_slice::<Value>(&blob.data) else {
+            continue;
+        };
+        if cwd.is_none() {
+            cwd = workspace_from_message(&obj);
+        }
+        if model.is_none() {
+            model = cursor_model(&obj);
+        }
+        if first_user_text.is_none()
+            && obj.get("role").and_then(Value::as_str) == Some("user")
+            && !is_context_injection(&obj)
+        {
+            first_user_text = parse_user_content(&obj)
+                .into_iter()
+                .find_map(|block| match block {
+                    Block::Text { text } if !text.is_empty() => Some(text),
+                    _ => None,
+                });
+        }
+    }
+    if title.as_deref().is_none_or(str::is_empty) {
+        title = first_user_text.map(|s| truncate_title(&s));
+    }
+
+    Meta {
+        id: db_path
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+            .or_else(|| {
+                db_meta
+                    .as_ref()
+                    .and_then(|v| v.get("agentId"))
+                    .and_then(Value::as_str)
+                    .map(String::from)
+            })
+            .unwrap_or_default(),
+        timestamp,
+        cwd,
+        git_branch: None,
+        title,
+        cli_version: None,
+        model,
+    }
+}
+
+fn ensure_cursor_meta(body: &mut CursorDb, meta: &Meta, id: &str) {
+    let now_ms = Utc::now().timestamp_millis();
+    let created_at = body
+        .session_meta
+        .as_ref()
+        .and_then(|v| v.get("createdAtMs"))
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| {
+            if meta.timestamp.timestamp_millis() > 0 {
+                meta.timestamp.timestamp_millis()
+            } else {
+                now_ms
+            }
+        });
+    let updated_at = body
+        .session_meta
+        .as_ref()
+        .and_then(|v| v.get("updatedAtMs"))
+        .and_then(Value::as_i64)
+        .unwrap_or(now_ms);
+    let title = meta
+        .title
+        .clone()
+        .unwrap_or_else(|| "Imported Session".to_string());
+    let latest = body.blobs.last().map(|b| b.id.clone()).unwrap_or_default();
+    let model = meta
+        .model
+        .clone()
+        .unwrap_or_else(|| "composer-2.5".to_string());
+    let mut value = json!({
+        "agentId": id,
+        "latestRootBlobId": latest,
+        "name": title,
+        "createdAt": created_at,
+        "mode": "default",
+        "isRunEverything": true,
+        "approvalMode": "unrestricted",
+        "lastUsedModel": model,
+    });
+    if let Some(cwd) = meta.cwd.as_ref() {
+        value["workspacePath"] = Value::String(cwd.clone());
+    }
+    let encoded = hex_encode(value.to_string().as_bytes());
+    if let Some(entry) = body.meta.iter_mut().find(|entry| entry.key == "0") {
+        entry.value = encoded;
+    } else {
+        body.meta.push(CursorMetaEntry {
+            key: "0".to_string(),
+            value: encoded,
+        });
+    }
+    body.session_meta = Some(json!({
+        "schemaVersion": 1,
+        "createdAtMs": created_at,
+        "hasConversation": !body.blobs.is_empty(),
+        "title": title,
+        "updatedAtMs": updated_at,
+    }));
+}
+
+#[cfg(feature = "opencode")]
+fn write_session_files(session_dir: &Path, body: &CursorDb, meta: &Meta, _id: &str) -> Result<()> {
+    let session_meta = body.session_meta.clone().unwrap_or_else(|| {
+        json!({
+            "schemaVersion": 1,
+            "createdAtMs": meta.timestamp.timestamp_millis(),
+            "hasConversation": !body.blobs.is_empty(),
+            "title": meta.title.clone().unwrap_or_default(),
+            "updatedAtMs": Utc::now().timestamp_millis(),
+        })
+    });
+    fs::write(
+        session_dir.join("meta.json"),
+        serde_json::to_string(&session_meta)?,
+    )?;
+
+    let prompts = db_to_messages(body, meta)
+        .into_iter()
+        .filter(|message| message.role == Role::User)
+        .flat_map(|message| message.content)
+        .filter_map(|block| match block {
+            Block::Text { text } if !text.is_empty() => Some(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        session_dir.join("prompt_history.json"),
+        serde_json::to_string_pretty(&prompts)?,
+    )?;
+    Ok(())
+}
+
+fn cursor_meta_value(db: &CursorDb) -> Option<Value> {
+    let raw = &db.meta.iter().find(|entry| entry.key == "0")?.value;
+    if let Ok(v) = serde_json::from_str::<Value>(raw) {
+        return Some(v);
+    }
+    let decoded = hex_decode(raw).ok()?;
+    serde_json::from_slice(&decoded).ok()
+}
+
+fn timestamp_from_obj(obj: &Value) -> Option<DateTime<Utc>> {
+    obj.get("createdAt")
+        .or_else(|| obj.get("timestamp"))
+        .and_then(Value::as_i64)
+        .and_then(DateTime::from_timestamp_millis)
+        .or_else(|| {
+            obj.get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse::<DateTime<Utc>>().ok())
+        })
+}
+
+fn cursor_model(obj: &Value) -> Option<String> {
+    obj.get("providerOptions")
+        .and_then(|p| p.pointer("/cursor/modelName"))
+        .and_then(Value::as_str)
+        .map(String::from)
+        .or_else(|| {
+            obj.get("content")
+                .and_then(Value::as_array)
+                .and_then(|arr| arr.iter().find_map(cursor_model))
+        })
+}
+
+fn workspace_from_message(obj: &Value) -> Option<String> {
+    content_strings(obj.get("content")).find_map(|s| {
+        s.lines()
+            .find_map(|line| line.strip_prefix("Workspace Path: ").map(String::from))
+    })
+}
+
+fn is_context_injection(obj: &Value) -> bool {
+    content_strings(obj.get("content")).any(|s| s.contains("<user_info>"))
+}
+
+fn content_strings(content: Option<&Value>) -> impl Iterator<Item = &str> {
+    let mut strings = Vec::new();
+    match content {
+        Some(Value::String(s)) => strings.push(s.as_str()),
+        Some(Value::Array(arr)) => {
+            for block in arr {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    strings.push(text);
+                } else if let Some(text) = block.get("result").and_then(Value::as_str) {
+                    strings.push(text);
+                }
+            }
+        }
+        _ => {}
+    }
+    strings.into_iter()
+}
+
+// -- tool normalization --------------------------------------------------
+
+fn cursor_tool(name: &str, args: Value) -> Tool {
+    let canonical = match name {
+        "Shell" => "Bash",
+        "StrReplace" => "Edit",
+        other => other,
+    };
+    Tool::from_canonical(canonical, normalize_cursor_args(canonical, args))
+}
+
+fn normalize_cursor_args(tool: &str, args: Value) -> Value {
+    let Some(obj) = args.as_object() else {
+        return args;
+    };
+    let mut out = Map::new();
+    for (k, v) in obj {
+        let key = match (tool, k.as_str()) {
+            (_, "path" | "filePath") => "file_path",
+            ("Bash", "cwd") => "workdir",
+            ("Edit", "oldString") => "old_string",
+            ("Edit", "newString") => "new_string",
+            _ => k.as_str(),
+        };
+        out.insert(key.to_string(), v.clone());
+    }
+    Value::Object(out)
+}
+
+fn denormalize_tool(tool: &Tool) -> (String, Value) {
+    let (name, input) = tool.to_canonical();
+    let cursor_name = match name.as_str() {
+        "Bash" => "Shell",
+        "Edit" => "StrReplace",
+        other => other,
+    }
+    .to_string();
+    (cursor_name, denormalize_cursor_args(&name, input))
+}
+
+fn denormalize_cursor_args(tool: &str, input: Value) -> Value {
+    let Some(obj) = input.as_object() else {
+        return input;
+    };
+    let mut out = Map::new();
+    for (k, v) in obj {
+        let key = match (tool, k.as_str()) {
+            (_, "file_path") => "path",
+            ("Bash", "workdir") => "cwd",
+            _ => k.as_str(),
+        };
+        out.insert(key.to_string(), v.clone());
+    }
+    Value::Object(out)
+}
+
+// -- text helpers --------------------------------------------------------
+
+fn text_blocks_from_str(s: &str, strip_query: bool) -> Vec<Block> {
+    let text = if strip_query {
+        strip_user_query(s)
+    } else {
+        s.to_string()
+    };
+    let text = clean_redacted_text(&text);
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![Block::Text { text }]
+    }
+}
+
+fn strip_user_query(text: &str) -> String {
+    let trimmed = text.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix("<user_query>")
+        .and_then(|s| s.strip_suffix("</user_query>"))
+    {
+        inner.trim().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+fn wrap_user_query(text: &str) -> String {
+    if text.trim_start().starts_with("<user_query>") {
+        text.to_string()
+    } else {
+        format!("<user_query>\n{text}\n</user_query>")
+    }
+}
+
+fn clean_redacted_text(text: &str) -> String {
+    text.replace("\n\n[REDACTED]", "")
+        .replace("[REDACTED]\n\n", "")
+        .replace("[REDACTED]", "")
+        .trim()
+        .to_string()
+}
+
+fn looks_error(text: &str) -> bool {
+    text.starts_with("Error:") || text.contains(" exited with code ")
+}
+
+fn tool_output_text(out: &ToolOutput) -> String {
+    match out {
+        ToolOutput::Text(s) => s.clone(),
+        ToolOutput::Json(v) => v.to_string(),
+    }
+}
+
+fn truncate_title(text: &str) -> String {
+    const MAX: usize = 80;
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= MAX {
+        one_line
+    } else {
+        let mut t: String = one_line.chars().take(MAX.saturating_sub(1)).collect();
+        t.push('…');
+        t
+    }
+}
+
+fn tool_use_id(session_id: &str, message_idx: usize, block_idx: usize, name: &str) -> String {
+    const NS: Uuid = Uuid::from_bytes([
+        0x3c, 0x7a, 0x1b, 0x44, 0x9e, 0x2f, 0x4d, 0x68, 0xa1, 0x0c, 0x55, 0x6e, 0x7f, 0x88, 0x99,
+        0xaa,
+    ]);
+    Uuid::new_v5(
+        &NS,
+        format!("{session_id}:{message_idx}:{block_idx}:{name}").as_bytes(),
+    )
+    .to_string()
+}
+
+#[cfg(feature = "opencode")]
+fn file_fingerprint(path: &Path) -> String {
+    let Ok(meta) = fs::metadata(path) else {
+        return String::new();
+    };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{mtime}:{}", meta.len())
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+// -- hashes and hex ------------------------------------------------------
+
+#[cfg(any(feature = "opencode", test))]
+fn md5_hex(data: &[u8]) -> String {
+    let mut msg = data.to_vec();
+    let bit_len = (msg.len() as u64).wrapping_mul(8);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend(bit_len.to_le_bytes());
+
+    let mut a0 = 0x6745_2301u32;
+    let mut b0 = 0xefcd_ab89u32;
+    let mut c0 = 0x98ba_dcfeu32;
+    let mut d0 = 0x1032_5476u32;
+    let shifts: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    let mut k = [0u32; 64];
+    for (i, slot) in k.iter_mut().enumerate() {
+        *slot = ((f64::sin((i + 1) as f64).abs() * 4_294_967_296.0).floor()) as u32;
+    }
+
+    for chunk in msg.chunks_exact(64) {
+        let mut m = [0u32; 16];
+        for (i, word) in m.iter_mut().enumerate() {
+            let start = i * 4;
+            *word = u32::from_le_bytes([
+                chunk[start],
+                chunk[start + 1],
+                chunk[start + 2],
+                chunk[start + 3],
+            ]);
+        }
+        let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
+        for i in 0..64 {
+            let (f, g) = match i {
+                0..=15 => ((b & c) | ((!b) & d), i),
+                16..=31 => ((d & b) | ((!d) & c), (5 * i + 1) % 16),
+                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | !d), (7 * i) % 16),
+            };
+            let tmp = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(
+                a.wrapping_add(f)
+                    .wrapping_add(k[i])
+                    .wrapping_add(m[g])
+                    .rotate_left(shifts[i]),
+            );
+            a = tmp;
+        }
+        a0 = a0.wrapping_add(a);
+        b0 = b0.wrapping_add(b);
+        c0 = c0.wrapping_add(c);
+        d0 = d0.wrapping_add(d);
+    }
+
+    let mut out = Vec::with_capacity(16);
+    out.extend(a0.to_le_bytes());
+    out.extend(b0.to_le_bytes());
+    out.extend(c0.to_le_bytes());
+    out.extend(d0.to_le_bytes());
+    hex_encode(&out)
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    hex_encode(&sha256(data))
+}
+
+fn sha256(data: &[u8]) -> [u8; 32] {
+    const K: [u32; 64] = [
+        0x428a_2f98,
+        0x7137_4491,
+        0xb5c0_fbcf,
+        0xe9b5_dba5,
+        0x3956_c25b,
+        0x59f1_11f1,
+        0x923f_82a4,
+        0xab1c_5ed5,
+        0xd807_aa98,
+        0x1283_5b01,
+        0x2431_85be,
+        0x550c_7dc3,
+        0x72be_5d74,
+        0x80de_b1fe,
+        0x9bdc_06a7,
+        0xc19b_f174,
+        0xe49b_69c1,
+        0xefbe_4786,
+        0x0fc1_9dc6,
+        0x240c_a1cc,
+        0x2de9_2c6f,
+        0x4a74_84aa,
+        0x5cb0_a9dc,
+        0x76f9_88da,
+        0x983e_5152,
+        0xa831_c66d,
+        0xb003_27c8,
+        0xbf59_7fc7,
+        0xc6e0_0bf3,
+        0xd5a7_9147,
+        0x06ca_6351,
+        0x1429_2967,
+        0x27b7_0a85,
+        0x2e1b_2138,
+        0x4d2c_6dfc,
+        0x5338_0d13,
+        0x650a_7354,
+        0x766a_0abb,
+        0x81c2_c92e,
+        0x9272_2c85,
+        0xa2bf_e8a1,
+        0xa81a_664b,
+        0xc24b_8b70,
+        0xc76c_51a3,
+        0xd192_e819,
+        0xd699_0624,
+        0xf40e_3585,
+        0x106a_a070,
+        0x19a4_c116,
+        0x1e37_6c08,
+        0x2748_774c,
+        0x34b0_bcb5,
+        0x391c_0cb3,
+        0x4ed8_aa4a,
+        0x5b9c_ca4f,
+        0x682e_6ff3,
+        0x748f_82ee,
+        0x78a5_636f,
+        0x84c8_7814,
+        0x8cc7_0208,
+        0x90be_fffa,
+        0xa450_6ceb,
+        0xbef9_a3f7,
+        0xc671_78f2,
+    ];
+    let mut h = [
+        0x6a09_e667u32,
+        0xbb67_ae85,
+        0x3c6e_f372,
+        0xa54f_f53a,
+        0x510e_527f,
+        0x9b05_688c,
+        0x1f83_d9ab,
+        0x5be0_cd19,
+    ];
+    let mut msg = data.to_vec();
+    let bit_len = (msg.len() as u64).wrapping_mul(8);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend(bit_len.to_be_bytes());
+
+    for chunk in msg.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for (i, word) in w.iter_mut().take(16).enumerate() {
+            let start = i * 4;
+            *word = u32::from_be_bytes([
+                chunk[start],
+                chunk[start + 1],
+                chunk[start + 2],
+                chunk[start + 3],
+            ]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
+            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    let mut out = [0u8; 32];
+    for (i, word) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    out
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(char::from(HEX[(byte >> 4) as usize]));
+        out.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    out
+}
+
+fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
+    let bytes = s.as_bytes();
+    if bytes.len() % 2 != 0 {
+        return Err("hex string has odd length".to_string());
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let hi = hex_value(pair[0])?;
+        let lo = hex_value(pair[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn hex_value(b: u8) -> std::result::Result<u8, String> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        _ => Err(format!("invalid hex byte `{}`", char::from(b))),
+    }
+}
+
+mod serde_hex {
+    use serde::{Deserialize, Deserializer, Serializer, de};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&super::hex_encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        super::hex_decode(&s).map_err(de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hashes_match_cursor_paths_and_blob_ids() {
+        assert_eq!(
+            md5_hex(b"/Users/nishantjoshi/Workspace/10-Work-Projects/10.03-Replay/transcript"),
+            "bee2c84d4cc659714c766b9d0e4af911"
+        );
+        assert_eq!(
+            sha256_hex(br#"{"role":"user","content":"hello"}"#),
+            "b5344ebd07750817371cf4670e556b15a4babb975bde955ff4ce24bca09731ef"
+        );
+    }
+}

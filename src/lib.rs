@@ -45,6 +45,7 @@ pub use transcript::{
 pub use harness::campfire::{Campfire, CampfireStore};
 pub use harness::claude_code::{ClaudeCode, ClaudeStore};
 pub use harness::codex::{Codex, CodexStore};
+pub use harness::cursor::{Cursor, CursorBlob, CursorDb, CursorMetaEntry, CursorStore};
 pub use harness::opencode::OpenCode;
 #[cfg(feature = "opencode")]
 pub use harness::opencode::OpenCodeStore;

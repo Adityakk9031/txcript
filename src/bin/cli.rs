@@ -15,19 +15,23 @@
 //! replacing this process). The resume command is overridable per harness via
 //! `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template).
 //!
-//! `<harness>` is one of: claude_code, codex, opencode, pi, campfire.
+//! `<harness>` is one of: claude_code, codex, opencode, pi, campfire, cursor.
+//!
+//! Cursor resumes with `agent --resume=<id>` (override via
+//! `TRANSCRIPT_CURSOR_RESUME_CMD="agent --resume={id}"`).
 
 use std::path::PathBuf;
 
 use txcript::{
-    Campfire, CampfireStore, ClaudeCode, ClaudeStore, Codec, Codex, CodexStore, Common, HarnessId,
-    Meta, Pi, PiStore, Store, Transcript,
+    Campfire, CampfireStore, ClaudeCode, ClaudeStore, Codec, Codex, CodexStore, Common, Cursor,
+    CursorStore, HarnessId, Meta, Pi, PiStore, Store, Transcript,
 };
 
 /// How to load a discovered session back: a file path, or an OpenCode session id.
 #[derive(Clone)]
 enum Locator {
     Path(PathBuf),
+    #[cfg(feature = "opencode")]
     Id(String),
 }
 
@@ -69,7 +73,7 @@ fn usage() {
          txcript continue <id> [--with <harness>] [--from <harness>] [--out <dir>] [--no-resume]\n\n\
          continue launches the harness afterward; --with crosses into another,\n\
          --out/--no-resume write the session without launching.\n\
-         harnesses: claude_code, codex, opencode, pi, campfire"
+         harnesses: claude_code, codex, opencode, pi, campfire, cursor"
     );
 }
 
@@ -204,6 +208,7 @@ fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
         HarnessId::OpenCode => ("opencode".into(), vec!["--session".into(), id]),
         HarnessId::Pi => ("pi".into(), vec!["--session".into(), id]),
         HarnessId::Campfire => ("campfire".into(), vec!["--session".into(), id]),
+        HarnessId::Cursor => ("agent".into(), vec![format!("--resume={id}")]),
     }
 }
 
@@ -276,6 +281,16 @@ fn discover_all() -> Vec<Found> {
             });
         }
     }
+    announce(HarnessId::Cursor, out.len());
+    if let Some(store) = CursorStore::default_root() {
+        for d in store.discover().unwrap_or_default() {
+            out.push(Found {
+                harness: HarnessId::Cursor,
+                meta: d.meta,
+                locator: Locator::Path(d.reference),
+            });
+        }
+    }
     #[cfg(feature = "opencode")]
     {
         announce(HarnessId::OpenCode, out.len());
@@ -314,6 +329,10 @@ fn load_common(found: &Found) -> Result<Transcript<Common>, String> {
             let store = CampfireStore::default_root().ok_or("no home directory")?;
             Campfire::to_common(&store.load(p).map_err(err)?).map_err(err)
         }
+        (HarnessId::Cursor, Locator::Path(p)) => {
+            let store = CursorStore::default_root().ok_or("no home directory")?;
+            Cursor::to_common(&store.load(p).map_err(err)?).map_err(err)
+        }
         #[cfg(feature = "opencode")]
         (HarnessId::OpenCode, Locator::Id(id)) => {
             use txcript::OpenCode;
@@ -351,6 +370,11 @@ fn save_target(
             let root = file_store_root(out, CampfireStore::default_root().map(|s| s.sessions_dir))?;
             let native = Campfire::from_common(common).map_err(err)?;
             describe(CampfireStore::new(root).save(&native).map_err(err)?)
+        }
+        HarnessId::Cursor => {
+            let root = file_store_root(out, CursorStore::default_root().map(|s| s.chats_dir))?;
+            let native = Cursor::from_common(common).map_err(err)?;
+            describe(CursorStore::new(root).save(&native).map_err(err)?)
         }
         HarnessId::OpenCode => save_opencode(common),
     }

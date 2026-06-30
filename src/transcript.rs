@@ -190,15 +190,17 @@ pub enum HarnessId {
     OpenCode,
     Pi,
     Campfire,
+    Cursor,
 }
 
 impl HarnessId {
-    pub const ALL: [HarnessId; 5] = [
+    pub const ALL: [HarnessId; 6] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::OpenCode,
         HarnessId::Pi,
         HarnessId::Campfire,
+        HarnessId::Cursor,
     ];
 
     /// The stable lowercase name, matching the corresponding [`Harness::NAME`].
@@ -209,6 +211,7 @@ impl HarnessId {
             HarnessId::OpenCode => "opencode",
             HarnessId::Pi => "pi",
             HarnessId::Campfire => "campfire",
+            HarnessId::Cursor => "cursor",
         }
     }
 }
@@ -230,6 +233,7 @@ impl FromStr for HarnessId {
             "opencode" | "open_code" | "open-code" => Ok(HarnessId::OpenCode),
             "pi" => Ok(HarnessId::Pi),
             "campfire" => Ok(HarnessId::Campfire),
+            "cursor" | "cursor_cli" | "cursor-cli" | "cursorcli" => Ok(HarnessId::Cursor),
             other => Err(crate::error::Error::UnknownHarness(other.to_string())),
         }
     }
