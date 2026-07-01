@@ -16,7 +16,7 @@ old one left off.
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://pi.dev"><img src="https://pi.dev/logo-auto.svg" alt="pi" height="48" width="48"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://cursor.com"><img src="https://github.com/getcursor.png?size=160" alt="Cursor" height="48" width="48"></a>
+  <a href="https://cursor.com"><img src="https://github.com/cursor.png?size=160" alt="Cursor" height="48" width="48"></a>
 </p>
 
 Each harness has its own native transcript shape. This crate maps those shapes
