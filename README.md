@@ -1,7 +1,23 @@
 # txcript
 
-`txcript` transforms AI coding-agent session transcripts between harness
-formats.
+**txcript lets you swap the agent you're using in the middle of a session.**
+
+It converts session transcripts between Claude Code, Codex, OpenCode, pi,
+Campfire, and Cursor. Your messages, the agent's reasoning, tool calls, and
+images all come across, so the new agent picks up the conversation where the
+old one left off.
+
+<p align="center">
+  <a href="https://claude.com/claude-code"><img src="https://github.com/anthropics.png?size=160" alt="Claude Code" height="48" width="48"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://github.com/openai/codex"><img src="https://github.com/openai.png?size=160" alt="Codex" height="48" width="48"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://opencode.ai"><img src="https://opencode.ai/apple-touch-icon-v3.png" alt="OpenCode" height="48" width="48"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://pi.dev"><img src="https://pi.dev/logo-auto.svg" alt="pi" height="48" width="48"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://cursor.com"><img src="https://github.com/getcursor.png?size=160" alt="Cursor" height="48" width="48"></a>
+</p>
 
 Each harness has its own native transcript shape. This crate maps those shapes
 through a typed common model, then re-emits them for another harness. Native
@@ -99,7 +115,7 @@ native and is excluded from the WASM build.
 ### Install from git
 
 ```sh
-bun add git+ssh://git@github.com/NishantJoshi00/txcript.git
+bun add git+ssh://git@github.com/skillsynchq/txcript.git
 ```
 
 `prepare` builds the wasm on install, so the machine needs the Rust toolchain.
@@ -116,7 +132,7 @@ bun --cwd node_modules/txcript run setup
 ### Or build from a local checkout
 
 ```sh
-git clone https://github.com/NishantJoshi00/txcript.git
+git clone https://github.com/skillsynchq/txcript.git
 cd txcript
 bun run setup        # once: wasm target + wasm-bindgen-cli
 bun run build        # produces ./pkg
