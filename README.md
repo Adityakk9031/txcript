@@ -58,24 +58,26 @@ Three layers, smallest to largest:
 Convert in memory (no filesystem):
 
 ```rust
-use txcript::{ClaudeCode, Codex, Codec, TextCodec, convert};
+use txcript::harness::{claude_code, codex};
+use txcript::{Codec, TextCodec, convert};
 
-let claude = ClaudeCode::from_text(jsonl_text)?;     // Transcript<ClaudeCode>
-let codex = convert::<ClaudeCode, Codex>(&claude)?;  // Transcript<Codex>
-let codex_text = Codex::to_text(&codex)?;            // native rollout JSONL
+let claude = claude_code::ClaudeCode::from_text(jsonl_text)?;          // Transcript<ClaudeCode>
+let codex = convert::<claude_code::ClaudeCode, codex::Codex>(&claude)?; // Transcript<Codex>
+let codex_text = codex::Codex::to_text(&codex)?;                       // native rollout JSONL
 ```
 
 Or go through disk with a `Store`:
 
 ```rust
-use txcript::{ClaudeStore, CodexStore, Codex, Store, convert};
+use txcript::harness::{claude_code, codex};
+use txcript::{Store, convert};
 
-let store = ClaudeStore::default_root().expect("home dir");
+let store = claude_code::ClaudeStore::default_root().expect("home dir");
 let found = store.discover()?;                       // cheap metadata scan
 let claude = store.load(&found[0].reference)?;       // Transcript<ClaudeCode>
 
-let codex = convert::<_, Codex>(&claude)?;
-CodexStore::default_root().expect("home dir").save(&codex)?;  // resumable on disk
+let codex = convert::<_, codex::Codex>(&claude)?;
+codex::CodexStore::default_root().expect("home dir").save(&codex)?;  // resumable on disk
 ```
 
 The canonical model is `Transcript<Common>` — `Meta` + `Vec<Message>`, where a

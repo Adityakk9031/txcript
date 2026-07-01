@@ -9,10 +9,9 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use txcript::{
-    Block, ClaudeCode, ClaudeStore, Codec, Common, Message, Meta, Role, StopReason, Store, Tool,
-    ToolOutput, Transcript, Usage,
-};
+use txcript::common;
+use txcript::harness::claude_code;
+use txcript::{Codec, Common, Store, Transcript};
 
 fn ts(s: &str) -> DateTime<Utc> {
     s.parse().unwrap()
@@ -80,7 +79,7 @@ fn sample_jsonl() -> String {
 #[test]
 fn store_round_trip_is_lossless_on_disk() {
     let dir = tempfile::tempdir().unwrap();
-    let store = ClaudeStore::new(dir.path());
+    let store = claude_code::ClaudeStore::new(dir.path());
 
     let src = dir.path().join("orig.jsonl");
     std::fs::write(&src, sample_jsonl()).unwrap();
@@ -103,7 +102,7 @@ fn discover_extracts_session_metadata() {
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("sess-1.jsonl"), sample_jsonl()).unwrap();
 
-    let store = ClaudeStore::new(dir.path());
+    let store = claude_code::ClaudeStore::new(dir.path());
     let found = store.discover().unwrap();
     assert_eq!(found.len(), 1);
     let meta = &found[0].meta;
@@ -120,31 +119,31 @@ fn discover_extracts_session_metadata() {
 #[test]
 fn to_common_extracts_the_conversation_faithfully() {
     let dir = tempfile::tempdir().unwrap();
-    let store = ClaudeStore::new(dir.path());
+    let store = claude_code::ClaudeStore::new(dir.path());
     let src = dir.path().join("s.jsonl");
     std::fs::write(&src, sample_jsonl()).unwrap();
 
-    let common = ClaudeCode::to_common(&store.load(&src).unwrap()).unwrap();
+    let common = claude_code::ClaudeCode::to_common(&store.load(&src).unwrap()).unwrap();
     let msgs = &common.body;
 
     // Four conversational turns; the summary/title/snapshot lines are dropped.
     assert_eq!(msgs.len(), 4);
 
-    assert_eq!(msgs[0].role, Role::User);
-    assert!(matches!(&msgs[0].content[0], Block::Text { text } if text == "fix the off-by-one"));
+    assert_eq!(msgs[0].role, common::Role::User);
+    assert!(matches!(&msgs[0].content[0], common::Block::Text { text } if text == "fix the off-by-one"));
 
     // Assistant turn: thinking (with signature), text, and a typed Edit.
-    assert_eq!(msgs[1].role, Role::Assistant);
+    assert_eq!(msgs[1].role, common::Role::Assistant);
     assert_eq!(msgs[1].model.as_deref(), Some("claude-opus-4-8"));
     assert!(matches!(
         &msgs[1].content[0],
-        Block::Thinking { text, signature: Some(s), .. } if text == "off-by-one in the loop" && s == "sig-xyz"
+        common::Block::Thinking { text, signature: Some(s), .. } if text == "off-by-one in the loop" && s == "sig-xyz"
     ));
     match &msgs[1].content[2] {
-        Block::ToolUse {
+        common::Block::ToolUse {
             id,
             tool:
-                Tool::Edit {
+                common::Tool::Edit {
                     file_path,
                     old_string,
                     new_string,
@@ -160,15 +159,15 @@ fn to_common_extracts_the_conversation_faithfully() {
     }
 
     // Tool result rides on a User message (Anthropic convention).
-    assert_eq!(msgs[2].role, Role::User);
+    assert_eq!(msgs[2].role, common::Role::User);
     assert!(matches!(
         &msgs[2].content[0],
-        Block::ToolResult { tool_use_id, content: ToolOutput::Text(t), is_error: false }
+        common::Block::ToolResult { tool_use_id, content: common::ToolOutput::Text(t), is_error: false }
             if tool_use_id == "t1" && t == "applied"
     ));
 
     // Final turn carries usage and stop reason.
-    assert_eq!(msgs[3].stop_reason, Some(StopReason::EndTurn));
+    assert_eq!(msgs[3].stop_reason, Some(common::StopReason::EndTurn));
     let usage = msgs[3].usage.unwrap();
     assert_eq!(usage.input_tokens, 100);
     assert_eq!(usage.cache_read_input_tokens, Some(50));
@@ -177,7 +176,7 @@ fn to_common_extracts_the_conversation_faithfully() {
 /// A Common transcript covering every block kind, used to prove the codec
 /// fixpoint `to_common(from_common(c)) == c`.
 fn sample_common() -> Transcript<Common> {
-    let meta = Meta {
+    let meta = common::Meta {
         id: "sess-1".into(),
         timestamp: ts("2026-01-02T03:04:05.000Z"),
         cwd: Some("/work/repo".into()),
@@ -187,9 +186,9 @@ fn sample_common() -> Transcript<Common> {
         model: Some("claude-opus-4-8".into()),
     };
     let body = vec![
-        Message {
-            role: Role::User,
-            content: vec![Block::Text {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::Text {
                 text: "fix it".into(),
             }],
             timestamp: ts("2026-01-02T03:04:05.000Z"),
@@ -197,20 +196,20 @@ fn sample_common() -> Transcript<Common> {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::Assistant,
+        common::Message {
+            role: common::Role::Assistant,
             content: vec![
-                Block::Thinking {
+                common::Block::Thinking {
                     text: "thinking".into(),
                     signature: Some("sig".into()),
                     encrypted: None,
                 },
-                Block::Text {
+                common::Block::Text {
                     text: "patching".into(),
                 },
-                Block::ToolUse {
+                common::Block::ToolUse {
                     id: "t1".into(),
-                    tool: Tool::Edit {
+                    tool: common::Tool::Edit {
                         file_path: "/a.rs".into(),
                         old_string: "x".into(),
                         new_string: "y".into(),
@@ -220,14 +219,14 @@ fn sample_common() -> Transcript<Common> {
             ],
             timestamp: ts("2026-01-02T03:04:06.000Z"),
             model: Some("claude-opus-4-8".into()),
-            stop_reason: Some(StopReason::ToolUse),
+            stop_reason: Some(common::StopReason::ToolUse),
             usage: None,
         },
-        Message {
-            role: Role::User,
-            content: vec![Block::ToolResult {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::ToolResult {
                 tool_use_id: "t1".into(),
-                content: ToolOutput::Text("ok".into()),
+                content: common::ToolOutput::Text("ok".into()),
                 is_error: false,
             }],
             timestamp: ts("2026-01-02T03:04:07.000Z"),
@@ -235,15 +234,15 @@ fn sample_common() -> Transcript<Common> {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::Assistant,
-            content: vec![Block::Text {
+        common::Message {
+            role: common::Role::Assistant,
+            content: vec![common::Block::Text {
                 text: "done".into(),
             }],
             timestamp: ts("2026-01-02T03:04:08.000Z"),
             model: Some("claude-opus-4-8".into()),
-            stop_reason: Some(StopReason::EndTurn),
-            usage: Some(Usage {
+            stop_reason: Some(common::StopReason::EndTurn),
+            usage: Some(common::Usage {
                 input_tokens: 100,
                 output_tokens: 20,
                 cache_read_input_tokens: Some(50),
@@ -257,8 +256,8 @@ fn sample_common() -> Transcript<Common> {
 #[test]
 fn codec_fixpoint_through_common_loses_nothing() {
     let common = sample_common();
-    let native = ClaudeCode::from_common(&common).unwrap();
-    let back = ClaudeCode::to_common(&native).unwrap();
+    let native = claude_code::ClaudeCode::from_common(&common).unwrap();
+    let back = claude_code::ClaudeCode::to_common(&native).unwrap();
     assert_eq!(common, back);
 }
 
@@ -267,7 +266,7 @@ fn codec_fixpoint_through_common_loses_nothing() {
 #[test]
 fn from_common_is_deterministic() {
     let common = sample_common();
-    let a = serde_json::to_value(ClaudeCode::from_common(&common).unwrap().body).unwrap();
-    let b = serde_json::to_value(ClaudeCode::from_common(&common).unwrap().body).unwrap();
+    let a = serde_json::to_value(claude_code::ClaudeCode::from_common(&common).unwrap().body).unwrap();
+    let b = serde_json::to_value(claude_code::ClaudeCode::from_common(&common).unwrap().body).unwrap();
     assert_eq!(a, b);
 }

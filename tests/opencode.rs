@@ -7,18 +7,16 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use txcript::harness::opencode::Export;
-use txcript::{
-    Block, Codec, Common, Message, Meta, OpenCode, Role, StopReason, Tool, ToolOutput, Transcript,
-    Usage,
-};
+use txcript::common;
+use txcript::harness::opencode;
+use txcript::{Codec, Common, Transcript};
 
 fn ts(s: &str) -> DateTime<Utc> {
     s.parse().unwrap()
 }
 
-fn meta() -> Meta {
-    Meta {
+fn meta() -> common::Meta {
+    common::Meta {
         id: "ses_1".into(),
         timestamp: ts("2026-01-02T03:04:05.000Z"),
         cwd: Some("/repo".into()),
@@ -34,7 +32,7 @@ fn to_common_splits_parts_and_attaches_turn_usage() {
     // One user message and one assistant message whose parts mix reasoning,
     // text, a completed edit tool, and trailing text — plus bookkeeping parts
     // (step-start/finish) that must be ignored.
-    let export: Export = serde_json::from_value(json!({
+    let export: opencode::Export = serde_json::from_value(json!({
         "info": { "id": "ses_1", "directory": "/repo" },
         "messages": [
             {
@@ -65,35 +63,37 @@ fn to_common_splits_parts_and_attaches_turn_usage() {
     }))
     .unwrap();
 
-    let common = OpenCode::to_common(&Transcript::new(meta(), export)).unwrap();
+    let common = opencode::OpenCode::to_common(&Transcript::new(meta(), export)).unwrap();
     let msgs = &common.body;
 
     // user | assistant(reasoning+text) | assistant(ToolUse) | user(ToolResult) | assistant(text)
     assert_eq!(msgs.len(), 5);
 
-    assert!(matches!(&msgs[0].content[0], Block::Text { text } if text == "please edit the file"));
+    assert!(
+        matches!(&msgs[0].content[0], common::Block::Text { text } if text == "please edit the file")
+    );
 
     assert!(
-        matches!(&msgs[1].content[0], Block::Thinking { text, .. } if text == "thinking about it")
+        matches!(&msgs[1].content[0], common::Block::Thinking { text, .. } if text == "thinking about it")
     );
-    assert!(matches!(&msgs[1].content[1], Block::Text { text } if text == "On it."));
+    assert!(matches!(&msgs[1].content[1], common::Block::Text { text } if text == "On it."));
 
     // `edit` normalizes to a typed Edit with renamed keys.
     assert!(matches!(
         &msgs[2].content[0],
-        Block::ToolUse { id, tool: Tool::Edit { file_path, old_string, new_string, .. } }
+        common::Block::ToolUse { id, tool: common::Tool::Edit { file_path, old_string, new_string, .. } }
             if id == "call-1" && file_path == "/repo/a.rs" && old_string == "old" && new_string == "new"
     ));
     assert!(matches!(
         &msgs[3].content[0],
-        Block::ToolResult { tool_use_id, content: ToolOutput::Text(t), is_error: false }
+        common::Block::ToolResult { tool_use_id, content: common::ToolOutput::Text(t), is_error: false }
             if tool_use_id == "call-1" && t == "done"
     ));
 
     // Usage + finish land on the turn's last assistant message.
     let last = &msgs[4];
-    assert!(matches!(&last.content[0], Block::Text { text } if text == "Finished the edit."));
-    assert_eq!(last.stop_reason, Some(StopReason::EndTurn));
+    assert!(matches!(&last.content[0], common::Block::Text { text } if text == "Finished the edit."));
+    assert_eq!(last.stop_reason, Some(common::StopReason::EndTurn));
     let usage = last.usage.unwrap();
     assert_eq!(usage.input_tokens, 6);
     assert_eq!(usage.output_tokens, 88);
@@ -103,7 +103,7 @@ fn to_common_splits_parts_and_attaches_turn_usage() {
 
 #[test]
 fn errored_tool_call_becomes_error_result() {
-    let export: Export = serde_json::from_value(json!({
+    let export: opencode::Export = serde_json::from_value(json!({
         "info": { "id": "ses_1" },
         "messages": [{
             "info": { "role": "assistant", "modelID": "m", "time": { "created": 1i64 } },
@@ -113,26 +113,26 @@ fn errored_tool_call_becomes_error_result() {
     }))
     .unwrap();
 
-    let msgs = OpenCode::to_common(&Transcript::new(meta(), export))
+    let msgs = opencode::OpenCode::to_common(&Transcript::new(meta(), export))
         .unwrap()
         .body;
     assert_eq!(msgs.len(), 2);
     assert!(matches!(
         &msgs[0].content[0],
-        Block::ToolUse {
-            tool: Tool::Bash { .. },
+        common::Block::ToolUse {
+            tool: common::Tool::Bash { .. },
             ..
         }
     ));
     assert!(matches!(
         &msgs[1].content[0],
-        Block::ToolResult { content: ToolOutput::Text(t), is_error: true, .. } if t == "exit code 1"
+        common::Block::ToolResult { content: common::ToolOutput::Text(t), is_error: true, .. } if t == "exit code 1"
     ));
 }
 
 #[test]
 fn pending_tool_call_has_no_result() {
-    let export: Export = serde_json::from_value(json!({
+    let export: opencode::Export = serde_json::from_value(json!({
         "info": { "id": "ses_1" },
         "messages": [{
             "info": { "role": "assistant", "modelID": "m", "time": { "created": 1i64 } },
@@ -142,14 +142,14 @@ fn pending_tool_call_has_no_result() {
     }))
     .unwrap();
 
-    let msgs = OpenCode::to_common(&Transcript::new(meta(), export))
+    let msgs = opencode::OpenCode::to_common(&Transcript::new(meta(), export))
         .unwrap()
         .body;
     assert_eq!(msgs.len(), 1);
     assert!(matches!(
         &msgs[0].content[0],
-        Block::ToolUse {
-            tool: Tool::Read { .. },
+        common::Block::ToolUse {
+            tool: common::Tool::Read { .. },
             ..
         }
     ));
@@ -161,9 +161,9 @@ fn pending_tool_call_has_no_result() {
 fn sample_common() -> Transcript<Common> {
     let model = || Some("claude-opus-4-7".to_string());
     let body = vec![
-        Message {
-            role: Role::User,
-            content: vec![Block::Text {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::Text {
                 text: "edit it".into(),
             }],
             timestamp: ts("2026-01-02T03:04:06.000Z"),
@@ -171,33 +171,33 @@ fn sample_common() -> Transcript<Common> {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::Assistant,
+        common::Message {
+            role: common::Role::Assistant,
             content: vec![
-                Block::Thinking {
+                common::Block::Thinking {
                     text: "thinking".into(),
                     signature: None,
                     encrypted: None,
                 },
-                Block::Text {
+                common::Block::Text {
                     text: "on it".into(),
                 },
             ],
             timestamp: ts("2026-01-02T03:04:07.000Z"),
             model: model(),
-            stop_reason: Some(StopReason::EndTurn),
-            usage: Some(Usage {
+            stop_reason: Some(common::StopReason::EndTurn),
+            usage: Some(common::Usage {
                 input_tokens: 6,
                 output_tokens: 88,
                 cache_read_input_tokens: Some(10),
                 cache_creation_input_tokens: Some(21428),
             }),
         },
-        Message {
-            role: Role::Assistant,
-            content: vec![Block::ToolUse {
+        common::Message {
+            role: common::Role::Assistant,
+            content: vec![common::Block::ToolUse {
                 id: "call-1".into(),
-                tool: Tool::Edit {
+                tool: common::Tool::Edit {
                     file_path: "/repo/a.rs".into(),
                     old_string: "old".into(),
                     new_string: "new".into(),
@@ -206,14 +206,14 @@ fn sample_common() -> Transcript<Common> {
             }],
             timestamp: ts("2026-01-02T03:04:08.000Z"),
             model: model(),
-            stop_reason: Some(StopReason::ToolUse),
+            stop_reason: Some(common::StopReason::ToolUse),
             usage: None,
         },
-        Message {
-            role: Role::User,
-            content: vec![Block::ToolResult {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::ToolResult {
                 tool_use_id: "call-1".into(),
-                content: ToolOutput::Text("done".into()),
+                content: common::ToolOutput::Text("done".into()),
                 is_error: false,
             }],
             // OpenCode folds the result into the tool part, so it shares the
@@ -223,15 +223,15 @@ fn sample_common() -> Transcript<Common> {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::Assistant,
-            content: vec![Block::Text {
+        common::Message {
+            role: common::Role::Assistant,
+            content: vec![common::Block::Text {
                 text: "finished".into(),
             }],
             timestamp: ts("2026-01-02T03:04:10.000Z"),
             model: model(),
-            stop_reason: Some(StopReason::EndTurn),
-            usage: Some(Usage {
+            stop_reason: Some(common::StopReason::EndTurn),
+            usage: Some(common::Usage {
                 input_tokens: 1,
                 output_tokens: 2,
                 cache_read_input_tokens: None,
@@ -245,7 +245,7 @@ fn sample_common() -> Transcript<Common> {
 #[test]
 fn codec_fixpoint_through_common_loses_nothing() {
     let common = sample_common();
-    let native = OpenCode::from_common(&common).unwrap();
-    let back = OpenCode::to_common(&native).unwrap();
+    let native = opencode::OpenCode::from_common(&common).unwrap();
+    let back = opencode::OpenCode::to_common(&native).unwrap();
     assert_eq!(common, back);
 }

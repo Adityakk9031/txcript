@@ -11,10 +11,9 @@
 //! conversation does not. The signature below captures exactly that invariant.
 
 use chrono::{DateTime, Utc};
-use txcript::{
-    Block, Campfire, ClaudeCode, Codec, Codex, Common, Cursor, Message, Meta, OpenCode, Pi, Role,
-    Tool, ToolOutput, Transcript, convert,
-};
+use txcript::common;
+use txcript::harness::{campfire, claude_code, codex, cursor, opencode, pi};
+use txcript::{Codec, Common, Transcript, convert};
 
 fn ts(s: &str) -> DateTime<Utc> {
     s.parse().unwrap()
@@ -27,15 +26,15 @@ fn signature(t: &Transcript<Common>) -> Vec<String> {
     let mut out = Vec::new();
     for msg in &t.body {
         let role = match msg.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
+            common::Role::User => "user",
+            common::Role::Assistant => "assistant",
         };
         for block in &msg.content {
             let desc = match block {
-                Block::Text { text } => format!("text:{text}"),
-                Block::Thinking { text, .. } => format!("thinking:{text}"),
-                Block::ToolUse { id, tool } => match tool {
-                    Tool::Edit {
+                common::Block::Text { text } => format!("text:{text}"),
+                common::Block::Thinking { text, .. } => format!("thinking:{text}"),
+                common::Block::ToolUse { id, tool } => match tool {
+                    common::Tool::Edit {
                         file_path,
                         old_string,
                         new_string,
@@ -43,22 +42,22 @@ fn signature(t: &Transcript<Common>) -> Vec<String> {
                     } => {
                         format!("use:{id}:Edit:{file_path}:{old_string}->{new_string}")
                     }
-                    Tool::Bash { command, .. } => format!("use:{id}:Bash:{command}"),
-                    Tool::Raw { tool_name, .. } => format!("use:{id}:Raw:{tool_name}"),
+                    common::Tool::Bash { command, .. } => format!("use:{id}:Bash:{command}"),
+                    common::Tool::Raw { tool_name, .. } => format!("use:{id}:Raw:{tool_name}"),
                     other => format!("use:{id}:{other:?}"),
                 },
-                Block::ToolResult {
+                common::Block::ToolResult {
                     tool_use_id,
                     content,
                     is_error,
                 } => {
                     let text = match content {
-                        ToolOutput::Text(s) => s.clone(),
-                        ToolOutput::Json(v) => v.to_string(),
+                        common::ToolOutput::Text(s) => s.clone(),
+                        common::ToolOutput::Json(v) => v.to_string(),
                     };
                     format!("result:{tool_use_id}:{is_error}:{text}")
                 }
-                Block::Image { source } => format!("image:{}", source.media_type),
+                common::Block::Image { source } => format!("image:{}", source.media_type),
             };
             out.push(format!("{role}/{desc}"));
         }
@@ -69,7 +68,7 @@ fn signature(t: &Transcript<Common>) -> Vec<String> {
 /// Single-block-per-turn so every harness's grouping agrees: a user ask, an
 /// assistant Edit, the tool result, and a closing line.
 fn sample() -> Transcript<Common> {
-    let meta = Meta {
+    let meta = common::Meta {
         id: "x1".into(),
         timestamp: ts("2026-01-02T03:04:05.000Z"),
         cwd: Some("/repo".into()),
@@ -80,9 +79,9 @@ fn sample() -> Transcript<Common> {
     };
     let model = || Some("claude-opus-4-8".to_string());
     let body = vec![
-        Message {
-            role: Role::User,
-            content: vec![Block::Text {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::Text {
                 text: "fix the bug".into(),
             }],
             timestamp: ts("2026-01-02T03:04:06.000Z"),
@@ -90,11 +89,11 @@ fn sample() -> Transcript<Common> {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::Assistant,
-            content: vec![Block::ToolUse {
+        common::Message {
+            role: common::Role::Assistant,
+            content: vec![common::Block::ToolUse {
                 id: "call-1".into(),
-                tool: Tool::Edit {
+                tool: common::Tool::Edit {
                     file_path: "/repo/a.rs".into(),
                     old_string: "i <= n".into(),
                     new_string: "i < n".into(),
@@ -106,11 +105,11 @@ fn sample() -> Transcript<Common> {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::User,
-            content: vec![Block::ToolResult {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::ToolResult {
                 tool_use_id: "call-1".into(),
-                content: ToolOutput::Text("patched".into()),
+                content: common::ToolOutput::Text("patched".into()),
                 is_error: false,
             }],
             timestamp: ts("2026-01-02T03:04:07.000Z"),
@@ -118,9 +117,9 @@ fn sample() -> Transcript<Common> {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::Assistant,
-            content: vec![Block::Text {
+        common::Message {
+            role: common::Role::Assistant,
+            content: vec![common::Block::Text {
                 text: "done".into(),
             }],
             timestamp: ts("2026-01-02T03:04:08.000Z"),
@@ -138,48 +137,52 @@ fn conversation_survives_every_hop() {
     let expected = signature(&common);
 
     // Land it in Claude, then walk it across every harness via the hub.
-    let claude = ClaudeCode::from_common(&common).unwrap();
+    let claude = claude_code::ClaudeCode::from_common(&common).unwrap();
     assert_eq!(
-        signature(&ClaudeCode::to_common(&claude).unwrap()),
+        signature(&claude_code::ClaudeCode::to_common(&claude).unwrap()),
         expected,
         "claude"
     );
 
-    let codex = convert::<ClaudeCode, Codex>(&claude).unwrap();
+    let codex = convert::<claude_code::ClaudeCode, codex::Codex>(&claude).unwrap();
     assert_eq!(
-        signature(&Codex::to_common(&codex).unwrap()),
+        signature(&codex::Codex::to_common(&codex).unwrap()),
         expected,
         "codex"
     );
 
-    let opencode = convert::<Codex, OpenCode>(&codex).unwrap();
+    let opencode = convert::<codex::Codex, opencode::OpenCode>(&codex).unwrap();
     assert_eq!(
-        signature(&OpenCode::to_common(&opencode).unwrap()),
+        signature(&opencode::OpenCode::to_common(&opencode).unwrap()),
         expected,
         "opencode"
     );
 
-    let pi = convert::<OpenCode, Pi>(&opencode).unwrap();
-    assert_eq!(signature(&Pi::to_common(&pi).unwrap()), expected, "pi");
-
-    let campfire = convert::<Pi, Campfire>(&pi).unwrap();
+    let pi = convert::<opencode::OpenCode, pi::Pi>(&opencode).unwrap();
     assert_eq!(
-        signature(&Campfire::to_common(&campfire).unwrap()),
+        signature(&pi::Pi::to_common(&pi).unwrap()),
+        expected,
+        "pi"
+    );
+
+    let campfire = convert::<pi::Pi, campfire::Campfire>(&pi).unwrap();
+    assert_eq!(
+        signature(&campfire::Campfire::to_common(&campfire).unwrap()),
         expected,
         "campfire"
     );
 
-    let cursor = convert::<Campfire, Cursor>(&campfire).unwrap();
+    let cursor = convert::<campfire::Campfire, cursor::Cursor>(&campfire).unwrap();
     assert_eq!(
-        signature(&Cursor::to_common(&cursor).unwrap()),
+        signature(&cursor::Cursor::to_common(&cursor).unwrap()),
         expected,
         "cursor"
     );
 
     // And all the way back to Claude.
-    let round = convert::<Cursor, ClaudeCode>(&cursor).unwrap();
+    let round = convert::<cursor::Cursor, claude_code::ClaudeCode>(&cursor).unwrap();
     assert_eq!(
-        signature(&ClaudeCode::to_common(&round).unwrap()),
+        signature(&claude_code::ClaudeCode::to_common(&round).unwrap()),
         expected,
         "claude (round)"
     );

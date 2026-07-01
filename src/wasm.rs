@@ -12,13 +12,8 @@
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-use crate::Campfire;
-use crate::ClaudeCode;
-use crate::Codex;
-use crate::Cursor;
-use crate::OpenCode;
-use crate::Pi;
-use crate::common::{Message, Meta};
+use crate::common;
+use crate::harness::{campfire, claude_code, codex, cursor, opencode, pi};
 use crate::transcript::{Codec, Common, HarnessId, TextCodec, Transcript};
 
 /// Continue/convert a session from one harness's native text into another's.
@@ -71,8 +66,8 @@ pub fn harnesses() -> Vec<String> {
 /// Canonical model on the wire: a flat `{ meta, messages }` object.
 #[derive(Serialize, Deserialize)]
 struct CommonJson {
-    meta: Meta,
-    messages: Vec<Message>,
+    meta: common::Meta,
+    messages: Vec<common::Message>,
 }
 
 fn parse_to_common(harness: HarnessId, text: &str) -> crate::Result<Transcript<Common>> {
@@ -80,12 +75,12 @@ fn parse_to_common(harness: HarnessId, text: &str) -> crate::Result<Transcript<C
         H::to_common(&H::from_text(text)?)
     }
     match harness {
-        HarnessId::ClaudeCode => go::<ClaudeCode>(text),
-        HarnessId::Codex => go::<Codex>(text),
-        HarnessId::OpenCode => go::<OpenCode>(text),
-        HarnessId::Pi => go::<Pi>(text),
-        HarnessId::Campfire => go::<Campfire>(text),
-        HarnessId::Cursor => go::<Cursor>(text),
+        HarnessId::ClaudeCode => go::<claude_code::ClaudeCode>(text),
+        HarnessId::Codex => go::<codex::Codex>(text),
+        HarnessId::OpenCode => go::<opencode::OpenCode>(text),
+        HarnessId::Pi => go::<pi::Pi>(text),
+        HarnessId::Campfire => go::<campfire::Campfire>(text),
+        HarnessId::Cursor => go::<cursor::Cursor>(text),
     }
 }
 
@@ -94,12 +89,12 @@ fn render_from_common(harness: HarnessId, common: &Transcript<Common>) -> crate:
         H::to_text(&H::from_common(common)?)
     }
     match harness {
-        HarnessId::ClaudeCode => go::<ClaudeCode>(common),
-        HarnessId::Codex => go::<Codex>(common),
-        HarnessId::OpenCode => go::<OpenCode>(common),
-        HarnessId::Pi => go::<Pi>(common),
-        HarnessId::Campfire => go::<Campfire>(common),
-        HarnessId::Cursor => go::<Cursor>(common),
+        HarnessId::ClaudeCode => go::<claude_code::ClaudeCode>(common),
+        HarnessId::Codex => go::<codex::Codex>(common),
+        HarnessId::OpenCode => go::<opencode::OpenCode>(common),
+        HarnessId::Pi => go::<pi::Pi>(common),
+        HarnessId::Campfire => go::<campfire::Campfire>(common),
+        HarnessId::Cursor => go::<cursor::Cursor>(common),
     }
 }
 

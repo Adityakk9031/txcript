@@ -6,10 +6,9 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use txcript::{
-    Block, Codec, Common, Message, Meta, Pi, PiStore, Role, StopReason, Store, Tool, ToolOutput,
-    Transcript, Usage,
-};
+use txcript::common;
+use txcript::harness::pi;
+use txcript::{Codec, Common, Store, Transcript};
 
 fn ts(s: &str) -> DateTime<Utc> {
     s.parse().unwrap()
@@ -53,7 +52,7 @@ fn sample_jsonl() -> String {
 #[test]
 fn store_round_trip_is_lossless_on_disk() {
     let dir = tempfile::tempdir().unwrap();
-    let store = PiStore::new(dir.path());
+    let store = pi::PiStore::new(dir.path());
 
     let src = dir.path().join("orig.jsonl");
     std::fs::write(&src, sample_jsonl()).unwrap();
@@ -75,7 +74,7 @@ fn discover_extracts_metadata() {
     std::fs::create_dir_all(&project).unwrap();
     std::fs::write(project.join("s.jsonl"), sample_jsonl()).unwrap();
 
-    let store = PiStore::new(dir.path());
+    let store = pi::PiStore::new(dir.path());
     let found = store.discover().unwrap();
     assert_eq!(found.len(), 1);
     let meta = &found[0].meta;
@@ -89,11 +88,11 @@ fn discover_extracts_metadata() {
 #[test]
 fn to_common_normalizes_tools_and_expands_bash() {
     let dir = tempfile::tempdir().unwrap();
-    let store = PiStore::new(dir.path());
+    let store = pi::PiStore::new(dir.path());
     let src = dir.path().join("s.jsonl");
     std::fs::write(&src, sample_jsonl()).unwrap();
 
-    let common = Pi::to_common(&store.load(&src).unwrap()).unwrap();
+    let common = pi::Pi::to_common(&store.load(&src).unwrap()).unwrap();
     let msgs = &common.body;
 
     // user, assistant(think/text/edit), toolResult, bash-use, bash-result,
@@ -102,10 +101,10 @@ fn to_common_normalizes_tools_and_expands_bash() {
 
     // pi `edit` with one hunk normalizes to a typed Edit with renamed keys.
     match &msgs[1].content[2] {
-        Block::ToolUse {
+        common::Block::ToolUse {
             id,
             tool:
-                Tool::Edit {
+                common::Tool::Edit {
                     file_path,
                     old_string,
                     new_string,
@@ -119,7 +118,7 @@ fn to_common_normalizes_tools_and_expands_bash() {
         }
         other => panic!("expected Edit, got {other:?}"),
     }
-    assert_eq!(msgs[1].stop_reason, Some(StopReason::ToolUse));
+    assert_eq!(msgs[1].stop_reason, Some(common::StopReason::ToolUse));
     let usage = msgs[1].usage.unwrap();
     assert_eq!(usage.input_tokens, 10);
     assert_eq!(usage.cache_creation_input_tokens, Some(2));
@@ -127,29 +126,29 @@ fn to_common_normalizes_tools_and_expands_bash() {
     // toolResult flattens to text on a User message.
     assert!(matches!(
         &msgs[2].content[0],
-        Block::ToolResult { tool_use_id, content: ToolOutput::Text(t), is_error: false }
+        common::Block::ToolResult { tool_use_id, content: common::ToolOutput::Text(t), is_error: false }
             if tool_use_id == "call-1" && t == "done"
     ));
 
     // bashExecution expands into a Bash tool_use + its result.
     assert!(matches!(
         &msgs[3].content[0],
-        Block::ToolUse { tool: Tool::Bash { command, .. }, .. } if command == "ls"
+        common::Block::ToolUse { tool: common::Tool::Bash { command, .. }, .. } if command == "ls"
     ));
     assert!(matches!(
         &msgs[4].content[0],
-        Block::ToolResult { content: ToolOutput::Text(t), .. } if t == "f1\nf2\n"
+        common::Block::ToolResult { content: common::ToolOutput::Text(t), .. } if t == "f1\nf2\n"
     ));
 
     // custom_message replays as a user turn.
-    assert_eq!(msgs[5].role, Role::User);
-    assert!(matches!(&msgs[5].content[0], Block::Text { text } if text == "remember this"));
+    assert_eq!(msgs[5].role, common::Role::User);
+    assert!(matches!(&msgs[5].content[0], common::Block::Text { text } if text == "remember this"));
 }
 
 #[test]
 fn multi_edit_maps_to_multiedit() {
     let dir = tempfile::tempdir().unwrap();
-    let store = PiStore::new(dir.path());
+    let store = pi::PiStore::new(dir.path());
     let src = dir.path().join("s.jsonl");
     std::fs::write(
         &src,
@@ -166,10 +165,10 @@ fn multi_edit_maps_to_multiedit() {
     )
     .unwrap();
 
-    let common = Pi::to_common(&store.load(&src).unwrap()).unwrap();
+    let common = pi::Pi::to_common(&store.load(&src).unwrap()).unwrap();
     match &common.body[0].content[0] {
-        Block::ToolUse {
-            tool: Tool::MultiEdit { file_path, edits },
+        common::Block::ToolUse {
+            tool: common::Tool::MultiEdit { file_path, edits },
             ..
         } => {
             assert_eq!(file_path, "/repo/a.rs");
@@ -185,7 +184,7 @@ fn multi_edit_maps_to_multiedit() {
 /// homogeneous user messages, assistant turns with model/usage/stop_reason,
 /// pi-representable thinking (no signature).
 fn sample_common() -> Transcript<Common> {
-    let meta = Meta {
+    let meta = common::Meta {
         id: "abc".into(),
         timestamp: ts("2026-01-02T03:04:05.000Z"),
         cwd: Some("/repo".into()),
@@ -195,9 +194,9 @@ fn sample_common() -> Transcript<Common> {
         model: Some("claude-opus-4-8".into()),
     };
     let body = vec![
-        Message {
-            role: Role::User,
-            content: vec![Block::Text {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::Text {
                 text: "edit it".into(),
             }],
             timestamp: ts("2026-01-02T03:04:06.000Z"),
@@ -205,20 +204,20 @@ fn sample_common() -> Transcript<Common> {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::Assistant,
+        common::Message {
+            role: common::Role::Assistant,
             content: vec![
-                Block::Thinking {
+                common::Block::Thinking {
                     text: "thinking".into(),
                     signature: None,
                     encrypted: None,
                 },
-                Block::Text {
+                common::Block::Text {
                     text: "on it".into(),
                 },
-                Block::ToolUse {
+                common::Block::ToolUse {
                     id: "call-1".into(),
-                    tool: Tool::Edit {
+                    tool: common::Tool::Edit {
                         file_path: "/repo/a.rs".into(),
                         old_string: "old".into(),
                         new_string: "new".into(),
@@ -228,14 +227,14 @@ fn sample_common() -> Transcript<Common> {
             ],
             timestamp: ts("2026-01-02T03:04:07.000Z"),
             model: Some("claude-opus-4-8".into()),
-            stop_reason: Some(StopReason::ToolUse),
+            stop_reason: Some(common::StopReason::ToolUse),
             usage: None,
         },
-        Message {
-            role: Role::User,
-            content: vec![Block::ToolResult {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::ToolResult {
                 tool_use_id: "call-1".into(),
-                content: ToolOutput::Text("done".into()),
+                content: common::ToolOutput::Text("done".into()),
                 is_error: false,
             }],
             timestamp: ts("2026-01-02T03:04:08.000Z"),
@@ -243,15 +242,15 @@ fn sample_common() -> Transcript<Common> {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::Assistant,
-            content: vec![Block::Text {
+        common::Message {
+            role: common::Role::Assistant,
+            content: vec![common::Block::Text {
                 text: "finished".into(),
             }],
             timestamp: ts("2026-01-02T03:04:09.000Z"),
             model: Some("claude-opus-4-8".into()),
-            stop_reason: Some(StopReason::EndTurn),
-            usage: Some(Usage {
+            stop_reason: Some(common::StopReason::EndTurn),
+            usage: Some(common::Usage {
                 input_tokens: 10,
                 output_tokens: 20,
                 cache_read_input_tokens: Some(5),
@@ -265,7 +264,7 @@ fn sample_common() -> Transcript<Common> {
 #[test]
 fn codec_fixpoint_through_common_loses_nothing() {
     let common = sample_common();
-    let native = Pi::from_common(&common).unwrap();
-    let back = Pi::to_common(&native).unwrap();
+    let native = pi::Pi::from_common(&common).unwrap();
+    let back = pi::Pi::to_common(&native).unwrap();
     assert_eq!(common, back);
 }

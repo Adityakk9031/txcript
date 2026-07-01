@@ -6,10 +6,9 @@
 //! codec fixpoint through Common.
 
 use chrono::{DateTime, Utc};
-use txcript::{
-    Block, Codec, Codex, CodexStore, Common, Message, Meta, Role, Store, Tool, ToolOutput,
-    Transcript, Usage,
-};
+use txcript::common;
+use txcript::harness::codex;
+use txcript::{Codec, Common, Store, Transcript};
 
 fn ts(s: &str) -> DateTime<Utc> {
     s.parse().unwrap()
@@ -43,11 +42,11 @@ fn exercise_rollout() -> String {
 #[test]
 fn to_common_runs_the_full_aggregation() {
     let dir = tempfile::tempdir().unwrap();
-    let store = CodexStore::new(dir.path());
+    let store = codex::CodexStore::new(dir.path());
     let src = dir.path().join("rollout-x.jsonl");
     std::fs::write(&src, exercise_rollout()).unwrap();
 
-    let msgs = Codex::to_common(&store.load(&src).unwrap()).unwrap().body;
+    let msgs = codex::Codex::to_common(&store.load(&src).unwrap()).unwrap().body;
 
     // The duplicate function_call_output for call-shell is deduped against the
     // canonical exec_command_end, leaving 9 messages.
@@ -55,51 +54,51 @@ fn to_common_runs_the_full_aggregation() {
 
     // user: text + image
     assert!(
-        matches!(&msgs[0].content[0], Block::Text { text } if text == "Please inspect this image")
+        matches!(&msgs[0].content[0], common::Block::Text { text } if text == "Please inspect this image")
     );
-    assert!(matches!(&msgs[0].content[1], Block::Image { .. }));
+    assert!(matches!(&msgs[0].content[1], common::Block::Image { .. }));
 
     // reasoning summary -> thinking (encrypted_content dropped)
     assert!(
-        matches!(&msgs[1].content[0], Block::Thinking { text, .. } if text == "Inspecting project files")
+        matches!(&msgs[1].content[0], common::Block::Thinking { text, .. } if text == "Inspecting project files")
     );
 
     // exec_command -> typed Bash
     assert!(matches!(
         &msgs[2].content[0],
-        Block::ToolUse { id, tool: Tool::Bash { command, .. } } if id == "call-shell" && command == "ls"
+        common::Block::ToolUse { id, tool: common::Tool::Bash { command, .. } } if id == "call-shell" && command == "ls"
     ));
     // canonical exec result (from the event log), not the mirror fallback
     assert!(matches!(
         &msgs[3].content[0],
-        Block::ToolResult { tool_use_id, content: ToolOutput::Text(t), is_error: false }
+        common::Block::ToolResult { tool_use_id, content: common::ToolOutput::Text(t), is_error: false }
             if tool_use_id == "call-shell" && t == "file1\nfile2\n"
     ));
 
     // apply_patch single hunk -> typed Edit
     assert!(matches!(
         &msgs[4].content[0],
-        Block::ToolUse { tool: Tool::Edit { file_path, old_string, new_string, .. }, .. }
+        common::Block::ToolUse { tool: common::Tool::Edit { file_path, old_string, new_string, .. }, .. }
             if file_path == "src/main.rs" && old_string == "old" && new_string == "new"
     ));
     assert!(matches!(
         &msgs[5].content[0],
-        Block::ToolResult { tool_use_id, .. } if tool_use_id == "call-patch"
+        common::Block::ToolResult { tool_use_id, .. } if tool_use_id == "call-patch"
     ));
 
     // web-search result pairs back to the call via the action key.
     assert!(matches!(
         &msgs[6].content[0],
-        Block::ToolResult { tool_use_id, content: ToolOutput::Text(t), .. }
+        common::Block::ToolResult { tool_use_id, content: common::ToolOutput::Text(t), .. }
             if tool_use_id == "ws-1" && t == "Next.js docs\nNext.js cache docs"
     ));
     assert!(matches!(
         &msgs[7].content[0],
-        Block::ToolUse { id, tool: Tool::Raw { tool_name, .. } } if id == "ws-1" && tool_name == "WebSearch"
+        common::Block::ToolUse { id, tool: common::Tool::Raw { tool_name, .. } } if id == "ws-1" && tool_name == "WebSearch"
     ));
 
     // final assistant text, with model + usage backfilled from the turn.
-    assert!(matches!(&msgs[8].content[0], Block::Text { text } if text == "Done."));
+    assert!(matches!(&msgs[8].content[0], common::Block::Text { text } if text == "Done."));
     assert_eq!(msgs[8].model.as_deref(), Some("gpt-5.2-codex"));
     let usage = msgs[8].usage.unwrap();
     assert_eq!(usage.input_tokens, 100);
@@ -110,7 +109,7 @@ fn to_common_runs_the_full_aggregation() {
 #[test]
 fn legacy_shell_array_command_normalizes_to_bash() {
     let dir = tempfile::tempdir().unwrap();
-    let store = CodexStore::new(dir.path());
+    let store = codex::CodexStore::new(dir.path());
     let src = dir.path().join("rollout-y.jsonl");
     std::fs::write(
         &src,
@@ -122,10 +121,10 @@ fn legacy_shell_array_command_normalizes_to_bash() {
     )
     .unwrap();
 
-    let msgs = Codex::to_common(&store.load(&src).unwrap()).unwrap().body;
+    let msgs = codex::Codex::to_common(&store.load(&src).unwrap()).unwrap().body;
     assert!(matches!(
         &msgs[0].content[0],
-        Block::ToolUse { tool: Tool::Bash { command, workdir: Some(w), .. }, .. }
+        common::Block::ToolUse { tool: common::Tool::Bash { command, workdir: Some(w), .. }, .. }
             if command == "ls" && w == "/repo"
     ));
 }
@@ -133,7 +132,7 @@ fn legacy_shell_array_command_normalizes_to_bash() {
 #[test]
 fn store_round_trip_is_lossless_on_disk() {
     let dir = tempfile::tempdir().unwrap();
-    let store = CodexStore::new(dir.path());
+    let store = codex::CodexStore::new(dir.path());
     let src = dir.path().join("rollout-z.jsonl");
     let body = format!(
         "{}\n{}\n",
@@ -168,7 +167,7 @@ fn discover_extracts_metadata() {
     )
     .unwrap();
 
-    let found = CodexStore::new(dir.path()).discover().unwrap();
+    let found = codex::CodexStore::new(dir.path()).discover().unwrap();
     assert_eq!(found.len(), 1);
     let meta = &found[0].meta;
     assert_eq!(meta.id, "sess-1");
@@ -184,7 +183,7 @@ fn discover_extracts_metadata() {
 /// (codex has no stop reason). This is exactly what `to_common` produces, so
 /// `from_common`/`to_common` is a clean fixpoint.
 fn sample_common() -> Transcript<Common> {
-    let meta = Meta {
+    let meta = common::Meta {
         id: "sess-1".into(),
         timestamp: ts("2026-01-02T03:04:05.000Z"),
         cwd: Some("/repo".into()),
@@ -195,9 +194,9 @@ fn sample_common() -> Transcript<Common> {
     };
     let model = || Some("gpt-5.2-codex".to_string());
     let body = vec![
-        Message {
-            role: Role::User,
-            content: vec![Block::Text {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::Text {
                 text: "inspect".into(),
             }],
             timestamp: ts("2026-01-02T03:04:06.000Z"),
@@ -205,9 +204,9 @@ fn sample_common() -> Transcript<Common> {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::Assistant,
-            content: vec![Block::Thinking {
+        common::Message {
+            role: common::Role::Assistant,
+            content: vec![common::Block::Thinking {
                 text: "reasoning".into(),
                 signature: None,
                 encrypted: None,
@@ -217,11 +216,11 @@ fn sample_common() -> Transcript<Common> {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::Assistant,
-            content: vec![Block::ToolUse {
+        common::Message {
+            role: common::Role::Assistant,
+            content: vec![common::Block::ToolUse {
                 id: "call-x".into(),
-                tool: Tool::Bash {
+                tool: common::Tool::Bash {
                     command: "ls".into(),
                     workdir: None,
                     timeout_ms: None,
@@ -234,11 +233,11 @@ fn sample_common() -> Transcript<Common> {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::User,
-            content: vec![Block::ToolResult {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::ToolResult {
                 tool_use_id: "call-x".into(),
-                content: ToolOutput::Text("file1\nfile2\n".into()),
+                content: common::ToolOutput::Text("file1\nfile2\n".into()),
                 is_error: false,
             }],
             timestamp: ts("2026-01-02T03:04:09.000Z"),
@@ -246,15 +245,15 @@ fn sample_common() -> Transcript<Common> {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::Assistant,
-            content: vec![Block::Text {
+        common::Message {
+            role: common::Role::Assistant,
+            content: vec![common::Block::Text {
                 text: "Done.".into(),
             }],
             timestamp: ts("2026-01-02T03:04:10.000Z"),
             model: model(),
             stop_reason: None,
-            usage: Some(Usage {
+            usage: Some(common::Usage {
                 input_tokens: 100,
                 output_tokens: 40,
                 cache_read_input_tokens: Some(25),
@@ -268,7 +267,7 @@ fn sample_common() -> Transcript<Common> {
 #[test]
 fn codec_fixpoint_through_common_loses_nothing() {
     let common = sample_common();
-    let native = Codex::from_common(&common).unwrap();
-    let back = Codex::to_common(&native).unwrap();
+    let native = codex::Codex::from_common(&common).unwrap();
+    let back = codex::Codex::to_common(&native).unwrap();
     assert_eq!(common, back);
 }

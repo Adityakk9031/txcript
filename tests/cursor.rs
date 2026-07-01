@@ -4,19 +4,18 @@
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
-use txcript::{
-    Block, Codec, Common, Cursor, CursorBlob, Message, Meta, Role, TextCodec, Tool, ToolOutput,
-    Transcript,
-};
+use txcript::common;
+use txcript::harness::cursor;
+use txcript::{Codec, Common, TextCodec, Transcript};
 #[cfg(feature = "opencode")]
-use txcript::{CursorStore, Store};
+use txcript::Store;
 
 fn ts(s: &str) -> DateTime<Utc> {
     s.parse().unwrap()
 }
 
 fn sample_common() -> Transcript<Common> {
-    let meta = Meta {
+    let meta = common::Meta {
         id: "sess-1".into(),
         timestamp: ts("2026-01-02T03:04:05.000Z"),
         cwd: Some("/repo".into()),
@@ -28,9 +27,9 @@ fn sample_common() -> Transcript<Common> {
     Transcript::new(
         meta,
         vec![
-            Message {
-                role: Role::User,
-                content: vec![Block::Text {
+            common::Message {
+                role: common::Role::User,
+                content: vec![common::Block::Text {
                     text: "read the file".into(),
                 }],
                 timestamp: ts("2026-01-02T03:04:06.000Z"),
@@ -38,20 +37,20 @@ fn sample_common() -> Transcript<Common> {
                 stop_reason: None,
                 usage: None,
             },
-            Message {
-                role: Role::Assistant,
+            common::Message {
+                role: common::Role::Assistant,
                 content: vec![
-                    Block::Thinking {
+                    common::Block::Thinking {
                         text: String::new(),
                         signature: None,
                         encrypted: Some("opaque-reasoning".into()),
                     },
-                    Block::Text {
+                    common::Block::Text {
                         text: "I'll inspect it.".into(),
                     },
-                    Block::ToolUse {
+                    common::Block::ToolUse {
                         id: "tool-1".into(),
-                        tool: Tool::Read {
+                        tool: common::Tool::Read {
                             file_path: "/repo/README.md".into(),
                             offset: None,
                             limit: None,
@@ -63,11 +62,11 @@ fn sample_common() -> Transcript<Common> {
                 stop_reason: None,
                 usage: None,
             },
-            Message {
-                role: Role::User,
-                content: vec![Block::ToolResult {
+            common::Message {
+                role: common::Role::User,
+                content: vec![common::Block::ToolResult {
                     tool_use_id: "tool-1".into(),
-                    content: ToolOutput::Text("contents".into()),
+                    content: common::ToolOutput::Text("contents".into()),
                     is_error: false,
                 }],
                 timestamp: ts("2026-01-02T03:04:08.000Z"),
@@ -75,9 +74,9 @@ fn sample_common() -> Transcript<Common> {
                 stop_reason: None,
                 usage: None,
             },
-            Message {
-                role: Role::Assistant,
-                content: vec![Block::Text {
+            common::Message {
+                role: common::Role::Assistant,
+                content: vec![common::Block::Text {
                     text: "README loaded.".into(),
                 }],
                 timestamp: ts("2026-01-02T03:04:09.000Z"),
@@ -94,8 +93,8 @@ fn sample_common() -> Transcript<Common> {
 fn save_uses_cursor_chat_store_path() {
     let dir = tempfile::tempdir().unwrap();
     let common = sample_common();
-    let native = Cursor::from_common(&common).unwrap();
-    let saved = CursorStore::new(dir.path()).save(&native).unwrap();
+    let native = cursor::Cursor::from_common(&common).unwrap();
+    let saved = cursor::CursorStore::new(dir.path()).save(&native).unwrap();
 
     assert_eq!(saved.id, "sess-1");
     assert_eq!(
@@ -129,10 +128,10 @@ fn save_uses_cursor_chat_store_path() {
 fn discover_and_load_extract_cursor_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let common = sample_common();
-    let native = Cursor::from_common(&common).unwrap();
-    CursorStore::new(dir.path()).save(&native).unwrap();
+    let native = cursor::Cursor::from_common(&common).unwrap();
+    cursor::CursorStore::new(dir.path()).save(&native).unwrap();
 
-    let found = CursorStore::new(dir.path()).discover().unwrap();
+    let found = cursor::CursorStore::new(dir.path()).discover().unwrap();
     assert_eq!(found.len(), 1);
     let meta = &found[0].meta;
     assert_eq!(meta.id, "sess-1");
@@ -140,39 +139,39 @@ fn discover_and_load_extract_cursor_metadata() {
     assert_eq!(meta.title.as_deref(), Some("Cursor demo"));
     assert_eq!(meta.model.as_deref(), Some("composer-2.5-fast"));
 
-    let loaded = CursorStore::new(dir.path())
+    let loaded = cursor::CursorStore::new(dir.path())
         .load(&found[0].reference)
         .unwrap();
-    let round = Cursor::to_common(&loaded).unwrap();
+    let round = cursor::Cursor::to_common(&loaded).unwrap();
     assert_eq!(round.body.len(), 4);
 }
 
 #[test]
 fn to_common_preserves_cursor_tool_calls_results_and_reasoning() {
     let common = sample_common();
-    let native = Cursor::from_common(&common).unwrap();
-    let round = Cursor::to_common(&native).unwrap();
+    let native = cursor::Cursor::from_common(&common).unwrap();
+    let round = cursor::Cursor::to_common(&native).unwrap();
 
     assert_eq!(round.body[0].content, common.body[0].content);
     assert!(matches!(
         &round.body[1].content[0],
-        Block::Thinking {
+        common::Block::Thinking {
             encrypted: Some(data),
             ..
         } if data == "opaque-reasoning"
     ));
     assert!(matches!(
         &round.body[1].content[2],
-        Block::ToolUse {
+        common::Block::ToolUse {
             id,
-            tool: Tool::Read { file_path, .. },
+            tool: common::Tool::Read { file_path, .. },
         } if id == "tool-1" && file_path == "/repo/README.md"
     ));
     assert!(matches!(
         &round.body[2].content[0],
-        Block::ToolResult {
+        common::Block::ToolResult {
             tool_use_id,
-            content: ToolOutput::Text(text),
+            content: common::ToolOutput::Text(text),
             is_error: false,
         } if tool_use_id == "tool-1" && text == "contents"
     ));
@@ -180,19 +179,19 @@ fn to_common_preserves_cursor_tool_calls_results_and_reasoning() {
 
 #[test]
 fn text_codec_round_trips_native_export() {
-    let native = Cursor::from_common(&sample_common()).unwrap();
-    let text = Cursor::to_text(&native).unwrap();
-    let round = Cursor::from_text(&text).unwrap();
+    let native = cursor::Cursor::from_common(&sample_common()).unwrap();
+    let text = cursor::Cursor::to_text(&native).unwrap();
+    let round = cursor::Cursor::from_text(&text).unwrap();
     assert_eq!(round.body, native.body);
     assert_eq!(
-        Cursor::to_common(&round).unwrap().body,
+        cursor::Cursor::to_common(&round).unwrap().body,
         sample_common().body
     );
 }
 
 #[test]
 fn from_common_writes_cursor_resume_state_turns() {
-    let native = Cursor::from_common(&sample_common()).unwrap();
+    let native = cursor::Cursor::from_common(&sample_common()).unwrap();
     let root = latest_root_blob(&native.body);
     let turn_refs = len_fields(&root.data, 8);
 
@@ -260,9 +259,9 @@ fn from_common_writes_cursor_resume_state_turns() {
 fn from_common_writes_cursor_shell_tool_calls() {
     let mut common = sample_common();
     common.body = vec![
-        Message {
-            role: Role::User,
-            content: vec![Block::Text {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::Text {
                 text: "check git".into(),
             }],
             timestamp: ts("2026-01-02T03:04:06.000Z"),
@@ -270,11 +269,11 @@ fn from_common_writes_cursor_shell_tool_calls() {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::Assistant,
-            content: vec![Block::ToolUse {
+        common::Message {
+            role: common::Role::Assistant,
+            content: vec![common::Block::ToolUse {
                 id: "shell-1".into(),
-                tool: Tool::Bash {
+                tool: common::Tool::Bash {
                     command: "git status --short".into(),
                     workdir: Some("/repo".into()),
                     timeout_ms: None,
@@ -287,11 +286,11 @@ fn from_common_writes_cursor_shell_tool_calls() {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::User,
-            content: vec![Block::ToolResult {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::ToolResult {
                 tool_use_id: "shell-1".into(),
-                content: ToolOutput::Text(" M src/main.rs".into()),
+                content: common::ToolOutput::Text(" M src/main.rs".into()),
                 is_error: false,
             }],
             timestamp: ts("2026-01-02T03:04:08.000Z"),
@@ -301,7 +300,7 @@ fn from_common_writes_cursor_shell_tool_calls() {
         },
     ];
 
-    let native = Cursor::from_common(&common).unwrap();
+    let native = cursor::Cursor::from_common(&common).unwrap();
     let tool_call = first_tool_call(&native.body).expect("shell tool call");
     let shell = len_fields(&tool_call, 1);
     assert_eq!(shell.len(), 1);
@@ -330,9 +329,9 @@ fn from_common_writes_cursor_shell_tool_calls() {
 fn from_common_writes_cursor_edit_tool_calls_with_diff_payload() {
     let mut common = sample_common();
     common.body = vec![
-        Message {
-            role: Role::User,
-            content: vec![Block::Text {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::Text {
                 text: "update readme".into(),
             }],
             timestamp: ts("2026-01-02T03:04:06.000Z"),
@@ -340,11 +339,11 @@ fn from_common_writes_cursor_edit_tool_calls_with_diff_payload() {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::Assistant,
-            content: vec![Block::ToolUse {
+        common::Message {
+            role: common::Role::Assistant,
+            content: vec![common::Block::ToolUse {
                 id: "edit-1".into(),
-                tool: Tool::Edit {
+                tool: common::Tool::Edit {
                     file_path: "/repo/README.md".into(),
                     old_string: "old title\n".into(),
                     new_string: "new title\n".into(),
@@ -356,11 +355,11 @@ fn from_common_writes_cursor_edit_tool_calls_with_diff_payload() {
             stop_reason: None,
             usage: None,
         },
-        Message {
-            role: Role::User,
-            content: vec![Block::ToolResult {
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::ToolResult {
                 tool_use_id: "edit-1".into(),
-                content: ToolOutput::Text(
+                content: common::ToolOutput::Text(
                     "The file /repo/README.md has been updated successfully.".into(),
                 ),
                 is_error: false,
@@ -372,7 +371,7 @@ fn from_common_writes_cursor_edit_tool_calls_with_diff_payload() {
         },
     ];
 
-    let native = Cursor::from_common(&common).unwrap();
+    let native = cursor::Cursor::from_common(&common).unwrap();
     let tool_call = first_tool_call(&native.body).expect("edit tool call");
     let edit = len_fields(&tool_call, 12);
     assert_eq!(edit.len(), 1);
@@ -421,21 +420,23 @@ fn from_common_writes_cursor_edit_tool_calls_with_diff_payload() {
 fn store_round_trip_preserves_non_json_blobs() {
     let src = tempfile::tempdir().unwrap();
     let dst = tempfile::tempdir().unwrap();
-    let mut native = Cursor::from_common(&sample_common()).unwrap();
+    let mut native = cursor::Cursor::from_common(&sample_common()).unwrap();
     native.body.blobs.insert(
         0,
-        CursorBlob {
+        cursor::CursorBlob {
             id: "binary-internal-state".into(),
             data: vec![0, 159, 146, 150, 1, 2, 3],
         },
     );
 
-    let saved = CursorStore::new(src.path()).save(&native).unwrap();
-    let loaded = CursorStore::new(src.path()).load(&saved.reference).unwrap();
+    let saved = cursor::CursorStore::new(src.path()).save(&native).unwrap();
+    let loaded = cursor::CursorStore::new(src.path())
+        .load(&saved.reference)
+        .unwrap();
     assert_eq!(loaded.body.blobs[0].data, vec![0, 159, 146, 150, 1, 2, 3]);
 
-    let copied = CursorStore::new(dst.path()).save(&loaded).unwrap();
-    let reloaded = CursorStore::new(dst.path())
+    let copied = cursor::CursorStore::new(dst.path()).save(&loaded).unwrap();
+    let reloaded = cursor::CursorStore::new(dst.path())
         .load(&copied.reference)
         .unwrap();
     assert_eq!(reloaded.body, loaded.body);
@@ -443,9 +444,9 @@ fn store_round_trip_preserves_non_json_blobs() {
 
 #[test]
 fn parses_existing_cursor_message_shapes() {
-    let body = txcript::harness::cursor::CursorDb {
+    let body = cursor::CursorDb {
         blobs: vec![
-            CursorBlob {
+            cursor::CursorBlob {
                 id: "system".into(),
                 data: serde_json::to_vec(&json!({
                     "role": "system",
@@ -453,7 +454,7 @@ fn parses_existing_cursor_message_shapes() {
                 }))
                 .unwrap(),
             },
-            CursorBlob {
+            cursor::CursorBlob {
                 id: "context".into(),
                 data: serde_json::to_vec(&json!({
                     "role": "user",
@@ -461,7 +462,7 @@ fn parses_existing_cursor_message_shapes() {
                 }))
                 .unwrap(),
             },
-            CursorBlob {
+            cursor::CursorBlob {
                 id: "user".into(),
                 data: serde_json::to_vec(&json!({
                     "role": "user",
@@ -469,7 +470,7 @@ fn parses_existing_cursor_message_shapes() {
                 }))
                 .unwrap(),
             },
-            CursorBlob {
+            cursor::CursorBlob {
                 id: "assistant".into(),
                 data: serde_json::to_vec(&json!({
                     "role": "assistant",
@@ -497,8 +498,8 @@ fn parses_existing_cursor_message_shapes() {
             "updatedAtMs": 1767337445000i64
         })),
     };
-    let transcript = Transcript::<Cursor>::new(
-        Meta {
+    let transcript = Transcript::<cursor::Cursor>::new(
+        common::Meta {
             id: "sess".into(),
             timestamp: ts("2026-01-02T03:04:05.000Z"),
             cwd: Some("/Users/me/repo".into()),
@@ -509,18 +510,18 @@ fn parses_existing_cursor_message_shapes() {
         },
         body,
     );
-    let common = Cursor::to_common(&transcript).unwrap();
+    let common = cursor::Cursor::to_common(&transcript).unwrap();
     assert_eq!(common.body.len(), 2);
     assert!(matches!(
         &common.body[1].content[0],
-        Block::ToolUse {
-            tool: Tool::Edit { file_path, old_string, new_string, .. },
+        common::Block::ToolUse {
+            tool: common::Tool::Edit { file_path, old_string, new_string, .. },
             ..
         } if file_path == "/repo/a.rs" && old_string == "old" && new_string == "new"
     ));
 }
 
-fn latest_root_blob(body: &txcript::harness::cursor::CursorDb) -> &CursorBlob {
+fn latest_root_blob(body: &cursor::CursorDb) -> &cursor::CursorBlob {
     let meta = cursor_meta_json(body);
     let id = meta
         .get("latestRootBlobId")
@@ -532,7 +533,7 @@ fn latest_root_blob(body: &txcript::harness::cursor::CursorDb) -> &CursorBlob {
         .expect("latest root blob")
 }
 
-fn cursor_meta_json(body: &txcript::harness::cursor::CursorDb) -> serde_json::Value {
+fn cursor_meta_json(body: &cursor::CursorDb) -> serde_json::Value {
     let raw = body
         .meta
         .iter()
@@ -544,7 +545,7 @@ fn cursor_meta_json(body: &txcript::harness::cursor::CursorDb) -> serde_json::Va
     serde_json::from_slice(&decoded).expect("cursor meta json")
 }
 
-fn first_tool_call(body: &txcript::harness::cursor::CursorDb) -> Option<Vec<u8>> {
+fn first_tool_call(body: &cursor::CursorDb) -> Option<Vec<u8>> {
     let root = latest_root_blob(body);
     for turn_ref in len_fields(&root.data, 8) {
         let turn_id = hex_encode_test(&turn_ref);

@@ -21,7 +21,8 @@
 //!
 //! # Shape
 //!
-//! - [`common`] — the canonical model ([`Message`], [`Block`], [`Tool`], …).
+//! - [`common`] — the canonical model ([`common::Message`], [`common::Block`],
+//!   [`common::Tool`], …).
 //! - [`Transcript`], [`Harness`], [`Codec`], [`Store`] — the generic type and
 //!   the traits over it.
 //! - [`harness`] — one module per implemented harness.
@@ -34,19 +35,11 @@ mod transcript;
 #[cfg(feature = "wasm")]
 mod wasm;
 
-pub use common::{
-    Block, EditOp, ImageSource, Message, Meta, Role, StopReason, Tool, ToolOutput, Usage,
-};
+// The core generic API lives in the private `transcript` module, so the crate
+// root is its canonical home. The concrete model and per-harness types keep
+// their own module homes — reach them through [`common`] and [`harness`]
+// rather than flattened at the root.
 pub use error::{Error, Result};
 pub use transcript::{
     Codec, Common, Discovered, Harness, HarnessId, Saved, Store, TextCodec, Transcript, convert,
 };
-
-pub use harness::campfire::{Campfire, CampfireStore};
-pub use harness::claude_code::{ClaudeCode, ClaudeStore};
-pub use harness::codex::{Codex, CodexStore};
-pub use harness::cursor::{Cursor, CursorBlob, CursorDb, CursorMetaEntry, CursorStore};
-pub use harness::opencode::OpenCode;
-#[cfg(feature = "opencode")]
-pub use harness::opencode::OpenCodeStore;
-pub use harness::pi::{Pi, PiStore};

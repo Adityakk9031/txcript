@@ -1,6 +1,6 @@
 [package]
 name = "txcript"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A typed intermediate representation for converting AI coding-agent session transcripts between harness formats (Claude Code, Codex, OpenCode, pi)."
 license = "Apache-2.0"

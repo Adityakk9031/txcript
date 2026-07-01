@@ -22,10 +22,9 @@
 
 use std::path::PathBuf;
 
-use txcript::{
-    Campfire, CampfireStore, ClaudeCode, ClaudeStore, Codec, Codex, CodexStore, Common, Cursor,
-    CursorStore, HarnessId, Meta, Pi, PiStore, Store, Transcript,
-};
+use txcript::common;
+use txcript::harness::{campfire, claude_code, codex, cursor, opencode, pi};
+use txcript::{Codec, Common, HarnessId, Store, Transcript};
 
 /// How to load a discovered session back: a file path, or an OpenCode session id.
 #[derive(Clone)]
@@ -38,7 +37,7 @@ enum Locator {
 /// One discovered local session.
 struct Found {
     harness: HarnessId,
-    meta: Meta,
+    meta: common::Meta,
     locator: Locator,
 }
 
@@ -242,7 +241,7 @@ fn discover_all() -> Vec<Found> {
     };
 
     announce(HarnessId::ClaudeCode, out.len());
-    if let Some(store) = ClaudeStore::default_root() {
+    if let Some(store) = claude_code::ClaudeStore::default_root() {
         for d in store.discover().unwrap_or_default() {
             out.push(Found {
                 harness: HarnessId::ClaudeCode,
@@ -252,7 +251,7 @@ fn discover_all() -> Vec<Found> {
         }
     }
     announce(HarnessId::Codex, out.len());
-    if let Some(store) = CodexStore::default_root() {
+    if let Some(store) = codex::CodexStore::default_root() {
         for d in store.discover().unwrap_or_default() {
             out.push(Found {
                 harness: HarnessId::Codex,
@@ -262,7 +261,7 @@ fn discover_all() -> Vec<Found> {
         }
     }
     announce(HarnessId::Pi, out.len());
-    if let Some(store) = PiStore::default_root() {
+    if let Some(store) = pi::PiStore::default_root() {
         for d in store.discover().unwrap_or_default() {
             out.push(Found {
                 harness: HarnessId::Pi,
@@ -272,7 +271,7 @@ fn discover_all() -> Vec<Found> {
         }
     }
     announce(HarnessId::Campfire, out.len());
-    if let Some(store) = CampfireStore::default_root() {
+    if let Some(store) = campfire::CampfireStore::default_root() {
         for d in store.discover().unwrap_or_default() {
             out.push(Found {
                 harness: HarnessId::Campfire,
@@ -282,7 +281,7 @@ fn discover_all() -> Vec<Found> {
         }
     }
     announce(HarnessId::Cursor, out.len());
-    if let Some(store) = CursorStore::default_root() {
+    if let Some(store) = cursor::CursorStore::default_root() {
         for d in store.discover().unwrap_or_default() {
             out.push(Found {
                 harness: HarnessId::Cursor,
@@ -294,7 +293,7 @@ fn discover_all() -> Vec<Found> {
     #[cfg(feature = "opencode")]
     {
         announce(HarnessId::OpenCode, out.len());
-        if let Some(store) = txcript::OpenCodeStore::default_db() {
+        if let Some(store) = opencode::OpenCodeStore::default_db() {
             for d in store.discover().unwrap_or_default() {
                 out.push(Found {
                     harness: HarnessId::OpenCode,
@@ -314,30 +313,29 @@ fn load_common(found: &Found) -> Result<Transcript<Common>, String> {
     let err = |e: txcript::Error| e.to_string();
     match (&found.harness, &found.locator) {
         (HarnessId::ClaudeCode, Locator::Path(p)) => {
-            let store = ClaudeStore::default_root().ok_or("no home directory")?;
-            ClaudeCode::to_common(&store.load(p).map_err(err)?).map_err(err)
+            let store = claude_code::ClaudeStore::default_root().ok_or("no home directory")?;
+            claude_code::ClaudeCode::to_common(&store.load(p).map_err(err)?).map_err(err)
         }
         (HarnessId::Codex, Locator::Path(p)) => {
-            let store = CodexStore::default_root().ok_or("no home directory")?;
-            Codex::to_common(&store.load(p).map_err(err)?).map_err(err)
+            let store = codex::CodexStore::default_root().ok_or("no home directory")?;
+            codex::Codex::to_common(&store.load(p).map_err(err)?).map_err(err)
         }
         (HarnessId::Pi, Locator::Path(p)) => {
-            let store = PiStore::default_root().ok_or("no home directory")?;
-            Pi::to_common(&store.load(p).map_err(err)?).map_err(err)
+            let store = pi::PiStore::default_root().ok_or("no home directory")?;
+            pi::Pi::to_common(&store.load(p).map_err(err)?).map_err(err)
         }
         (HarnessId::Campfire, Locator::Path(p)) => {
-            let store = CampfireStore::default_root().ok_or("no home directory")?;
-            Campfire::to_common(&store.load(p).map_err(err)?).map_err(err)
+            let store = campfire::CampfireStore::default_root().ok_or("no home directory")?;
+            campfire::Campfire::to_common(&store.load(p).map_err(err)?).map_err(err)
         }
         (HarnessId::Cursor, Locator::Path(p)) => {
-            let store = CursorStore::default_root().ok_or("no home directory")?;
-            Cursor::to_common(&store.load(p).map_err(err)?).map_err(err)
+            let store = cursor::CursorStore::default_root().ok_or("no home directory")?;
+            cursor::Cursor::to_common(&store.load(p).map_err(err)?).map_err(err)
         }
         #[cfg(feature = "opencode")]
         (HarnessId::OpenCode, Locator::Id(id)) => {
-            use txcript::OpenCode;
-            let store = txcript::OpenCodeStore::default_db().ok_or("no home directory")?;
-            OpenCode::to_common(&store.load(id).map_err(err)?).map_err(err)
+            let store = opencode::OpenCodeStore::default_db().ok_or("no home directory")?;
+            opencode::OpenCode::to_common(&store.load(id).map_err(err)?).map_err(err)
         }
         _ => Err("unsupported source harness/locator combination".into()),
     }
@@ -352,29 +350,29 @@ fn save_target(
     let err = |e: txcript::Error| e.to_string();
     match target {
         HarnessId::ClaudeCode => {
-            let root = file_store_root(out, ClaudeStore::default_root().map(|s| s.root))?;
-            let native = ClaudeCode::from_common(common).map_err(err)?;
-            describe(ClaudeStore::new(root).save(&native).map_err(err)?)
+            let root = file_store_root(out, claude_code::ClaudeStore::default_root().map(|s| s.root))?;
+            let native = claude_code::ClaudeCode::from_common(common).map_err(err)?;
+            describe(claude_code::ClaudeStore::new(root).save(&native).map_err(err)?)
         }
         HarnessId::Codex => {
-            let root = file_store_root(out, CodexStore::default_root().map(|s| s.sessions_dir))?;
-            let native = Codex::from_common(common).map_err(err)?;
-            describe(CodexStore::new(root).save(&native).map_err(err)?)
+            let root = file_store_root(out, codex::CodexStore::default_root().map(|s| s.sessions_dir))?;
+            let native = codex::Codex::from_common(common).map_err(err)?;
+            describe(codex::CodexStore::new(root).save(&native).map_err(err)?)
         }
         HarnessId::Pi => {
-            let root = file_store_root(out, PiStore::default_root().map(|s| s.sessions_dir))?;
-            let native = Pi::from_common(common).map_err(err)?;
-            describe(PiStore::new(root).save(&native).map_err(err)?)
+            let root = file_store_root(out, pi::PiStore::default_root().map(|s| s.sessions_dir))?;
+            let native = pi::Pi::from_common(common).map_err(err)?;
+            describe(pi::PiStore::new(root).save(&native).map_err(err)?)
         }
         HarnessId::Campfire => {
-            let root = file_store_root(out, CampfireStore::default_root().map(|s| s.sessions_dir))?;
-            let native = Campfire::from_common(common).map_err(err)?;
-            describe(CampfireStore::new(root).save(&native).map_err(err)?)
+            let root = file_store_root(out, campfire::CampfireStore::default_root().map(|s| s.sessions_dir))?;
+            let native = campfire::Campfire::from_common(common).map_err(err)?;
+            describe(campfire::CampfireStore::new(root).save(&native).map_err(err)?)
         }
         HarnessId::Cursor => {
-            let root = file_store_root(out, CursorStore::default_root().map(|s| s.chats_dir))?;
-            let native = Cursor::from_common(common).map_err(err)?;
-            describe(CursorStore::new(root).save(&native).map_err(err)?)
+            let root = file_store_root(out, cursor::CursorStore::default_root().map(|s| s.chats_dir))?;
+            let native = cursor::Cursor::from_common(common).map_err(err)?;
+            describe(cursor::CursorStore::new(root).save(&native).map_err(err)?)
         }
         HarnessId::OpenCode => save_opencode(common),
     }
@@ -382,10 +380,9 @@ fn save_target(
 
 #[cfg(feature = "opencode")]
 fn save_opencode(common: &Transcript<Common>) -> Result<(String, String), String> {
-    use txcript::{OpenCode, OpenCodeStore};
     let err = |e: txcript::Error| e.to_string();
-    let store = OpenCodeStore::default_db().ok_or("no home directory")?;
-    let native = OpenCode::from_common(common).map_err(err)?;
+    let store = opencode::OpenCodeStore::default_db().ok_or("no home directory")?;
+    let native = opencode::OpenCode::from_common(common).map_err(err)?;
     let saved = store.save(&native).map_err(err)?;
     Ok((saved.id, "imported via `opencode import`".into()))
 }

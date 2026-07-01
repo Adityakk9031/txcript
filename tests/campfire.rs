@@ -5,7 +5,9 @@
 //! only stamped as a different harness.
 
 use serde_json::json;
-use txcript::{Block, Campfire, CampfireStore, Codec, Harness, Role, Store, Tool};
+use txcript::common;
+use txcript::harness::campfire;
+use txcript::{Codec, Harness, Store};
 
 fn sample_jsonl() -> String {
     [
@@ -23,13 +25,13 @@ fn sample_jsonl() -> String {
 
 #[test]
 fn campfire_marker_is_distinct() {
-    assert_eq!(Campfire::NAME, "campfire");
+    assert_eq!(campfire::Campfire::NAME, "campfire");
 }
 
 #[test]
 fn store_round_trip_and_conversion() {
     let dir = tempfile::tempdir().unwrap();
-    let store = CampfireStore::new(dir.path());
+    let store = campfire::CampfireStore::new(dir.path());
     let src = dir.path().join("orig.jsonl");
     std::fs::write(&src, sample_jsonl()).unwrap();
 
@@ -41,11 +43,11 @@ fn store_round_trip_and_conversion() {
     assert_eq!(loaded.body, reloaded.body);
 
     // The pi `read` tool normalizes the same way (path -> file_path).
-    let common = Campfire::to_common(&loaded).unwrap();
-    assert_eq!(common.body.len(), 2);
-    assert_eq!(common.body[0].role, Role::User);
+    let converted = campfire::Campfire::to_common(&loaded).unwrap();
+    assert_eq!(converted.body.len(), 2);
+    assert_eq!(converted.body[0].role, common::Role::User);
     assert!(matches!(
-        &common.body[1].content[0],
-        Block::ToolUse { tool: Tool::Read { file_path, .. }, .. } if file_path == "/repo/main.rs"
+        &converted.body[1].content[0],
+        common::Block::ToolUse { tool: common::Tool::Read { file_path, .. }, .. } if file_path == "/repo/main.rs"
     ));
 }
