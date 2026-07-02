@@ -3,7 +3,7 @@
 **txcript lets you swap the agent you're using in the middle of a session.**
 
 It converts session transcripts between Claude Code, Codex, OpenCode, pi,
-Campfire, and Cursor. Your messages, the agent's reasoning, tool calls, and
+Campfire, Cursor, and Grok CLI. Your messages, the agent's reasoning, tool calls, and
 images all come across, so the new agent picks up the conversation where the
 old one left off.
 
@@ -33,6 +33,7 @@ Supported harnesses (string ids in parentheses, used by the CLI and WASM):
 - pi (`pi`)
 - Campfire (`campfire`)
 - Cursor (`cursor`)
+- Grok CLI (`grok`)
 
 It ships three ways: a **Rust library**, a **CLI**, and a **WASM module** for
 Bun / Node / the browser.
@@ -169,13 +170,14 @@ writeFileSync("session.jsonl", convert(input, "codex", "claude_code"));
 const common = JSON.parse(toCommon(input, "codex"));   // { meta, messages }
 const pi = fromCommon(JSON.stringify(common), "pi");
 
-harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor"]
+harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor","grok"]
 ```
 
 Text-in / text-out: `input` is a harness's native session text (JSONL for
-claude_code/codex/pi/campfire, the `opencode export` JSON for opencode, and a
-JSON export of Cursor's `store.db` for cursor); the result is the target's
-native text. Invalid harness names or unparseable input throw a JS `Error`.
+claude_code/codex/pi/campfire, the `opencode export` JSON for opencode, a
+JSON export of Cursor's `store.db` for cursor, and a JSON bundle of the
+session directory's files for grok); the result is the target's native text.
+Invalid harness names or unparseable input throw a JS `Error`.
 
 ## Development
 

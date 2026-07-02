@@ -15,7 +15,8 @@
 //! replacing this process). The resume command is overridable per harness via
 //! `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template).
 //!
-//! `<harness>` is one of: claude_code, codex, opencode, pi, campfire, cursor.
+//! `<harness>` is one of: `claude_code`, codex, opencode, pi, campfire, cursor,
+//! grok.
 //!
 //! Cursor resumes with `agent --resume=<id>` (override via
 //! `TRANSCRIPT_CURSOR_RESUME_CMD="agent --resume={id}"`).
@@ -23,10 +24,10 @@
 use std::path::PathBuf;
 
 use txcript::common;
-use txcript::harness::{campfire, claude_code, codex, cursor, opencode, pi};
+use txcript::harness::{campfire, claude_code, codex, cursor, grok, opencode, pi};
 use txcript::{Codec, Common, HarnessId, Store, Transcript};
 
-/// How to load a discovered session back: a file path, or an OpenCode session id.
+/// How to load a discovered session back: a file path, or an `OpenCode` session id.
 #[derive(Clone)]
 enum Locator {
     Path(PathBuf),
@@ -51,9 +52,12 @@ fn main() {
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("list") => cmd_list(),
+        Some("list") => {
+            cmd_list();
+            Ok(())
+        }
         Some("continue") => cmd_continue(&args[1..]),
-        Some("-h") | Some("--help") | Some("help") | None => {
+        Some("-h" | "--help" | "help") | None => {
             usage();
             Ok(())
         }
@@ -72,15 +76,15 @@ fn usage() {
          txcript continue <id> [--with <harness>] [--from <harness>] [--out <dir>] [--no-resume]\n\n\
          continue launches the harness afterward; --with crosses into another,\n\
          --out/--no-resume write the session without launching.\n\
-         harnesses: claude_code, codex, opencode, pi, campfire, cursor"
+         harnesses: claude_code, codex, opencode, pi, campfire, cursor, grok"
     );
 }
 
-fn cmd_list() -> Result<(), String> {
+fn cmd_list() {
     let sessions = discover_all();
     if sessions.is_empty() {
         println!("no local sessions found");
-        return Ok(());
+        return;
     }
     println!("{:<12}  {:<38}  TITLE / FIRST MESSAGE", "HARNESS", "ID");
     for s in &sessions {
@@ -96,7 +100,6 @@ fn cmd_list() -> Result<(), String> {
             truncate(&label, 60)
         );
     }
-    Ok(())
 }
 
 fn cmd_continue(args: &[String]) -> Result<(), String> {
@@ -208,6 +211,7 @@ fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
         HarnessId::Pi => ("pi".into(), vec!["--session".into(), id]),
         HarnessId::Campfire => ("campfire".into(), vec!["--session".into(), id]),
         HarnessId::Cursor => ("agent".into(), vec![format!("--resume={id}")]),
+        HarnessId::Grok => ("grok".into(), vec!["--resume".into(), id]),
     }
 }
 
@@ -290,6 +294,16 @@ fn discover_all() -> Vec<Found> {
             });
         }
     }
+    announce(HarnessId::Grok, out.len());
+    if let Some(store) = grok::GrokStore::default_root() {
+        for d in store.discover().unwrap_or_default() {
+            out.push(Found {
+                harness: HarnessId::Grok,
+                meta: d.meta,
+                locator: Locator::Path(d.reference),
+            });
+        }
+    }
     #[cfg(feature = "opencode")]
     {
         announce(HarnessId::OpenCode, out.len());
@@ -332,6 +346,10 @@ fn load_common(found: &Found) -> Result<Transcript<Common>, String> {
             let store = cursor::CursorStore::default_root().ok_or("no home directory")?;
             cursor::Cursor::to_common(&store.load(p).map_err(err)?).map_err(err)
         }
+        (HarnessId::Grok, Locator::Path(p)) => {
+            let store = grok::GrokStore::default_root().ok_or("no home directory")?;
+            grok::Grok::to_common(&store.load(p).map_err(err)?).map_err(err)
+        }
         #[cfg(feature = "opencode")]
         (HarnessId::OpenCode, Locator::Id(id)) => {
             let store = opencode::OpenCodeStore::default_db().ok_or("no home directory")?;
@@ -350,29 +368,61 @@ fn save_target(
     let err = |e: txcript::Error| e.to_string();
     match target {
         HarnessId::ClaudeCode => {
-            let root = file_store_root(out, claude_code::ClaudeStore::default_root().map(|s| s.root))?;
+            let root = file_store_root(
+                out,
+                claude_code::ClaudeStore::default_root().map(|s| s.root),
+            )?;
             let native = claude_code::ClaudeCode::from_common(common).map_err(err)?;
-            describe(claude_code::ClaudeStore::new(root).save(&native).map_err(err)?)
+            Ok(describe(
+                claude_code::ClaudeStore::new(root)
+                    .save(&native)
+                    .map_err(err)?,
+            ))
         }
         HarnessId::Codex => {
-            let root = file_store_root(out, codex::CodexStore::default_root().map(|s| s.sessions_dir))?;
+            let root = file_store_root(
+                out,
+                codex::CodexStore::default_root().map(|s| s.sessions_dir),
+            )?;
             let native = codex::Codex::from_common(common).map_err(err)?;
-            describe(codex::CodexStore::new(root).save(&native).map_err(err)?)
+            Ok(describe(
+                codex::CodexStore::new(root).save(&native).map_err(err)?,
+            ))
         }
         HarnessId::Pi => {
             let root = file_store_root(out, pi::PiStore::default_root().map(|s| s.sessions_dir))?;
             let native = pi::Pi::from_common(common).map_err(err)?;
-            describe(pi::PiStore::new(root).save(&native).map_err(err)?)
+            Ok(describe(pi::PiStore::new(root).save(&native).map_err(err)?))
         }
         HarnessId::Campfire => {
-            let root = file_store_root(out, campfire::CampfireStore::default_root().map(|s| s.sessions_dir))?;
+            let root = file_store_root(
+                out,
+                campfire::CampfireStore::default_root().map(|s| s.sessions_dir),
+            )?;
             let native = campfire::Campfire::from_common(common).map_err(err)?;
-            describe(campfire::CampfireStore::new(root).save(&native).map_err(err)?)
+            Ok(describe(
+                campfire::CampfireStore::new(root)
+                    .save(&native)
+                    .map_err(err)?,
+            ))
         }
         HarnessId::Cursor => {
-            let root = file_store_root(out, cursor::CursorStore::default_root().map(|s| s.chats_dir))?;
+            let root = file_store_root(
+                out,
+                cursor::CursorStore::default_root().map(|s| s.chats_dir),
+            )?;
             let native = cursor::Cursor::from_common(common).map_err(err)?;
-            describe(cursor::CursorStore::new(root).save(&native).map_err(err)?)
+            Ok(describe(
+                cursor::CursorStore::new(root).save(&native).map_err(err)?,
+            ))
+        }
+        HarnessId::Grok => {
+            let root =
+                file_store_root(out, grok::GrokStore::default_root().map(|s| s.sessions_dir))?;
+            let native = grok::Grok::from_common(common).map_err(err)?;
+            Ok(describe(
+                grok::GrokStore::new(root).save(&native).map_err(err)?,
+            ))
         }
         HarnessId::OpenCode => save_opencode(common),
     }
@@ -402,8 +452,8 @@ fn file_store_root(
     }
 }
 
-fn describe<R: std::fmt::Debug>(saved: txcript::Saved<R>) -> Result<(String, String), String> {
-    Ok((saved.id, format!("{:?}", saved.reference)))
+fn describe<R: std::fmt::Debug>(saved: txcript::Saved<R>) -> (String, String) {
+    (saved.id, format!("{:?}", saved.reference))
 }
 
 fn truncate(s: &str, max: usize) -> String {

@@ -13,15 +13,17 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use crate::common;
-use crate::harness::{campfire, claude_code, codex, cursor, opencode, pi};
+use crate::harness::{campfire, claude_code, codex, cursor, grok, opencode, pi};
 use crate::transcript::{Codec, Common, HarnessId, TextCodec, Transcript};
 
 /// Continue/convert a session from one harness's native text into another's.
 ///
 /// `input` is the source session text (JSONL for claude_code/codex/pi/campfire,
-/// the Cursor JSON DB export for cursor, the `opencode export` JSON for opencode); `from`/`to` are harness
-/// names (`"claude_code"`, `"codex"`, `"opencode"`, `"pi"`, `"campfire"`,
-/// `"cursor"`). Returns the target harness's native text.
+/// the Cursor JSON DB export for cursor, the `opencode export` JSON for
+/// opencode, the JSON bundle of the session directory for grok); `from`/`to`
+/// are harness names (`"claude_code"`, `"codex"`, `"opencode"`, `"pi"`,
+/// `"campfire"`, `"cursor"`, `"grok"`). Returns the target harness's native
+/// text.
 #[wasm_bindgen]
 pub fn convert(input: &str, from: &str, to: &str) -> Result<String, JsError> {
     let from = parse_harness(from)?;
@@ -81,6 +83,7 @@ fn parse_to_common(harness: HarnessId, text: &str) -> crate::Result<Transcript<C
         HarnessId::Pi => go::<pi::Pi>(text),
         HarnessId::Campfire => go::<campfire::Campfire>(text),
         HarnessId::Cursor => go::<cursor::Cursor>(text),
+        HarnessId::Grok => go::<grok::Grok>(text),
     }
 }
 
@@ -95,6 +98,7 @@ fn render_from_common(harness: HarnessId, common: &Transcript<Common>) -> crate:
         HarnessId::Pi => go::<pi::Pi>(common),
         HarnessId::Campfire => go::<campfire::Campfire>(common),
         HarnessId::Cursor => go::<cursor::Cursor>(common),
+        HarnessId::Grok => go::<grok::Grok>(common),
     }
 }
 

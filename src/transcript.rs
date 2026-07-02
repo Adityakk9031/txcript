@@ -95,7 +95,11 @@ impl Harness for Common {
 /// semantic equality, not byte equality; byte-exactness lives at the native
 /// representation ↔ disk boundary in [`Store`].
 pub trait Codec: Harness + Sized {
+    /// # Errors
+    /// When the native records are malformed beyond the raw-fallback layer.
     fn to_common(transcript: &Transcript<Self>) -> Result<Transcript<Common>>;
+    /// # Errors
+    /// When this harness cannot represent the transcript.
     fn from_common(transcript: &Transcript<Common>) -> Result<Transcript<Self>>;
 }
 
@@ -113,6 +117,9 @@ impl Codec for Common {
 /// ```ignore
 /// let codex_session = convert::<ClaudeCode, Codex>(&claude_session)?;
 /// ```
+///
+/// # Errors
+/// When `A` cannot parse its records or `B` cannot represent the transcript.
 pub fn convert<A, B>(transcript: &Transcript<A>) -> Result<Transcript<B>>
 where
     A: Codec,
@@ -129,17 +136,23 @@ where
 pub trait TextCodec: Harness + Sized {
     /// Parse native session text into a transcript. `meta.id` may be empty when
     /// the text carries no internal id; a [`Store`] fills it from the filename.
+    ///
+    /// # Errors
+    /// When the text is not this harness's session format.
     fn from_text(text: &str) -> Result<Transcript<Self>>;
 
     /// Render a transcript back to native session text.
+    ///
+    /// # Errors
+    /// When the records cannot be serialized.
     fn to_text(transcript: &Transcript<Self>) -> Result<String>;
 }
 
 /// Procuring and persisting native transcripts against a real backend (a
-/// session directory, a SQLite database, an `import` subprocess).
+/// session directory, a `SQLite` database, an `import` subprocess).
 ///
 /// Kept separate from [`Codec`] because the mechanism is wildly asymmetric per
-/// harness — JSONL files vs. reading SQLite but writing through an external
+/// harness — JSONL files vs. reading `SQLite` but writing through an external
 /// importer — while the semantic mapping in [`Codec`] is uniform.
 pub trait Store {
     /// The harness this store reads and writes.
@@ -148,17 +161,29 @@ pub trait Store {
     type Ref;
 
     /// Cheap metadata scan — no full message parsing.
+    ///
+    /// # Errors
+    /// When the backend itself fails; a missing root is `Ok(vec![])`.
     fn discover(&self) -> Result<Vec<Discovered<Self::Ref>>>;
 
     /// Load and parse one transcript into its faithful native representation.
+    ///
+    /// # Errors
+    /// When the reference doesn't exist or its content doesn't parse.
     fn load(&self, reference: &Self::Ref) -> Result<Transcript<Self::H>>;
 
     /// Persist a native transcript so the harness can resume it.
+    ///
+    /// # Errors
+    /// When the backend rejects the write.
     fn save(&self, transcript: &Transcript<Self::H>) -> Result<Saved<Self::Ref>>;
 
     /// Per-reference change cursors, for callers that cache parsed transcripts.
     /// Default: no fingerprints, forcing a re-parse. Backends with a cheap
     /// change signal (file mtime, a `MAX(updated)` query) should override.
+    ///
+    /// # Errors
+    /// When the backend itself fails; per-reference failures are empty strings.
     fn fingerprints(&self, _refs: &[Self::Ref]) -> Result<HashMap<String, String>> {
         Ok(HashMap::new())
     }
@@ -191,19 +216,22 @@ pub enum HarnessId {
     Pi,
     Campfire,
     Cursor,
+    Grok,
 }
 
 impl HarnessId {
-    pub const ALL: [HarnessId; 6] = [
+    pub const ALL: [HarnessId; 7] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::OpenCode,
         HarnessId::Pi,
         HarnessId::Campfire,
         HarnessId::Cursor,
+        HarnessId::Grok,
     ];
 
     /// The stable lowercase name, matching the corresponding [`Harness::NAME`].
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             HarnessId::ClaudeCode => "claude_code",
@@ -212,6 +240,7 @@ impl HarnessId {
             HarnessId::Pi => "pi",
             HarnessId::Campfire => "campfire",
             HarnessId::Cursor => "cursor",
+            HarnessId::Grok => "grok",
         }
     }
 }
@@ -234,6 +263,9 @@ impl FromStr for HarnessId {
             "pi" => Ok(HarnessId::Pi),
             "campfire" => Ok(HarnessId::Campfire),
             "cursor" | "cursor_cli" | "cursor-cli" | "cursorcli" => Ok(HarnessId::Cursor),
+            "grok" | "grok_cli" | "grok-cli" | "grokcli" | "grok_build" | "grok-build" => {
+                Ok(HarnessId::Grok)
+            }
             other => Err(crate::error::Error::UnknownHarness(other.to_string())),
         }
     }

@@ -2,17 +2,17 @@
 
 //! The whole point of the crate: a transcript converts between harnesses
 //! through the Common hub without losing the conversation. This chains one
-//! transcript Claude -> Codex -> OpenCode -> pi -> Campfire and checks that the
+//! transcript Claude -> Codex -> `OpenCode` -> pi -> Campfire and checks that the
 //! semantic content (roles, text, the typed Edit tool and its result) is
 //! identical at every hop.
 //!
-//! Message *grouping* and harness-specific attribution (model, stop_reason,
+//! Message *grouping* and harness-specific attribution (model, `stop_reason`,
 //! usage, timestamps) legitimately differ across harnesses; the block-level
 //! conversation does not. The signature below captures exactly that invariant.
 
 use chrono::{DateTime, Utc};
 use txcript::common;
-use txcript::harness::{campfire, claude_code, codex, cursor, opencode, pi};
+use txcript::harness::{campfire, claude_code, codex, cursor, grok, opencode, pi};
 use txcript::{Codec, Common, Transcript, convert};
 
 fn ts(s: &str) -> DateTime<Utc> {
@@ -159,11 +159,7 @@ fn conversation_survives_every_hop() {
     );
 
     let pi = convert::<opencode::OpenCode, pi::Pi>(&opencode).unwrap();
-    assert_eq!(
-        signature(&pi::Pi::to_common(&pi).unwrap()),
-        expected,
-        "pi"
-    );
+    assert_eq!(signature(&pi::Pi::to_common(&pi).unwrap()), expected, "pi");
 
     let campfire = convert::<pi::Pi, campfire::Campfire>(&pi).unwrap();
     assert_eq!(
@@ -179,8 +175,15 @@ fn conversation_survives_every_hop() {
         "cursor"
     );
 
+    let grok = convert::<cursor::Cursor, grok::Grok>(&cursor).unwrap();
+    assert_eq!(
+        signature(&grok::Grok::to_common(&grok).unwrap()),
+        expected,
+        "grok"
+    );
+
     // And all the way back to Claude.
-    let round = convert::<cursor::Cursor, claude_code::ClaudeCode>(&cursor).unwrap();
+    let round = convert::<grok::Grok, claude_code::ClaudeCode>(&grok).unwrap();
     assert_eq!(
         signature(&claude_code::ClaudeCode::to_common(&round).unwrap()),
         expected,
