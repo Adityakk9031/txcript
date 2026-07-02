@@ -1,10 +1,10 @@
-//! OpenCode: a single SQLite database (`~/.local/share/opencode/opencode.db`)
+//! `OpenCode`: a single `SQLite` database (`~/.local/share/opencode/opencode.db`)
 //! holding `session`, `message`, and `part` rows.
 //!
-//! The native [`Body`](OpenCode) is OpenCode's own export shape —
+//! The native [`Body`](OpenCode) is `OpenCode`'s own export shape —
 //! `{info, messages: [{info, parts}]}` — the format `opencode export` emits and
 //! `opencode import` consumes. [`OpenCodeStore`] reads the DB read-only and
-//! assembles that shape; `save` hands it to `opencode import` (OpenCode owns
+//! assembles that shape; `save` hands it to `opencode import` (`OpenCode` owns
 //! schema defaults and project resolution). The codec is pure JSON and needs no
 //! database, so it (and the native types) compile without the `opencode`
 //! feature; only the store pulls in `rusqlite`.
@@ -24,7 +24,7 @@ use crate::common::{Block, ImageSource, Message, Meta, Role, StopReason, Tool, T
 use crate::error::Result;
 use crate::transcript::{Codec, Common, Harness, TextCodec, Transcript};
 
-/// The OpenCode harness marker.
+/// The `OpenCode` harness marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenCode;
 
@@ -33,7 +33,7 @@ impl Harness for OpenCode {
     type Body = Export;
 }
 
-/// OpenCode's export document: a session header plus its messages.
+/// `OpenCode`'s export document: a session header plus its messages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Export {
     pub info: Value,
@@ -58,7 +58,7 @@ impl Codec for OpenCode {
             match record.info.get("role").and_then(Value::as_str) {
                 Some("user") => build_user_message(&record.parts, ts, &mut messages),
                 Some("assistant") => {
-                    build_assistant_messages(&record.info, &record.parts, ts, &mut messages)
+                    build_assistant_messages(&record.info, &record.parts, ts, &mut messages);
                 }
                 _ => {}
             }
@@ -88,7 +88,7 @@ impl TextCodec for OpenCode {
 }
 
 /// Session metadata from an export's `info` object (the WASM/text path; the
-/// SQLite store derives the same fields from `session` columns).
+/// `SQLite` store derives the same fields from `session` columns).
 fn meta_from_info(info: &Value) -> Meta {
     let string = |key: &str| {
         info.get(key)
@@ -211,7 +211,13 @@ fn build_assistant_messages(
                 }
             }
             Some("tool") => {
-                flush_assistant(&mut pending, out, &mut assistant_indices, ts, &model);
+                flush_assistant(
+                    &mut pending,
+                    out,
+                    &mut assistant_indices,
+                    ts,
+                    model.as_ref(),
+                );
                 let Some((use_block, result_block)) = parse_tool(part) else {
                     continue;
                 };
@@ -238,7 +244,13 @@ fn build_assistant_messages(
             _ => {}
         }
     }
-    flush_assistant(&mut pending, out, &mut assistant_indices, ts, &model);
+    flush_assistant(
+        &mut pending,
+        out,
+        &mut assistant_indices,
+        ts,
+        model.as_ref(),
+    );
 
     // Usage and finish describe the whole turn; attach to its last assistant.
     if let Some(&last) = assistant_indices.last() {
@@ -252,7 +264,7 @@ fn flush_assistant(
     out: &mut Vec<Message>,
     indices: &mut Vec<usize>,
     ts: DateTime<Utc>,
-    model: &Option<String>,
+    model: Option<&String>,
 ) {
     if pending.is_empty() {
         return;
@@ -261,7 +273,7 @@ fn flush_assistant(
         role: Role::Assistant,
         content: std::mem::take(pending),
         timestamp: ts,
-        model: model.clone(),
+        model: model.cloned(),
         stop_reason: None,
         usage: None,
     });
@@ -641,8 +653,8 @@ fn tokens_value(usage: Option<&Usage>) -> Value {
         }
     }
     let mut tokens = json!({
-        "input": usage.map(|u| u.input_tokens).unwrap_or(0),
-        "output": usage.map(|u| u.output_tokens).unwrap_or(0),
+        "input": usage.map_or(0, |u| u.input_tokens),
+        "output": usage.map_or(0, |u| u.output_tokens),
         "reasoning": 0,
     });
     if !cache.is_empty()
@@ -747,7 +759,7 @@ mod store {
     use crate::transcript::{Discovered, Saved, Store, Transcript};
     use chrono::{DateTime, Utc};
 
-    /// Reads and writes OpenCode sessions in a SQLite database. A [`Ref`] is a
+    /// Reads and writes `OpenCode` sessions in a `SQLite` database. A [`Ref`] is a
     /// session id, since every session shares the one database file.
     ///
     /// [`Ref`]: Store::Ref
@@ -936,8 +948,7 @@ mod store {
             let id = stdout
                 .lines()
                 .find_map(|l| l.strip_prefix("Imported session: ").map(str::trim))
-                .map(String::from)
-                .unwrap_or_else(|| transcript.meta.id.clone());
+                .map_or_else(|| transcript.meta.id.clone(), String::from);
             Ok(Saved {
                 reference: id.clone(),
                 id,
@@ -1025,6 +1036,8 @@ mod store {
             .map(String::from)
     }
 
+    // Passed point-free to `map_err`, which hands over the error by value.
+    #[allow(clippy::needless_pass_by_value)]
     fn sqlite_err(e: rusqlite::Error) -> Error {
         Error::Malformed {
             harness: "opencode",
@@ -1040,7 +1053,7 @@ mod store {
         use crate::transcript::{Codec, Store};
         use rusqlite::{Connection, params};
 
-        /// Build a minimal OpenCode database: a session with one user message
+        /// Build a minimal `OpenCode` database: a session with one user message
         /// and one assistant message whose parts cover reasoning, text, a
         /// completed edit tool, and trailing text.
         fn make_db() -> std::path::PathBuf {

@@ -70,7 +70,7 @@ fn sample_jsonl() -> String {
     ];
     lines
         .iter()
-        .map(|l| l.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n")
         + "\n"
@@ -130,7 +130,9 @@ fn to_common_extracts_the_conversation_faithfully() {
     assert_eq!(msgs.len(), 4);
 
     assert_eq!(msgs[0].role, common::Role::User);
-    assert!(matches!(&msgs[0].content[0], common::Block::Text { text } if text == "fix the off-by-one"));
+    assert!(
+        matches!(&msgs[0].content[0], common::Block::Text { text } if text == "fix the off-by-one")
+    );
 
     // Assistant turn: thinking (with signature), text, and a typed Edit.
     assert_eq!(msgs[1].role, common::Role::Assistant);
@@ -266,7 +268,9 @@ fn codec_fixpoint_through_common_loses_nothing() {
 #[test]
 fn from_common_is_deterministic() {
     let common = sample_common();
-    let a = serde_json::to_value(claude_code::ClaudeCode::from_common(&common).unwrap().body).unwrap();
-    let b = serde_json::to_value(claude_code::ClaudeCode::from_common(&common).unwrap().body).unwrap();
+    let a =
+        serde_json::to_value(claude_code::ClaudeCode::from_common(&common).unwrap().body).unwrap();
+    let b =
+        serde_json::to_value(claude_code::ClaudeCode::from_common(&common).unwrap().body).unwrap();
     assert_eq!(a, b);
 }

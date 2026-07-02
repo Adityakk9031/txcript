@@ -16,7 +16,7 @@ fn ts(s: &str) -> DateTime<Utc> {
 
 /// A realistic pi session: header, model/title bookkeeping, a user ask, an
 /// assistant turn that thinks and calls `edit`, a toolResult, a `!`-shell
-/// bashExecution, and a custom_message.
+/// bashExecution, and a `custom_message`.
 fn sample_jsonl() -> String {
     let lines = [
         json!({"type": "session", "version": 3, "id": "abc", "timestamp": "2026-01-02T03:04:05.000Z", "cwd": "/repo"}),
@@ -43,7 +43,7 @@ fn sample_jsonl() -> String {
     ];
     lines
         .iter()
-        .map(|l| l.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n")
         + "\n"
@@ -181,7 +181,7 @@ fn multi_edit_maps_to_multiedit() {
 }
 
 /// A Common transcript shaped the way a pi round-trip can reproduce exactly:
-/// homogeneous user messages, assistant turns with model/usage/stop_reason,
+/// homogeneous user messages, assistant turns with `model/usage/stop_reason`,
 /// pi-representable thinking (no signature).
 fn sample_common() -> Transcript<Common> {
     let meta = common::Meta {

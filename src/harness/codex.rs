@@ -92,6 +92,10 @@ impl TextCodec for Codex {
     }
 }
 
+// One stateful pass mirroring the CLI provider's aggregation: turn context,
+// usage backfill, web-search pairing, and result dedup all share the same
+// running state, so splitting the match arms would scatter it.
+#[allow(clippy::too_many_lines)]
 fn lines_to_messages(lines: &[Line], fallback_ts: DateTime<Utc>) -> Vec<Message> {
     let mut queued: Vec<Queued> = Vec::new();
     let mut current_turn_id: Option<String> = None;
@@ -195,7 +199,7 @@ fn lines_to_messages(lines: &[Line], fallback_ts: DateTime<Utc>) -> Vec<Message>
                             && let Some(Block::ToolUse { id, .. }) =
                                 queued[index].content.get_mut(0)
                         {
-                            *id = call_id.clone();
+                            id.clone_from(&call_id);
                         }
                         canonical_results.insert(call_id.clone());
                         queued.push(tool_result(
@@ -298,8 +302,9 @@ fn lines_to_messages(lines: &[Line], fallback_ts: DateTime<Utc>) -> Vec<Message>
                         let content = payload
                             .get("output")
                             .and_then(Value::as_str)
-                            .map(|s| ToolOutput::Text(s.to_string()))
-                            .unwrap_or(ToolOutput::Text(String::new()));
+                            .map_or(ToolOutput::Text(String::new()), |s| {
+                                ToolOutput::Text(s.to_string())
+                            });
                         queued.push(tool_result(ts, call_id, content, false, true));
                     }
                     "custom_tool_call" => {
@@ -522,7 +527,7 @@ fn messages_to_lines(meta: &Meta, messages: &[Message]) -> Vec<Line> {
     lines
 }
 
-/// Emit the response_item (and paired display event_msg) lines for one message.
+/// Emit the `response_item` (and paired display `event_msg`) lines for one message.
 fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str) {
     let role_str = match msg.role {
         Role::User => "user",
@@ -648,6 +653,7 @@ impl CodexStore {
     }
 
     /// The default sessions root, `~/.codex/sessions`.
+    #[must_use]
     pub fn default_root() -> Option<Self> {
         home().map(|h| Self::new(h.join(".codex").join("sessions")))
     }
@@ -772,7 +778,9 @@ fn collect_rollouts(dir: &Path, out: &mut Vec<PathBuf>) {
             collect_rollouts(&path, out);
         } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
             && name.starts_with("rollout-")
-            && name.ends_with(".jsonl")
+            && path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
         {
             out.push(path);
         }
@@ -849,6 +857,10 @@ fn command_value_to_display(value: &Value) -> Option<String> {
     }
 }
 
+// A single-pass parser of the apply_patch envelope format; the state types
+// below are its private grammar and the length is the grammar's, not the
+// function's.
+#[allow(clippy::too_many_lines, clippy::items_after_statements)]
 fn normalize_apply_patch_input(input: Value) -> (String, Value) {
     let Value::String(patch) = input else {
         return ("ApplyPatch".to_string(), input);
@@ -1196,8 +1208,7 @@ fn parse_json_string_or_raw(raw: &str) -> Value {
 }
 
 fn parse_optional_json_string(raw: Option<&str>) -> Value {
-    raw.map(parse_json_string_or_raw)
-        .unwrap_or(Value::Object(Map::new()))
+    raw.map_or(Value::Object(Map::new()), parse_json_string_or_raw)
 }
 
 fn tool_output_text(out: &ToolOutput) -> String {

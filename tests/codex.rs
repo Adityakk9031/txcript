@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 //! Integration tests for the Codex harness — on-disk Store fidelity, the full
-//! stateful `to_common` aggregation (shell + apply_patch normalization,
+//! stateful `to_common` aggregation (shell + `apply_patch` normalization,
 //! web-search pairing, usage/model backfill, fallback-result dedup), and the
 //! codec fixpoint through Common.
 
@@ -15,10 +15,10 @@ fn ts(s: &str) -> DateTime<Utc> {
 }
 
 /// The provider's canonical exercise: a turn with an image, reasoning, a shell
-/// call + its event-log result, a duplicate function_call_output (must be
-/// deduped against the canonical exec result), an apply_patch edit, a custom
+/// call + its event-log result, a duplicate `function_call_output` (must be
+/// deduped against the canonical exec result), an `apply_patch` edit, a custom
 /// tool result, a web-search call/result pair, a final assistant message, and
-/// the token_count/task_complete that backfill usage and model.
+/// the `token_count/task_complete` that backfill usage and model.
 fn exercise_rollout() -> String {
     [
         r#"{"timestamp":"2026-04-01T00:00:00Z","type":"turn_context","payload":{"turn_id":"turn-1","model":"gpt-5.2-codex"}}"#,
@@ -46,7 +46,9 @@ fn to_common_runs_the_full_aggregation() {
     let src = dir.path().join("rollout-x.jsonl");
     std::fs::write(&src, exercise_rollout()).unwrap();
 
-    let msgs = codex::Codex::to_common(&store.load(&src).unwrap()).unwrap().body;
+    let msgs = codex::Codex::to_common(&store.load(&src).unwrap())
+        .unwrap()
+        .body;
 
     // The duplicate function_call_output for call-shell is deduped against the
     // canonical exec_command_end, leaving 9 messages.
@@ -121,7 +123,9 @@ fn legacy_shell_array_command_normalizes_to_bash() {
     )
     .unwrap();
 
-    let msgs = codex::Codex::to_common(&store.load(&src).unwrap()).unwrap().body;
+    let msgs = codex::Codex::to_common(&store.load(&src).unwrap())
+        .unwrap()
+        .body;
     assert!(matches!(
         &msgs[0].content[0],
         common::Block::ToolUse { tool: common::Tool::Bash { command, workdir: Some(w), .. }, .. }
@@ -178,8 +182,8 @@ fn discover_extracts_metadata() {
 }
 
 /// Shaped at codex's granularity: each assistant block is its own message
-/// (codex stores one response_item per line), every assistant turn carries a
-/// model, only the final text turn carries usage, and stop_reason is None
+/// (codex stores one `response_item` per line), every assistant turn carries a
+/// model, only the final text turn carries usage, and `stop_reason` is None
 /// (codex has no stop reason). This is exactly what `to_common` produces, so
 /// `from_common`/`to_common` is a clean fixpoint.
 fn sample_common() -> Transcript<Common> {

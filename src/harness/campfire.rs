@@ -71,7 +71,7 @@ impl Store for CampfireStore {
     type Ref = PathBuf;
 
     fn discover(&self) -> Result<Vec<Discovered<PathBuf>>> {
-        pi::discover_format(&self.sessions_dir)
+        Ok(pi::discover_format(&self.sessions_dir))
     }
 
     fn load(&self, reference: &PathBuf) -> Result<Transcript<Campfire>> {

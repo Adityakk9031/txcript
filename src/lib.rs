@@ -1,6 +1,6 @@
 //! A typed intermediate representation for AI coding-agent session transcripts.
 //!
-//! Claude Code, Codex, OpenCode, and pi all record the same thing — a sequence
+//! Claude Code, Codex, `OpenCode`, and pi all record the same thing — a sequence
 //! of user/assistant turns carrying text, reasoning, tool calls, tool results,
 //! and images — in mutually incompatible on-disk formats. This crate models
 //! that shared shape once, as [`Transcript<Common>`], and gives each harness a

@@ -1,14 +1,14 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-//! Integration tests for the Cursor SQLite chat-store harness.
+//! Integration tests for the Cursor `SQLite` chat-store harness.
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
+#[cfg(feature = "opencode")]
+use txcript::Store;
 use txcript::common;
 use txcript::harness::cursor;
 use txcript::{Codec, Common, TextCodec, Transcript};
-#[cfg(feature = "opencode")]
-use txcript::Store;
 
 fn ts(s: &str) -> DateTime<Utc> {
     s.parse().unwrap()
@@ -492,10 +492,10 @@ fn parses_existing_cursor_message_shapes() {
         meta: Vec::new(),
         session_meta: Some(json!({
             "schemaVersion": 1,
-            "createdAtMs": 1767337445000i64,
+            "createdAtMs": 1_767_337_445_000_i64,
             "hasConversation": true,
             "title": "Hello Agent",
-            "updatedAtMs": 1767337445000i64
+            "updatedAtMs": 1_767_337_445_000_i64
         })),
     };
     let transcript = Transcript::<cursor::Cursor>::new(
@@ -653,7 +653,7 @@ fn read_varint(data: &[u8], i: &mut usize) -> Option<u64> {
     while *i < data.len() && shift < 64 {
         let byte = data[*i];
         *i += 1;
-        value |= ((byte & 0x7f) as u64) << shift;
+        value |= u64::from(byte & 0x7f) << shift;
         if byte & 0x80 == 0 {
             return Some(value);
         }
@@ -671,5 +671,9 @@ fn hex_decode_test(s: &str) -> Vec<u8> {
 }
 
 fn hex_encode_test(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    use std::fmt::Write;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        let _ = write!(out, "{b:02x}");
+        out
+    })
 }

@@ -1,6 +1,6 @@
 //! Cursor agent sessions: `~/.cursor/chats/<md5(workspace)>/<id>/store.db`.
 //!
-//! Cursor's resumable store is a small SQLite database with content-addressed
+//! Cursor's resumable store is a small `SQLite` database with content-addressed
 //! blobs. JSON message blobs carry the conversation; non-JSON/protobuf blobs
 //! carry Cursor's internal graph state. This harness preserves every blob byte
 //! for native load/save, while converting JSON message blobs through `Common`.
@@ -99,6 +99,7 @@ impl CursorStore {
     }
 
     /// The default Cursor chats root, `~/.cursor/chats`.
+    #[must_use]
     pub fn default_root() -> Option<Self> {
         dirs_home().map(|h| Self::new(h.join(".cursor").join("chats")))
     }
@@ -133,7 +134,10 @@ impl CursorStore {
             .ok()
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .and_then(|d| DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos()))
+            .and_then(|d| {
+                let secs = i64::try_from(d.as_secs()).ok()?;
+                DateTime::from_timestamp(secs, d.subsec_nanos())
+            })
             .unwrap_or_else(Utc::now)
     }
 }
@@ -306,6 +310,8 @@ fn write_db(db_path: &Path, body: &CursorDb) -> Result<()> {
     Ok(())
 }
 
+// Passed point-free to `map_err`, which hands over the error by value.
+#[allow(clippy::needless_pass_by_value)]
 #[cfg(feature = "opencode")]
 fn sqlite_err(e: rusqlite::Error) -> Error {
     Error::Malformed {
@@ -336,8 +342,8 @@ fn db_to_messages(db: &CursorDb, meta: &Meta) -> Vec<Message> {
         let Some(role) = obj.get("role").and_then(Value::as_str) else {
             continue;
         };
+        // The system prompt carries no conversational turn.
         match role {
-            "system" => {}
             "user" => {
                 if is_context_injection(&obj) {
                     continue;
@@ -466,7 +472,7 @@ fn db_from_messages(meta: &Meta, messages: &[Message]) -> Result<CursorDb> {
         message_ids.push(id.clone());
         blobs.push(CursorBlob { id, data });
     }
-    blobs.extend(cursor_state_blobs(meta, messages, &message_ids)?);
+    blobs.extend(cursor_state_blobs(meta, messages, &message_ids));
 
     let mut body = CursorDb {
         blobs,
@@ -507,7 +513,7 @@ fn cursor_state_blobs(
     meta: &Meta,
     messages: &[Message],
     _message_ids: &[String],
-) -> Result<Vec<CursorBlob>> {
+) -> Vec<CursorBlob> {
     let turns = cursor_state_turns(meta, messages);
     let mut blobs = Vec::new();
     let mut turn_ids = Vec::new();
@@ -538,7 +544,7 @@ fn cursor_state_blobs(
     }
 
     blobs.push(cursor_blob(cursor_root_state_proto(meta, &turn_ids)));
-    Ok(blobs)
+    blobs
 }
 
 fn cursor_state_turns(meta: &Meta, messages: &[Message]) -> Vec<CursorStateTurn> {
@@ -822,7 +828,7 @@ fn cursor_shell_tool_call_proto(
     pb_string(&mut args, 1, command);
     pb_string(&mut args, 2, workdir);
     if let Some(timeout_ms) = timeout_ms.and_then(|v| u32::try_from(v).ok()) {
-        pb_varint_field(&mut args, 3, timeout_ms as u64);
+        pb_varint_field(&mut args, 3, u64::from(timeout_ms));
     }
     pb_string(&mut args, 4, tool_call_id);
     if run_in_background {
@@ -884,10 +890,10 @@ fn cursor_read_tool_call_proto(
     let mut args = Vec::new();
     pb_string(&mut args, 1, path);
     if let Some(offset) = offset_u32 {
-        pb_varint_field(&mut args, 2, offset as u64);
+        pb_varint_field(&mut args, 2, u64::from(offset));
     }
     if let Some(limit) = limit_u32 {
-        pb_varint_field(&mut args, 3, limit as u64);
+        pb_varint_field(&mut args, 3, u64::from(limit));
     }
 
     let mut read = Vec::new();
@@ -925,9 +931,11 @@ fn cursor_read_result_proto(
         if let Some(offset) = offset {
             let mut range = Vec::new();
             let start = offset.saturating_add(1);
-            let end = start.saturating_add(line_count(&text).saturating_sub(1) as u32);
-            pb_varint_field(&mut range, 1, start as u64);
-            pb_varint_field(&mut range, 2, end as u64);
+            let lines_below =
+                u32::try_from(line_count(&text).saturating_sub(1)).unwrap_or(u32::MAX);
+            let end = start.saturating_add(lines_below);
+            pb_varint_field(&mut range, 1, u64::from(start));
+            pb_varint_field(&mut range, 2, u64::from(end));
             pb_len(&mut success, 8, &range);
         }
         pb_len(&mut read_result, 1, &success);
@@ -1156,8 +1164,10 @@ fn cursor_root_state_proto(meta: &Meta, turn_ids: &[[u8; 32]]) -> Vec<u8> {
     }
     pb_varint_field(&mut root, 10, 1);
     let started_ms = meta.timestamp.timestamp_millis();
-    if started_ms > 0 {
-        pb_varint_field(&mut root, 26, started_ms as u64);
+    if let Ok(ms) = u64::try_from(started_ms)
+        && ms > 0
+    {
+        pb_varint_field(&mut root, 26, ms);
     }
     root
 }
@@ -1192,9 +1202,11 @@ fn pb_bool_field(out: &mut Vec<u8>, field: u32, value: bool) {
 }
 
 fn pb_key(out: &mut Vec<u8>, field: u32, wire_type: u8) {
-    pb_varint(out, ((field as u64) << 3) | wire_type as u64);
+    pb_varint(out, (u64::from(field) << 3) | u64::from(wire_type));
 }
 
+// The casts take the low 7 bits by construction — varint encoding.
+#[allow(clippy::cast_possible_truncation)]
 fn pb_varint(out: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
         out.push((value as u8) | 0x80);
@@ -1262,11 +1274,10 @@ fn parse_assistant_block(
         "tool-call" => {
             let name = v.get("toolName")?.as_str()?;
             let input = v.get("args").cloned().unwrap_or(Value::Object(Map::new()));
-            let id = v
-                .get("toolCallId")
-                .and_then(Value::as_str)
-                .map(String::from)
-                .unwrap_or_else(|| tool_use_id(session_id, message_idx, block_idx, name));
+            let id = v.get("toolCallId").and_then(Value::as_str).map_or_else(
+                || tool_use_id(session_id, message_idx, block_idx, name),
+                String::from,
+            );
             Some(Block::ToolUse {
                 id,
                 tool: cursor_tool(name, input),
@@ -1775,8 +1786,7 @@ fn file_fingerprint(path: &Path) -> String {
         .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     format!("{mtime}:{}", meta.len())
 }
 
@@ -1786,6 +1796,14 @@ fn dirs_home() -> Option<PathBuf> {
 
 // -- hashes and hex ------------------------------------------------------
 
+// RFC 1321's own variable naming and sine-table construction; renaming or
+// "safe"-casting here would only obscure the spec correspondence.
+#[allow(
+    clippy::many_single_char_names,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
 #[cfg(any(feature = "opencode", test))]
 fn md5_hex(data: &[u8]) -> String {
     let mut msg = data.to_vec();
@@ -1858,6 +1876,8 @@ fn sha256_hex(data: &[u8]) -> String {
     hex_encode(&sha256(data))
 }
 
+// FIPS 180-4's own variable naming; the constant tables dominate the length.
+#[allow(clippy::many_single_char_names, clippy::too_many_lines)]
 fn sha256(data: &[u8]) -> [u8; 32] {
     const K: [u32; 64] = [
         0x428a_2f98,
@@ -2013,7 +2033,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
     let bytes = s.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err("hex string has odd length".to_string());
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);

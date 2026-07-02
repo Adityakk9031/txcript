@@ -182,7 +182,12 @@ pub(crate) fn records_to_messages(records: &[Record], fallback_ts: DateTime<Utc>
                 let content = entry.message.get("content").unwrap_or(&Value::Null);
                 match role {
                     "user" => {
-                        push_if_nonempty(&mut messages, Role::User, parse_user_content(content), ts)
+                        push_if_nonempty(
+                            &mut messages,
+                            Role::User,
+                            parse_user_content(content),
+                            ts,
+                        );
                     }
                     "assistant" => {
                         let blocks = parse_assistant_content(content);
@@ -341,7 +346,7 @@ fn pi_payloads_for(
                 match block {
                     Block::Text { text } => content.push(json!({"type": "text", "text": text})),
                     Block::Thinking { text, .. } => {
-                        content.push(json!({"type": "thinking", "thinking": text}))
+                        content.push(json!({"type": "thinking", "thinking": text}));
                     }
                     Block::ToolUse { id, tool } => {
                         let (pi_name, pi_input) = denormalize_tool(tool);
@@ -399,7 +404,7 @@ impl Store for PiStore {
     type Ref = PathBuf;
 
     fn discover(&self) -> Result<Vec<Discovered<PathBuf>>> {
-        discover_format(&self.sessions_dir)
+        Ok(discover_format(&self.sessions_dir))
     }
 
     fn load(&self, reference: &PathBuf) -> Result<Transcript<Pi>> {
@@ -431,9 +436,9 @@ where
     Ok(transcript)
 }
 
-pub(crate) fn discover_format(sessions_dir: &Path) -> Result<Vec<Discovered<PathBuf>>> {
+pub(crate) fn discover_format(sessions_dir: &Path) -> Vec<Discovered<PathBuf>> {
     if !sessions_dir.is_dir() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let mut files = Vec::new();
     collect_jsonl(sessions_dir, &mut files);
@@ -456,7 +461,7 @@ pub(crate) fn discover_format(sessions_dir: &Path) -> Result<Vec<Discovered<Path
             reference: path,
         });
     }
-    Ok(out)
+    out
 }
 
 pub(crate) fn write_session(
@@ -493,8 +498,8 @@ pub(crate) fn meta_from_records(records: &[Record]) -> Meta {
     for record in records {
         match record {
             Record::Session(s) => {
-                meta.id = s.id.clone();
-                meta.cwd = s.cwd.clone();
+                meta.id.clone_from(&s.id);
+                meta.cwd.clone_from(&s.cwd);
                 if let Some(ts) = s.timestamp.as_deref().and_then(parse_ts) {
                     meta.timestamp = ts;
                 }
@@ -688,8 +693,8 @@ fn parse_usage(usage: Option<&Value>) -> Option<Usage> {
 }
 
 fn serialize_usage(usage: Option<&Usage>) -> Value {
-    let input = usage.map(|u| u.input_tokens).unwrap_or(0);
-    let output = usage.map(|u| u.output_tokens).unwrap_or(0);
+    let input = usage.map_or(0, |u| u.input_tokens);
+    let output = usage.map_or(0, |u| u.output_tokens);
     json!({
         "input": input,
         "output": output,

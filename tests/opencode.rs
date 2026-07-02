@@ -1,9 +1,9 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-//! Integration tests for the OpenCode codec — the part→block transform
+//! Integration tests for the `OpenCode` codec — the part→block transform
 //! (synthetic/bookkeeping parts dropped, tool parts split into use+result,
 //! turn usage/finish attached) and the codec fixpoint through Common. The
-//! SQLite store has its own feature-gated unit test in the module.
+//! `SQLite` store has its own feature-gated unit test in the module.
 
 use chrono::{DateTime, Utc};
 use serde_json::json;
@@ -36,7 +36,7 @@ fn to_common_splits_parts_and_attaches_turn_usage() {
         "info": { "id": "ses_1", "directory": "/repo" },
         "messages": [
             {
-                "info": { "role": "user", "time": { "created": 1778834704520i64 } },
+                "info": { "role": "user", "time": { "created": 1_778_834_704_520_i64 } },
                 "parts": [{ "type": "text", "text": "please edit the file" }],
             },
             {
@@ -45,7 +45,7 @@ fn to_common_splits_parts_and_attaches_turn_usage() {
                     "modelID": "claude-opus-4-7",
                     "finish": "stop",
                     "tokens": { "input": 6, "output": 88, "cache": { "write": 21428, "read": 10 } },
-                    "time": { "created": 1778834704540i64 },
+                    "time": { "created": 1_778_834_704_540_i64 },
                 },
                 "parts": [
                     { "type": "step-start", "snapshot": "abc" },
@@ -92,7 +92,9 @@ fn to_common_splits_parts_and_attaches_turn_usage() {
 
     // Usage + finish land on the turn's last assistant message.
     let last = &msgs[4];
-    assert!(matches!(&last.content[0], common::Block::Text { text } if text == "Finished the edit."));
+    assert!(
+        matches!(&last.content[0], common::Block::Text { text } if text == "Finished the edit.")
+    );
     assert_eq!(last.stop_reason, Some(common::StopReason::EndTurn));
     let usage = last.usage.unwrap();
     assert_eq!(usage.input_tokens, 6);
@@ -155,8 +157,8 @@ fn pending_tool_call_has_no_result() {
     ));
 }
 
-/// Shaped to round-trip through OpenCode's grouping: each assistant turn is its
-/// own message, every assistant carries a model and a stop_reason (OpenCode
+/// Shaped to round-trip through `OpenCode`'s grouping: each assistant turn is its
+/// own message, every assistant carries a model and a `stop_reason` (`OpenCode`
 /// requires a finish), and the tool turn's result folds into the tool part.
 fn sample_common() -> Transcript<Common> {
     let model = || Some("claude-opus-4-7".to_string());

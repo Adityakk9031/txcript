@@ -216,6 +216,7 @@ impl Tool {
     /// A typed variant is used only when the input fits its schema exactly; any
     /// unexpected key falls through to [`Tool::Raw`] rather than be dropped, so
     /// the mapping is always lossless.
+    #[must_use]
     pub fn from_canonical(name: &str, input: Value) -> Tool {
         fn typed<A: for<'de> Deserialize<'de>>(input: &Value) -> Option<A> {
             serde_json::from_value(input.clone()).ok()
@@ -282,6 +283,7 @@ impl Tool {
     /// Inverse of [`Tool::from_canonical`]: the canonical name and input for
     /// this tool, ready for a codec to denormalize into a harness's native
     /// names and keys.
+    #[must_use]
     pub fn to_canonical(&self) -> (String, Value) {
         let value = |v: serde_json::Result<Value>| v.unwrap_or(Value::Null);
         match self {

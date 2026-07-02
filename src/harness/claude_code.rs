@@ -257,6 +257,7 @@ impl ClaudeStore {
     }
 
     /// The default projects root, `~/.claude/projects`.
+    #[must_use]
     pub fn default_root() -> Option<Self> {
         dirs_home().map(|h| Self::new(h.join(".claude").join("projects")))
     }
@@ -544,7 +545,7 @@ fn meta_from_records(records: &[Record]) -> Meta {
                 if let Some(id) = &e.session_id
                     && meta.id.is_empty()
                 {
-                    meta.id = id.clone();
+                    meta.id.clone_from(id);
                 }
                 meta.cwd = meta.cwd.take().or_else(|| e.cwd.clone());
                 meta.git_branch = meta.git_branch.take().or_else(|| e.git_branch.clone());
@@ -553,7 +554,7 @@ fn meta_from_records(records: &[Record]) -> Meta {
             }
             Record::Assistant(e) => {
                 if meta.model.is_none() {
-                    meta.model = e.message.model.clone();
+                    meta.model.clone_from(&e.message.model);
                 }
                 note_ts(&mut earliest, e.timestamp.as_deref());
             }
@@ -607,8 +608,7 @@ fn file_fingerprint(path: &Path) -> String {
         .modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     format!("{mtime}:{}", meta.len())
 }
 

@@ -1,4 +1,4 @@
-//! Shared JSONL parse/render for the line-based harnesses (claude_code, codex,
+//! Shared JSONL parse/render for the line-based harnesses (`claude_code`, codex,
 //! pi, campfire): one JSON record per line. The per-harness `TextCodec` impls
 //! are then just "parse lines, extract meta" / "render lines".
 
