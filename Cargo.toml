@@ -4,16 +4,36 @@
 [workspace]
 members = ["cli"]
 
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+# Zero-violation denies: these exist to prevent regression, not to fix debt.
+exit = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+mem_forget = "deny"
+unwrap_in_result = "deny"
+
+# Thin LTO in one codegen unit, symbols stripped. overflow-checks stays on in
+# release as the runtime backstop for arithmetic on untrusted session files.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+overflow-checks = true
 
 [package]
 name = "txcript"
 version = "0.2.0"
 edition = "2024"
+# Measured floor: is_multiple_of (1.87) > edition 2024 / dep-graph max (1.85).
+rust-version = "1.87"
 description = "A typed intermediate representation for converting AI coding-agent session transcripts between harness formats (Claude Code, Codex, OpenCode, pi)."
 license = "Apache-2.0"
 repository = "https://github.com/skillsynchq/txcript"

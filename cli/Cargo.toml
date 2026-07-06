@@ -2,6 +2,7 @@
 name = "txcript-cli"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.87"
 description = "CLI for txcript: list, search, and continue AI coding-agent sessions across harnesses."
 license = "Apache-2.0"
 repository = "https://github.com/skillsynchq/txcript"
