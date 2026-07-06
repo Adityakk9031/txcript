@@ -9,6 +9,10 @@
 //!     [--from <harness>]                    #   scope the id lookup to one harness
 //!     [--out <dir>]                         #   write under <dir>; implies --no-resume
 //!     [--no-resume]                         #   write the session but don't launch
+//! txcript query '<pattern>'             # one-shot search, print ranked hits
+//! txcript query                         # fzf-style picker; Enter continues
+//!     [--from <harness>]                    #   search only <harness> (default: all)
+//!     [--with <harness>]                    #   continue the pick in <harness>
 //! ```
 //!
 //! By default `continue` hands the terminal to the harness (on Unix it `exec`s,
@@ -18,29 +22,12 @@
 //! `<harness>` is one of: `claude_code`, codex, opencode, pi, campfire, cursor,
 //! grok.
 //!
-//! Cursor resumes with `agent --resume=<id>` (override via
-//! `TRANSCRIPT_CURSOR_RESUME_CMD="agent --resume={id}"`).
+//! All the actual work lives in [`txcript::local`]; this file is argument
+//! parsing and terminal presentation.
 
 use std::path::PathBuf;
 
-use txcript::common;
-use txcript::harness::{campfire, claude_code, codex, cursor, grok, opencode, pi};
-use txcript::{Codec, Common, HarnessId, Store, Transcript};
-
-/// How to load a discovered session back: a file path, or an `OpenCode` session id.
-#[derive(Clone)]
-enum Locator {
-    Path(PathBuf),
-    #[cfg(feature = "opencode")]
-    Id(String),
-}
-
-/// One discovered local session.
-struct Found {
-    harness: HarnessId,
-    meta: common::Meta,
-    locator: Locator,
-}
+use txcript::{HarnessId, local};
 
 fn main() {
     if let Err(e) = run() {
@@ -57,6 +44,10 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         Some("continue") => cmd_continue(&args[1..]),
+        #[cfg(feature = "search")]
+        Some("query") => query::cmd_query(&args[1..]),
+        #[cfg(not(feature = "search"))]
+        Some("query") => Err("query needs the `search` feature compiled in".to_string()),
         Some("-h" | "--help" | "help") | None => {
             usage();
             Ok(())
@@ -73,15 +64,18 @@ fn usage() {
         "txcript — continue local AI coding sessions in any harness\n\n\
          usage:\n  \
          txcript list\n  \
-         txcript continue <id> [--with <harness>] [--from <harness>] [--out <dir>] [--no-resume]\n\n\
+         txcript continue <id> [--with <harness>] [--from <harness>] [--out <dir>] [--no-resume]\n  \
+         txcript query ['<pattern>'] [--from <harness>] [--with <harness>]\n\n\
          continue launches the harness afterward; --with crosses into another,\n\
          --out/--no-resume write the session without launching.\n\
+         query with a pattern prints ranked hits; without one it opens an\n\
+         fzf-style picker (type to filter, Enter continues the selection).\n\
          harnesses: claude_code, codex, opencode, pi, campfire, cursor, grok"
     );
 }
 
 fn cmd_list() {
-    let sessions = discover_all();
+    let sessions = discover_with_spinner();
     if sessions.is_empty() {
         println!("no local sessions found");
         return;
@@ -140,7 +134,7 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
     let id = id.ok_or("missing session id (try `txcript list`)")?;
 
     // Locate the session by exact id or title, optionally scoped to one harness.
-    let sessions = discover_all();
+    let sessions = discover_with_spinner();
     let found = sessions
         .iter()
         .find(|s| {
@@ -152,12 +146,21 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
             None => format!("no local session matches `{id}` (try `txcript list`)"),
         })?;
 
-    // Default to continuing in the source's own harness.
-    let target = with.unwrap_or(found.harness);
-
     // Resuming an `--out` copy can't work — the harness reads its live root, not
     // our redirect — so a redirect implies "write only".
     let resume = out.is_none() && !no_resume;
+    continue_session(found, with, out.as_deref(), resume)
+}
+
+/// Continue `found` in `with` (default: its own harness): same-harness resumes
+/// in place, cross-harness re-synthesizes; then exec the harness if `resume`.
+fn continue_session(
+    found: &local::Session,
+    with: Option<HarnessId>,
+    out: Option<&std::path::Path>,
+    resume: bool,
+) -> Result<(), String> {
+    let target = with.unwrap_or(found.harness);
 
     let resume_id = if target == found.harness && out.is_none() {
         // Fast path: same harness, live root — the session is already on disk.
@@ -166,15 +169,15 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
         eprintln!("continuing existing {target} session {}", found.meta.id);
         found.meta.id.clone()
     } else {
-        let common = load_common(found)?;
+        let common = found.read().map_err(|e| e.to_string())?;
         eprintln!("continuing {} session as {target}", found.harness);
-        let (new_id, location) = save_target(target, &common, out.as_deref())?;
-        println!("wrote {target} session {new_id}");
-        println!("  at {location}");
-        new_id
+        let written = local::write(target, &common, out).map_err(|e| e.to_string())?;
+        println!("wrote {target} session {}", written.id);
+        println!("  at {}", written.location);
+        written.id
     };
 
-    let (bin, args) = resume_command(target, &resume_id);
+    let (bin, args) = local::resume_command(target, &resume_id);
     if resume {
         // Hand the terminal to the harness — replaces this process on Unix.
         eprintln!("resuming: {} {}", bin, args.join(" "));
@@ -185,34 +188,13 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// The command that resumes a session in its harness, overridable per harness
-/// via `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a template; `{id}` is substituted).
-fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
-    let key = format!(
-        "TRANSCRIPT_{}_RESUME_CMD",
-        harness.as_str().to_ascii_uppercase()
-    );
-    if let Ok(template) = std::env::var(&key) {
-        let mut parts = template
-            .replace("{id}", id)
-            .split_whitespace()
-            .map(String::from)
-            .collect::<Vec<_>>()
-            .into_iter();
-        if let Some(bin) = parts.next() {
-            return (bin, parts.collect());
-        }
-    }
-    let id = id.to_string();
-    match harness {
-        HarnessId::ClaudeCode => ("claude".into(), vec!["--resume".into(), id]),
-        HarnessId::Codex => ("codex".into(), vec!["resume".into(), id]),
-        HarnessId::OpenCode => ("opencode".into(), vec!["--session".into(), id]),
-        HarnessId::Pi => ("pi".into(), vec!["--session".into(), id]),
-        HarnessId::Campfire => ("campfire".into(), vec!["--session".into(), id]),
-        HarnessId::Cursor => ("agent".into(), vec![format!("--resume={id}")]),
-        HarnessId::Grok => ("grok".into(), vec!["--resume".into(), id]),
-    }
+fn discover_with_spinner() -> Vec<local::Session> {
+    let spinner = spin::Spinner::start("searching local sessions…");
+    let sessions = local::discover_with(|harness, count| {
+        spinner.set(format!("scanning {harness}… ({count} found)"));
+    });
+    spinner.stop(&format!("found {} local session(s)", sessions.len()));
+    sessions
 }
 
 /// Replace this process with the harness so it owns the terminal (a true
@@ -232,228 +214,6 @@ fn handoff(bin: &str, args: &[String]) -> Result<(), String> {
         .status()
         .map_err(|e| format!("failed to launch `{bin}`: {e} (is it on PATH?)"))?;
     std::process::exit(status.code().unwrap_or(0));
-}
-
-// ── discover / load / save across harnesses ────────────────────────────
-
-fn discover_all() -> Vec<Found> {
-    let spinner = spin::Spinner::start("searching local sessions…");
-    let mut out = Vec::new();
-
-    let announce = |harness: HarnessId, count: usize| {
-        spinner.set(format!("scanning {harness}… ({count} found)"));
-    };
-
-    announce(HarnessId::ClaudeCode, out.len());
-    if let Some(store) = claude_code::ClaudeStore::default_root() {
-        for d in store.discover().unwrap_or_default() {
-            out.push(Found {
-                harness: HarnessId::ClaudeCode,
-                meta: d.meta,
-                locator: Locator::Path(d.reference),
-            });
-        }
-    }
-    announce(HarnessId::Codex, out.len());
-    if let Some(store) = codex::CodexStore::default_root() {
-        for d in store.discover().unwrap_or_default() {
-            out.push(Found {
-                harness: HarnessId::Codex,
-                meta: d.meta,
-                locator: Locator::Path(d.reference),
-            });
-        }
-    }
-    announce(HarnessId::Pi, out.len());
-    if let Some(store) = pi::PiStore::default_root() {
-        for d in store.discover().unwrap_or_default() {
-            out.push(Found {
-                harness: HarnessId::Pi,
-                meta: d.meta,
-                locator: Locator::Path(d.reference),
-            });
-        }
-    }
-    announce(HarnessId::Campfire, out.len());
-    if let Some(store) = campfire::CampfireStore::default_root() {
-        for d in store.discover().unwrap_or_default() {
-            out.push(Found {
-                harness: HarnessId::Campfire,
-                meta: d.meta,
-                locator: Locator::Path(d.reference),
-            });
-        }
-    }
-    announce(HarnessId::Cursor, out.len());
-    if let Some(store) = cursor::CursorStore::default_root() {
-        for d in store.discover().unwrap_or_default() {
-            out.push(Found {
-                harness: HarnessId::Cursor,
-                meta: d.meta,
-                locator: Locator::Path(d.reference),
-            });
-        }
-    }
-    announce(HarnessId::Grok, out.len());
-    if let Some(store) = grok::GrokStore::default_root() {
-        for d in store.discover().unwrap_or_default() {
-            out.push(Found {
-                harness: HarnessId::Grok,
-                meta: d.meta,
-                locator: Locator::Path(d.reference),
-            });
-        }
-    }
-    #[cfg(feature = "opencode")]
-    {
-        announce(HarnessId::OpenCode, out.len());
-        if let Some(store) = opencode::OpenCodeStore::default_db() {
-            for d in store.discover().unwrap_or_default() {
-                out.push(Found {
-                    harness: HarnessId::OpenCode,
-                    meta: d.meta,
-                    locator: Locator::Id(d.reference),
-                });
-            }
-        }
-    }
-
-    spinner.stop(&format!("found {} local session(s)", out.len()));
-    out.sort_by_key(|f| std::cmp::Reverse(f.meta.timestamp));
-    out
-}
-
-fn load_common(found: &Found) -> Result<Transcript<Common>, String> {
-    let err = |e: txcript::Error| e.to_string();
-    match (&found.harness, &found.locator) {
-        (HarnessId::ClaudeCode, Locator::Path(p)) => {
-            let store = claude_code::ClaudeStore::default_root().ok_or("no home directory")?;
-            claude_code::ClaudeCode::to_common(&store.load(p).map_err(err)?).map_err(err)
-        }
-        (HarnessId::Codex, Locator::Path(p)) => {
-            let store = codex::CodexStore::default_root().ok_or("no home directory")?;
-            codex::Codex::to_common(&store.load(p).map_err(err)?).map_err(err)
-        }
-        (HarnessId::Pi, Locator::Path(p)) => {
-            let store = pi::PiStore::default_root().ok_or("no home directory")?;
-            pi::Pi::to_common(&store.load(p).map_err(err)?).map_err(err)
-        }
-        (HarnessId::Campfire, Locator::Path(p)) => {
-            let store = campfire::CampfireStore::default_root().ok_or("no home directory")?;
-            campfire::Campfire::to_common(&store.load(p).map_err(err)?).map_err(err)
-        }
-        (HarnessId::Cursor, Locator::Path(p)) => {
-            let store = cursor::CursorStore::default_root().ok_or("no home directory")?;
-            cursor::Cursor::to_common(&store.load(p).map_err(err)?).map_err(err)
-        }
-        (HarnessId::Grok, Locator::Path(p)) => {
-            let store = grok::GrokStore::default_root().ok_or("no home directory")?;
-            grok::Grok::to_common(&store.load(p).map_err(err)?).map_err(err)
-        }
-        #[cfg(feature = "opencode")]
-        (HarnessId::OpenCode, Locator::Id(id)) => {
-            let store = opencode::OpenCodeStore::default_db().ok_or("no home directory")?;
-            opencode::OpenCode::to_common(&store.load(id).map_err(err)?).map_err(err)
-        }
-        _ => Err("unsupported source harness/locator combination".into()),
-    }
-}
-
-/// Returns `(new_session_id, on-disk location)`.
-fn save_target(
-    target: HarnessId,
-    common: &Transcript<Common>,
-    out: Option<&std::path::Path>,
-) -> Result<(String, String), String> {
-    let err = |e: txcript::Error| e.to_string();
-    match target {
-        HarnessId::ClaudeCode => {
-            let root = file_store_root(
-                out,
-                claude_code::ClaudeStore::default_root().map(|s| s.root),
-            )?;
-            let native = claude_code::ClaudeCode::from_common(common).map_err(err)?;
-            Ok(describe(
-                claude_code::ClaudeStore::new(root)
-                    .save(&native)
-                    .map_err(err)?,
-            ))
-        }
-        HarnessId::Codex => {
-            let root = file_store_root(
-                out,
-                codex::CodexStore::default_root().map(|s| s.sessions_dir),
-            )?;
-            let native = codex::Codex::from_common(common).map_err(err)?;
-            Ok(describe(
-                codex::CodexStore::new(root).save(&native).map_err(err)?,
-            ))
-        }
-        HarnessId::Pi => {
-            let root = file_store_root(out, pi::PiStore::default_root().map(|s| s.sessions_dir))?;
-            let native = pi::Pi::from_common(common).map_err(err)?;
-            Ok(describe(pi::PiStore::new(root).save(&native).map_err(err)?))
-        }
-        HarnessId::Campfire => {
-            let root = file_store_root(
-                out,
-                campfire::CampfireStore::default_root().map(|s| s.sessions_dir),
-            )?;
-            let native = campfire::Campfire::from_common(common).map_err(err)?;
-            Ok(describe(
-                campfire::CampfireStore::new(root)
-                    .save(&native)
-                    .map_err(err)?,
-            ))
-        }
-        HarnessId::Cursor => {
-            let root = file_store_root(
-                out,
-                cursor::CursorStore::default_root().map(|s| s.chats_dir),
-            )?;
-            let native = cursor::Cursor::from_common(common).map_err(err)?;
-            Ok(describe(
-                cursor::CursorStore::new(root).save(&native).map_err(err)?,
-            ))
-        }
-        HarnessId::Grok => {
-            let root =
-                file_store_root(out, grok::GrokStore::default_root().map(|s| s.sessions_dir))?;
-            let native = grok::Grok::from_common(common).map_err(err)?;
-            Ok(describe(
-                grok::GrokStore::new(root).save(&native).map_err(err)?,
-            ))
-        }
-        HarnessId::OpenCode => save_opencode(common),
-    }
-}
-
-#[cfg(feature = "opencode")]
-fn save_opencode(common: &Transcript<Common>) -> Result<(String, String), String> {
-    let err = |e: txcript::Error| e.to_string();
-    let store = opencode::OpenCodeStore::default_db().ok_or("no home directory")?;
-    let native = opencode::OpenCode::from_common(common).map_err(err)?;
-    let saved = store.save(&native).map_err(err)?;
-    Ok((saved.id, "imported via `opencode import`".into()))
-}
-
-#[cfg(not(feature = "opencode"))]
-fn save_opencode(_: &Transcript<Common>) -> Result<(String, String), String> {
-    Err("opencode support not compiled in (enable the `opencode` feature)".into())
-}
-
-fn file_store_root(
-    out: Option<&std::path::Path>,
-    default: Option<PathBuf>,
-) -> Result<PathBuf, String> {
-    match out {
-        Some(p) => Ok(p.to_path_buf()),
-        None => default.ok_or_else(|| "no home directory; pass --out <dir>".to_string()),
-    }
-}
-
-fn describe<R: std::fmt::Debug>(saved: txcript::Saved<R>) -> (String, String) {
-    (saved.id, format!("{:?}", saved.reference))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -530,6 +290,450 @@ mod spin {
                 let _ = err.flush();
             }
             eprintln!("{summary}");
+        }
+    }
+}
+
+// ── query: one-shot search and the fzf-style picker ─────────────────────
+
+#[cfg(feature = "search")]
+mod query {
+    use std::collections::HashMap;
+
+    use txcript::search::{DocKey, DocMatch, Index, Query};
+    use txcript::{HarnessId, local};
+
+    type Sessions = HashMap<(HarnessId, String), local::Session>;
+
+    pub(super) fn cmd_query(args: &[String]) -> Result<(), String> {
+        let mut pattern: Option<String> = None;
+        let mut with: Option<HarnessId> = None;
+        let mut from: Option<HarnessId> = None;
+
+        let parse = |v: Option<&String>, flag: &str| -> Result<HarnessId, String> {
+            v.ok_or_else(|| format!("{flag} needs a harness"))?
+                .parse()
+                .map_err(|e: txcript::Error| e.to_string())
+        };
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--with" => {
+                    i += 1;
+                    with = Some(parse(args.get(i), "--with")?);
+                }
+                "--from" => {
+                    i += 1;
+                    from = Some(parse(args.get(i), "--from")?);
+                }
+                other if pattern.is_none() && !other.starts_with("--") => {
+                    pattern = Some(other.to_string());
+                }
+                other => return Err(format!("unexpected argument `{other}`")),
+            }
+            i += 1;
+        }
+
+        let (index, sessions) = build_index(from);
+        if let Some(pattern) = pattern {
+            if with.is_some() {
+                eprintln!("note: --with only affects the interactive picker; ignored here");
+            }
+            one_shot(&index, &pattern);
+            return Ok(());
+        }
+        let Some(key) = tui::pick(&index)? else {
+            return Ok(()); // cancelled; terminal already restored
+        };
+        let session = sessions
+            .get(&(key.harness, key.id.clone()))
+            .ok_or("picked session vanished from the map")?;
+        drop(index);
+        super::continue_session(session, with, None, true)
+    }
+
+    /// Load every local session (scoped to `--from` if given) into a hot
+    /// index, keyed back to its `Session` for the continue step.
+    fn build_index(from: Option<HarnessId>) -> (Index, Sessions) {
+        let found = super::discover_with_spinner();
+        let spinner = super::spin::Spinner::start("indexing…");
+        let mut index = Index::new();
+        let mut sessions: Sessions = HashMap::new();
+        let total = found.len();
+        for (i, session) in found.into_iter().enumerate() {
+            if from.is_some_and(|h| session.harness != h) {
+                continue;
+            }
+            if i % 32 == 0 {
+                spinner.set(format!("indexing… ({i}/{total})"));
+            }
+            let Ok(common) = session.read() else {
+                continue; // unreadable sessions are skipped, matching discover
+            };
+            index.insert(
+                DocKey {
+                    harness: session.harness,
+                    id: session.meta.id.clone(),
+                },
+                &common,
+            );
+            sessions.insert((session.harness, session.meta.id.clone()), session);
+        }
+        spinner.stop(&format!(
+            "indexed {} session(s), {} lines",
+            index.len(),
+            index.lines()
+        ));
+        (index, sessions)
+    }
+
+    /// Print ranked hits for a pattern, colorized when stdout is a terminal.
+    fn one_shot(index: &Index, pattern: &str) {
+        use std::io::IsTerminal;
+        let mut q = Query::fuzzy(pattern);
+        q.limit = Some(20);
+        q.hits_per_doc = Some(3);
+        let matches = index.query(&q);
+        if matches.is_empty() {
+            println!("no matches for `{pattern}`");
+            return;
+        }
+        let color = std::io::stdout().is_terminal();
+        for m in &matches {
+            println!("{}", doc_line(m, color));
+            for hit in &m.hits {
+                let origin = format!("{:?}", hit.origin).to_lowercase();
+                println!(
+                    "  [{origin:>11}] {}",
+                    highlight(&hit.line, &hit.spans, 120, color)
+                );
+            }
+        }
+    }
+
+    fn doc_line(m: &DocMatch<'_>, color: bool) -> String {
+        let label = m
+            .meta
+            .title
+            .clone()
+            .or_else(|| m.meta.cwd.as_deref().map(basename))
+            .unwrap_or_default();
+        let date = m.meta.timestamp.format("%Y-%m-%d %H:%M");
+        if color {
+            format!(
+                "\x1b[1m{}\x1b[0m  {}  \x1b[2m{date}\x1b[0m  {}",
+                m.key.harness, m.key.id, label
+            )
+        } else {
+            format!("{}  {}  {date}  {}", m.key.harness, m.key.id, label)
+        }
+    }
+
+    pub(super) fn basename(path: &str) -> String {
+        std::path::Path::new(path)
+            .file_name()
+            .map_or_else(|| path.to_string(), |n| n.to_string_lossy().into_owned())
+    }
+
+    /// Render `line` truncated to `width` chars, match spans emphasized.
+    pub(super) fn highlight(
+        line: &str,
+        spans: &[std::ops::Range<u32>],
+        width: usize,
+        color: bool,
+    ) -> String {
+        let mut out = String::new();
+        let mut in_span = false;
+        for (i, ch) in line.chars().take(width).enumerate() {
+            let i = u32::try_from(i).unwrap_or(u32::MAX);
+            let now = spans.iter().any(|s| s.contains(&i));
+            if color && now != in_span {
+                out.push_str(if now { "\x1b[1;31m" } else { "\x1b[0m" });
+                in_span = now;
+            }
+            out.push(ch);
+        }
+        if color && in_span {
+            out.push_str("\x1b[0m");
+        }
+        if line.chars().count() > width {
+            out.push('…');
+        }
+        out
+    }
+
+    // ── the picker ───────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    mod tui {
+        use std::io::{IsTerminal, Read, Write};
+        use std::process::{Command, Stdio};
+
+        use txcript::search::{DocKey, Index, Origin, Query};
+
+        /// Raw-mode + alternate-screen guard: constructing enters, dropping
+        /// restores — including on error paths and cancels.
+        struct Term {
+            saved: String,
+        }
+
+        impl Term {
+            fn enter() -> Result<Term, String> {
+                let saved = stty(&["-g"])?.trim().to_string();
+                // min 0 time 1: reads poll at 100ms so a lone ESC is
+                // distinguishable from an escape sequence.
+                stty(&["raw", "-echo", "min", "0", "time", "1"])?;
+                print!("\x1b[?1049h\x1b[?25l");
+                let _ = std::io::stdout().flush();
+                Ok(Term { saved })
+            }
+        }
+
+        fn term_size() -> (usize, usize) {
+            let parse = |s: &str| -> Option<(usize, usize)> {
+                let mut it = s.split_whitespace();
+                Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+            };
+            stty(&["size"])
+                .ok()
+                .and_then(|out| parse(&out))
+                .unwrap_or((24, 80))
+        }
+
+        impl Drop for Term {
+            fn drop(&mut self) {
+                print!("\x1b[?25h\x1b[?1049l");
+                let _ = std::io::stdout().flush();
+                let _ = stty(&[&self.saved]);
+            }
+        }
+
+        fn stty(args: &[&str]) -> Result<String, String> {
+            let out = Command::new("stty")
+                .args(args)
+                .stdin(Stdio::inherit())
+                .output()
+                .map_err(|e| format!("stty: {e}"))?;
+            if out.status.success() {
+                Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+            } else {
+                Err(format!(
+                    "stty {}: {}",
+                    args.join(" "),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ))
+            }
+        }
+
+        enum Key {
+            Char(char),
+            Backspace,
+            Clear,
+            Up,
+            Down,
+            Enter,
+            Cancel,
+            None,
+        }
+
+        /// Interactive fuzzy picker over the index. Returns the chosen doc,
+        /// or `None` on cancel. The terminal is fully restored either way.
+        pub(super) fn pick(index: &Index) -> Result<Option<DocKey>, String> {
+            if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+                return Err("interactive query needs a terminal (pass a pattern instead)".into());
+            }
+            let term = Term::enter()?;
+            let mut input = String::new();
+            let mut selected = 0usize;
+            let mut stdin = std::io::stdin().lock();
+
+            loop {
+                let (rows, cols) = term_size();
+                let visible = rows.saturating_sub(2).max(1);
+                let mut q = Query::fuzzy(&input);
+                q.limit = Some(visible);
+                q.hits_per_doc = Some(1);
+                let matches = index.query(&q);
+                selected = selected.min(matches.len().saturating_sub(1));
+                render(&input, &matches, selected, index.len(), rows, cols);
+
+                loop {
+                    match read_key(&mut stdin)? {
+                        Key::None => continue,
+                        Key::Char(c) => {
+                            input.push(c);
+                            selected = 0;
+                        }
+                        Key::Backspace => {
+                            input.pop();
+                            selected = 0;
+                        }
+                        Key::Clear => {
+                            input.clear();
+                            selected = 0;
+                        }
+                        Key::Up => selected = selected.saturating_sub(1),
+                        Key::Down => selected += 1,
+                        Key::Enter => {
+                            let key = matches.get(selected).map(|m| m.key.clone());
+                            if key.is_some() {
+                                drop(term);
+                                return Ok(key);
+                            }
+                            continue;
+                        }
+                        Key::Cancel => {
+                            drop(term);
+                            return Ok(None);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        fn render(
+            input: &str,
+            matches: &[txcript::search::DocMatch<'_>],
+            selected: usize,
+            total: usize,
+            rows: usize,
+            cols: usize,
+        ) {
+            use std::fmt::Write as _;
+            // The match count is post-limit: a full page means "at least".
+            let count = if matches.len() >= rows.saturating_sub(2) {
+                format!("{}+", matches.len())
+            } else {
+                matches.len().to_string()
+            };
+            let mut frame = String::from("\x1b[H\x1b[2J");
+            let _ = write!(
+                frame,
+                "\x1b[1m>\x1b[0m {input}\x1b[7m \x1b[0m\r\n\x1b[2m  {count}/{total}\x1b[0m"
+            );
+            // Lines are *prefixed* with \r\n: a trailing newline on the last
+            // row would scroll the prompt off the top of the screen.
+            for (i, m) in matches.iter().take(rows.saturating_sub(2)).enumerate() {
+                let line = row(m, cols.saturating_sub(2));
+                if i == selected {
+                    let _ = write!(frame, "\r\n\x1b[7m▌{line}\x1b[0m");
+                } else {
+                    let _ = write!(frame, "\r\n {line}");
+                }
+            }
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(frame.as_bytes());
+            let _ = out.flush();
+        }
+
+        /// One list row: harness, date, label, then the best hit line.
+        fn row(m: &txcript::search::DocMatch<'_>, cols: usize) -> String {
+            let label = m
+                .meta
+                .title
+                .clone()
+                .or_else(|| m.meta.cwd.as_deref().map(super::basename))
+                .unwrap_or_default();
+            let head = format!(
+                "{:<11} \x1b[2m{}\x1b[0m {:<24} ",
+                m.key.harness.as_str(),
+                m.meta.timestamp.format("%m-%d %H:%M"),
+                truncate_chars(&label, 24),
+            );
+            // 11 + 1 + 11 + 1 + 24 + 1 visible chars so far.
+            let room = cols.saturating_sub(49);
+            let preview = m.hits.first().map_or_else(String::new, |hit| {
+                let origin = match hit.origin {
+                    Origin::User => "usr",
+                    Origin::Assistant => "ast",
+                    Origin::Thinking => "thk",
+                    Origin::ToolUse => "use",
+                    Origin::ToolResult => "res",
+                    Origin::Meta => "met",
+                };
+                format!(
+                    "\x1b[2m{origin}\x1b[0m {}",
+                    super::highlight(&hit.line, &hit.spans, room.saturating_sub(4), true)
+                )
+            });
+            format!("{head}{preview}")
+        }
+
+        fn truncate_chars(s: &str, max: usize) -> String {
+            if s.chars().count() <= max {
+                s.to_string()
+            } else {
+                let mut t: String = s.chars().take(max.saturating_sub(1)).collect();
+                t.push('…');
+                t
+            }
+        }
+
+        /// Read one key, decoding UTF-8 and the arrow escape sequences. With
+        /// `min 0 time 1`, a read can legitimately return nothing.
+        fn read_key(stdin: &mut impl Read) -> Result<Key, String> {
+            let Some(b) = read_byte(stdin)? else {
+                return Ok(Key::None);
+            };
+            Ok(match b {
+                0x03 => Key::Cancel, // ctrl-c
+                0x0a | 0x0d => Key::Enter,
+                0x7f | 0x08 => Key::Backspace,
+                0x15 => Key::Clear, // ctrl-u
+                0x0e => Key::Down,  // ctrl-n
+                0x10 => Key::Up,    // ctrl-p
+                0x1b => match read_byte(stdin)? {
+                    Some(b'[') => match read_byte(stdin)? {
+                        Some(b'A') => Key::Up,
+                        Some(b'B') => Key::Down,
+                        _ => Key::None,
+                    },
+                    None => Key::Cancel, // a lone ESC
+                    _ => Key::None,
+                },
+                b if (0x20..0x7f).contains(&b) => Key::Char(b as char),
+                b if b >= 0xc2 => utf8_tail(stdin, b)?,
+                _ => Key::None,
+            })
+        }
+
+        /// Finish a UTF-8 multibyte sequence whose lead byte was `lead`.
+        fn utf8_tail(stdin: &mut impl Read, lead: u8) -> Result<Key, String> {
+            let len = match lead {
+                0xc2..=0xdf => 2,
+                0xe0..=0xef => 3,
+                _ => 4,
+            };
+            let mut buf = vec![lead];
+            for _ in 1..len {
+                match read_byte(stdin)? {
+                    Some(b) => buf.push(b),
+                    None => return Ok(Key::None),
+                }
+            }
+            Ok(String::from_utf8(buf)
+                .ok()
+                .and_then(|s| s.chars().next())
+                .map_or(Key::None, Key::Char))
+        }
+
+        fn read_byte(stdin: &mut impl Read) -> Result<Option<u8>, String> {
+            let mut b = [0u8; 1];
+            match stdin.read(&mut b) {
+                Ok(0) => Ok(None),
+                Ok(_) => Ok(Some(b[0])),
+                Err(e) => Err(format!("reading stdin: {e}")),
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    mod tui {
+        use txcript::search::{DocKey, Index};
+
+        pub(super) fn pick(_: &Index) -> Result<Option<DocKey>, String> {
+            Err("the interactive picker is unix-only; pass a pattern instead".into())
         }
     }
 }

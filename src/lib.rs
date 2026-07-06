@@ -30,6 +30,8 @@
 pub mod common;
 pub mod error;
 pub mod harness;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod local;
 #[cfg(feature = "search")]
 pub mod search;
 mod transcript;

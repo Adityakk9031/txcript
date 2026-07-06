@@ -85,6 +85,40 @@ The canonical model is `Transcript<Common>` — `Meta` + `Vec<Message>`, where a
 `Message` holds typed `Block`s (`Text`, `Thinking`, `ToolUse`, `ToolResult`,
 `Image`) and a typed `Tool` enum.
 
+### Search (feature `search`, on by default)
+
+`txcript::search` does fuzzy and substring search over transcripts, built on
+[nucleo](https://github.com/helix-editor/nucleo) (helix's matcher). One-shot,
+for find-in-transcript:
+
+```rust
+use txcript::search::{Query, search};
+
+let hits = search(&common, &Query::fuzzy("relay bug"));   // fzf syntax: 'exact ^prefix !not
+for hit in hits {
+    // hit.origin: User | Assistant | Thinking | ToolUse | ToolResult | Meta
+    // hit.message / hit.block locate it; hit.spans are char ranges for highlighting
+}
+```
+
+Hot, for a picker that queries per keystroke — insert once, query cheaply and
+repeatedly (`Index` is `Send + Sync`, scoring shards across cores natively):
+
+```rust
+use txcript::search::{DocKey, Index, Query};
+
+let mut index = Index::new();
+index.insert(DocKey { harness, id }, &common);   // re-insert replaces; caller owns refresh
+let matches = index.query(&Query::fuzzy("srch")); // ranked docs, best lines as hits
+```
+
+An empty pattern lists all documents newest-first (the pre-keystroke picker
+state). Tool outputs are excluded from the default search scope (`Origin::ALL`
+opts in); `Query.harnesses` scopes to specific harnesses; `Query.limit` caps
+returned documents and `Query.hits_per_doc` (default 8) caps materialized
+lines per document. Indexing ~600 real sessions (~90 MB of text) takes ~1.5 s;
+queries run 3–40 ms.
+
 ## Use as a CLI
 
 ```sh
@@ -108,6 +142,21 @@ Same-harness continues resume the original in place; `--with` re-synthesizes
 into another harness's native format first. Override the launch command per
 harness with `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template), e.g.
 `TRANSCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
+
+Search across every session on the machine:
+
+```sh
+txcript query 'relay bug'                # one-shot: ranked hits, highlighted
+txcript query                            # fzf-style picker; Enter continues
+    [--from <harness>]                   #   search only <harness> (default: all)
+    [--with <harness>]                   #   continue the pick in <harness>
+```
+
+The picker is dependency-free (raw-mode ANSI): type to filter with fzf-style
+fuzzy syntax, arrows / ctrl-p/n to move, Enter to continue the selection in
+its own harness (or `--with`), Esc to cancel. Every row shows which kind of
+content matched — user text, assistant text, thinking, tool use, tool output,
+or session metadata.
 
 ## Use as a WASM module (Bun / Node)
 
