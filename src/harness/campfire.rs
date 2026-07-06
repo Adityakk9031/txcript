@@ -81,4 +81,8 @@ impl Store for CampfireStore {
     fn save(&self, transcript: &Transcript<Campfire>) -> Result<Saved<PathBuf>> {
         pi::write_session(&self.sessions_dir, &transcript.meta, &transcript.body)
     }
+
+    fn delete(&self, reference: &PathBuf) -> Result<()> {
+        Ok(std::fs::remove_file(reference)?)
+    }
 }

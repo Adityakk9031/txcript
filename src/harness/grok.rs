@@ -1337,6 +1337,11 @@ impl Store for GrokStore {
         Ok(Saved { id, reference: dir })
     }
 
+    /// A grok session is a self-contained directory; delete removes it whole.
+    fn delete(&self, reference: &PathBuf) -> Result<()> {
+        Ok(fs::remove_dir_all(reference)?)
+    }
+
     fn fingerprints(&self, refs: &[PathBuf]) -> Result<HashMap<String, String>> {
         let mut out = HashMap::with_capacity(refs.len());
         for dir in refs {

@@ -714,6 +714,10 @@ impl Store for CodexStore {
         })
     }
 
+    fn delete(&self, reference: &PathBuf) -> Result<()> {
+        Ok(fs::remove_file(reference)?)
+    }
+
     fn fingerprints(&self, refs: &[PathBuf]) -> Result<HashMap<String, String>> {
         Ok(refs
             .iter()

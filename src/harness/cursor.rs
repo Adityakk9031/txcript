@@ -206,6 +206,21 @@ impl Store for CursorStore {
         })
     }
 
+    /// The `Ref` is the session's `store.db`; the session is its parent
+    /// directory (`store.db` + `meta.json` + `prompt_history.json`), removed
+    /// whole. Guarded on the file name so a mistaken reference can't take out
+    /// an unrelated directory.
+    fn delete(&self, reference: &PathBuf) -> Result<()> {
+        let session_dir = reference
+            .parent()
+            .filter(|_| reference.file_name().is_some_and(|n| n == "store.db"))
+            .ok_or_else(|| Error::Malformed {
+                harness: "cursor",
+                detail: format!("not a session store.db path: {}", reference.display()),
+            })?;
+        Ok(std::fs::remove_dir_all(session_dir)?)
+    }
+
     fn fingerprints(&self, refs: &[PathBuf]) -> Result<HashMap<String, String>> {
         let mut out = HashMap::with_capacity(refs.len());
         for path in refs {
@@ -229,6 +244,10 @@ impl Store for CursorStore {
     }
 
     fn save(&self, _transcript: &Transcript<Cursor>) -> Result<Saved<PathBuf>> {
+        Err(sqlite_unavailable())
+    }
+
+    fn delete(&self, _reference: &PathBuf) -> Result<()> {
         Err(sqlite_unavailable())
     }
 }

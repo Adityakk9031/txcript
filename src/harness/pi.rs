@@ -415,6 +415,10 @@ impl Store for PiStore {
         write_session(&self.sessions_dir, &transcript.meta, &transcript.body)
     }
 
+    fn delete(&self, reference: &PathBuf) -> Result<()> {
+        Ok(std::fs::remove_file(reference)?)
+    }
+
     fn fingerprints(&self, refs: &[PathBuf]) -> Result<HashMap<String, String>> {
         Ok(file_fingerprints(refs))
     }

@@ -178,6 +178,15 @@ pub trait Store {
     /// When the backend rejects the write.
     fn save(&self, transcript: &Transcript<Self::H>) -> Result<Saved<Self::Ref>>;
 
+    /// Remove one transcript from the backend so the harness no longer lists
+    /// or resumes it. File-backed stores remove the session file or directory;
+    /// `OpenCode` archives the session in place (the shared database belongs
+    /// to the harness, and archived is its own notion of "gone").
+    ///
+    /// # Errors
+    /// When the reference doesn't exist or the backend rejects the removal.
+    fn delete(&self, reference: &Self::Ref) -> Result<()>;
+
     /// Per-reference change cursors, for callers that cache parsed transcripts.
     /// Default: no fingerprints, forcing a re-parse. Backends with a cheap
     /// change signal (file mtime, a `MAX(updated)` query) should override.

@@ -326,6 +326,10 @@ impl Store for ClaudeStore {
         })
     }
 
+    fn delete(&self, reference: &PathBuf) -> Result<()> {
+        Ok(fs::remove_file(reference)?)
+    }
+
     fn fingerprints(&self, refs: &[PathBuf]) -> Result<HashMap<String, String>> {
         let mut out = HashMap::with_capacity(refs.len());
         for path in refs {

@@ -955,6 +955,29 @@ mod store {
             })
         }
 
+        /// The database belongs to `OpenCode`, so "delete" is its own notion
+        /// of gone: archive the session in place. `discover` (here and in
+        /// `OpenCode`'s UI) filters archived sessions out; the rows stay,
+        /// reversible from `OpenCode` itself.
+        fn delete(&self, reference: &String) -> Result<()> {
+            let conn = Connection::open(&self.db_path).map_err(sqlite_err)?;
+            let now = chrono::Utc::now().timestamp_millis();
+            let updated = conn
+                .execute(
+                    "UPDATE session SET time_archived = ?1 \
+                     WHERE id = ?2 AND time_archived IS NULL",
+                    rusqlite::params![now, reference],
+                )
+                .map_err(sqlite_err)?;
+            if updated == 0 {
+                return Err(Error::Malformed {
+                    harness: "opencode",
+                    detail: format!("no active session `{reference}` to archive"),
+                });
+            }
+            Ok(())
+        }
+
         fn fingerprints(&self, refs: &[String]) -> Result<HashMap<String, String>> {
             if !self.db_path.is_file() {
                 return Ok(HashMap::new());
