@@ -96,16 +96,19 @@ pub struct ApiMessage {
 
 // Lossless typed <-> Value: classify on the `type` tag, route to a typed line,
 // fall back to `Other(Value)` for anything unrecognized or malformed.
+// Deserializing from `&v` copies each field once, straight into the typed
+// line — no intermediate clone of the whole Value — and leaves `v` intact
+// for the fallback.
 impl From<Value> for Record {
     fn from(v: Value) -> Self {
         match v.get("type").and_then(Value::as_str) {
-            Some("summary") => serde_json::from_value(v.clone())
+            Some("summary") => SummaryLine::deserialize(&v)
                 .map(Record::Summary)
                 .unwrap_or(Record::Other(v)),
-            Some("user") => serde_json::from_value(v.clone())
+            Some("user") => EntryLine::deserialize(&v)
                 .map(Record::User)
                 .unwrap_or(Record::Other(v)),
-            Some("assistant") => serde_json::from_value(v.clone())
+            Some("assistant") => EntryLine::deserialize(&v)
                 .map(Record::Assistant)
                 .unwrap_or(Record::Other(v)),
             _ => Record::Other(v),
@@ -292,10 +295,17 @@ impl Store for ClaudeStore {
             Ok(files
                 .into_iter()
                 .filter_map(|path| {
-                    // A session that fails to load is skipped, not fatal.
-                    self.load(&path).ok().map(|transcript| Discovered {
-                        meta: transcript.meta,
-                        reference: path,
+                    // A session that fails to read is skipped, not fatal. Meta
+                    // comes from the shallow scan, not a full parse.
+                    fs::read_to_string(&path).ok().map(|text| {
+                        let mut meta = meta_from_text(&text);
+                        if meta.id.is_empty() {
+                            meta.id = jsonl::file_id(&path);
+                        }
+                        Discovered {
+                            meta,
+                            reference: path,
+                        }
                     })
                 })
                 .collect())
@@ -600,6 +610,110 @@ fn note_ts(earliest: &mut Option<DateTime<Utc>>, ts: Option<&str>) {
     {
         *earliest = Some(parsed);
     }
+}
+
+// ── discover: shallow meta scan ────────────────────────────────────────
+
+/// Shallow mirror of [`EntryLine`] for discovery: the same typed fields with
+/// the same types — so a line that fails the full parse fails here too — but
+/// the payload-bearing `message.content` is only presence-checked, never
+/// built. Fields the full parse tolerates unconditionally (`extra`, `usage`)
+/// are covered by serde's ignore-unknown default.
+#[derive(Deserialize)]
+struct MetaEntryLine {
+    #[serde(rename = "parentUuid", default)]
+    parent_uuid: Option<String>,
+    uuid: String,
+    #[serde(default)]
+    timestamp: Option<String>,
+    #[serde(rename = "sessionId", default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(rename = "gitBranch", default)]
+    git_branch: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    message: MetaApiMessage,
+}
+
+/// Shallow mirror of [`ApiMessage`]: `content` must be present (as in the
+/// full parse) but its value is skipped, not built.
+#[derive(Deserialize)]
+struct MetaApiMessage {
+    #[serde(default)]
+    role: Option<String>,
+    #[allow(dead_code)] // presence check only; the value is never built
+    content: serde::de::IgnoredAny,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    stop_reason: Option<String>,
+}
+
+// A skeleton [`EntryLine`] carrying only what [`meta_from_records`] reads.
+impl From<MetaEntryLine> for EntryLine {
+    fn from(m: MetaEntryLine) -> EntryLine {
+        EntryLine {
+            parent_uuid: m.parent_uuid,
+            uuid: m.uuid,
+            timestamp: m.timestamp,
+            session_id: m.session_id,
+            cwd: m.cwd,
+            git_branch: m.git_branch,
+            version: m.version,
+            message: ApiMessage {
+                role: m.message.role,
+                content: Value::Null,
+                model: m.message.model,
+                stop_reason: m.message.stop_reason,
+                usage: None,
+                extra: Map::new(),
+            },
+            extra: Map::new(),
+        }
+    }
+}
+
+/// The `type` tag alone — the cheapest classification of a line.
+#[derive(Deserialize)]
+struct TypeProbe {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+}
+
+/// Parse one line only as far as discovery needs: user/assistant lines
+/// through the shallow mirrors, summary/custom-title/agent-name lines whole
+/// (each is one short line). Everything else — malformed lines included —
+/// lands in [`Record::Other`] under the full parse and contributes no
+/// metadata there, so here it parses to `None`.
+fn scan_line(line: &str) -> Option<Record> {
+    let probe: TypeProbe = serde_json::from_str(line).ok()?;
+    match probe.kind.as_deref() {
+        Some("user") => serde_json::from_str::<MetaEntryLine>(line)
+            .ok()
+            .map(|m| Record::User(m.into())),
+        Some("assistant") => serde_json::from_str::<MetaEntryLine>(line)
+            .ok()
+            .map(|m| Record::Assistant(m.into())),
+        Some("summary") => serde_json::from_str::<SummaryLine>(line)
+            .ok()
+            .map(Record::Summary),
+        Some("custom-title" | "agent-name") => serde_json::from_str(line).ok().map(Record::Other),
+        // No other line type carries session metadata.
+        Some(_) | None => None,
+    }
+}
+
+/// [`meta_from_records`] over a shallow scan of the raw text — equivalent to
+/// `from_text(text)?.meta`, but discovery never builds message payloads.
+fn meta_from_text(text: &str) -> Meta {
+    let records: Vec<Record> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(scan_line)
+        .collect();
+    meta_from_records(&records)
 }
 
 /// Claude's project-dir encoding: every `/` and `.` becomes `-`.

@@ -86,16 +86,19 @@ pub struct CustomEntry {
     pub extra: Map<String, Value>,
 }
 
+// Deserializing from `&v` copies each field once, straight into the typed
+// line — no intermediate clone of the whole Value — and leaves `v` intact
+// for the fallback.
 impl From<Value> for Record {
     fn from(v: Value) -> Self {
         match v.get("type").and_then(Value::as_str) {
-            Some("session") => serde_json::from_value(v.clone())
+            Some("session") => SessionHeader::deserialize(&v)
                 .map(Record::Session)
                 .unwrap_or(Record::Other(v)),
-            Some("message") => serde_json::from_value(v.clone())
+            Some("message") => MessageEntry::deserialize(&v)
                 .map(Record::Message)
                 .unwrap_or(Record::Other(v)),
-            Some("custom_message") => serde_json::from_value(v.clone())
+            Some("custom_message") => CustomEntry::deserialize(&v)
                 .map(Record::Custom)
                 .unwrap_or(Record::Other(v)),
             _ => Record::Other(v),
@@ -454,20 +457,62 @@ pub(crate) fn discover_format(sessions_dir: &Path) -> Vec<Discovered<PathBuf>> {
         .filter_map(|path| {
             // An unreadable file discovers nothing.
             let text = fs::read_to_string(&path).ok()?;
-            let records: Vec<Record> = jsonl::parse(&text);
             // A pi file's first record must be a session header, else skip it.
-            matches!(records.first(), Some(Record::Session(_))).then(|| {
-                let mut meta = meta_from_records(&records);
-                if meta.id.is_empty() {
-                    meta.id = jsonl::file_id(&path);
-                }
-                Discovered {
-                    meta,
-                    reference: path,
-                }
+            let records = meta_scan(&text)?;
+            let mut meta = meta_from_records(&records);
+            if meta.id.is_empty() {
+                meta.id = jsonl::file_id(&path);
+            }
+            Some(Discovered {
+                meta,
+                reference: path,
             })
         })
         .collect()
+}
+
+/// The `type` tag alone — the cheapest classification of a line.
+#[derive(Deserialize)]
+struct TypeProbe {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+}
+
+/// Shallow scan for discovery: the first record decides whether this is a pi
+/// file at all (`None` when it is not a session header), and after it only
+/// the tiny meta-bearing line types are parsed — message payloads are never
+/// built. The result folds through [`meta_from_records`] exactly as the full
+/// parse would: the line types it skips contribute nothing to the fold.
+fn meta_scan(text: &str) -> Option<Vec<Record>> {
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    // Lines that aren't valid JSON are not records at all (`jsonl::parse`
+    // skips them), so the first record is the first line that parses.
+    let first = lines
+        .by_ref()
+        .find_map(|line| serde_json::from_str::<Record>(line).ok())?;
+    match first {
+        Record::Session(header) => Some(
+            std::iter::once(Record::Session(header))
+                .chain(lines.filter_map(meta_line))
+                .collect(),
+        ),
+        // A file whose first record is not a session header is not a pi
+        // session.
+        Record::Message(_) | Record::Custom(_) | Record::Other(_) => None,
+    }
+}
+
+/// Parse one line only if its type can carry session metadata; conversational
+/// lines (the bulk of a session) are never parsed past the type tag.
+fn meta_line(line: &str) -> Option<Record> {
+    let probe: TypeProbe = serde_json::from_str(line).ok()?;
+    match probe.kind.as_deref() {
+        Some("session" | "model_change" | "session_info") => {
+            serde_json::from_str::<Record>(line).ok()
+        }
+        // No other line type carries session metadata.
+        Some(_) | None => None,
+    }
 }
 
 pub(crate) fn write_session(

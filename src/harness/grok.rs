@@ -1244,6 +1244,58 @@ impl GrokStore {
     }
 }
 
+impl GrokStore {
+    /// Discovery metadata for one session directory. When `summary.json`
+    /// alone answers everything [`meta_from_body`] would ask of it, the
+    /// conversation logs are never read; otherwise the fallbacks need them,
+    /// so it comes from a full load. A directory that neither path can read
+    /// as a session discovers nothing.
+    fn discover_meta(&self, dir: &Path) -> Option<Meta> {
+        let summary: Option<Value> = fs::read_to_string(dir.join("summary.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok());
+        if summary.as_ref().is_some_and(summary_answers_meta) {
+            let mut meta = meta_from_body(&GrokSession {
+                chat_history: Vec::new(),
+                updates: Vec::new(),
+                events: Vec::new(),
+                rewind_points: Vec::new(),
+                summary,
+                prompt_context: None,
+                resources_state: None,
+                signals: None,
+                system_prompt: None,
+            });
+            if meta.id.is_empty() {
+                meta.id = jsonl::file_id(dir);
+            }
+            Some(meta)
+        } else {
+            self.load(&dir.to_path_buf()).ok().map(|t| t.meta)
+        }
+    }
+}
+
+/// Whether `summary.json` alone pins every [`meta_from_body`] field that has
+/// a conversation-log fallback: timestamp (`created_at`), cwd (`info/cwd`),
+/// and model (`current_model_id`). The remaining fields never look past the
+/// summary, so a summary passing this check yields the same [`Meta`] as a
+/// full load.
+fn summary_answers_meta(summary: &Value) -> bool {
+    summary
+        .get("created_at")
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.parse::<DateTime<Utc>>().is_ok())
+        && summary
+            .pointer("/info/cwd")
+            .and_then(Value::as_str)
+            .is_some_and(|cwd| !cwd.is_empty())
+        && summary
+            .get("current_model_id")
+            .and_then(Value::as_str)
+            .is_some_and(|model| !model.is_empty())
+}
+
 impl Store for GrokStore {
     type H = Grok;
     type Ref = PathBuf;
@@ -1266,11 +1318,10 @@ impl Store for GrokStore {
                 .filter(|dir| {
                     dir.join("updates.jsonl").is_file() || dir.join("chat_history.jsonl").is_file()
                 })
-                // A directory that doesn't load as a session is skipped.
                 .filter_map(|dir| {
-                    let transcript = self.load(&dir).ok()?;
+                    let meta = self.discover_meta(&dir)?;
                     Some(Discovered {
-                        meta: transcript.meta,
+                        meta,
                         reference: dir,
                     })
                 })

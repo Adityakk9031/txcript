@@ -682,16 +682,29 @@ impl Store for CodexStore {
             Ok(files
                 .into_iter()
                 .filter_map(|path| {
-                    // A rollout that fails to load, or lacks a session_meta
-                    // with an id, is not a resumable session.
-                    let transcript = self.load(&path).ok()?;
-                    let has_meta = transcript.body.iter().any(|l| {
-                        l.kind == "session_meta"
-                            && l.payload.get("id").and_then(Value::as_str).is_some()
-                    });
-                    has_meta.then_some(Discovered {
-                        meta: transcript.meta,
-                        reference: path,
+                    // A rollout that fails to read, or lacks a session_meta
+                    // with an id, is not a resumable session. Only
+                    // session_meta lines are parsed — message payloads are
+                    // skipped whole — and the scan stops at the first one
+                    // when it already carries the id (the usual case).
+                    let text = fs::read_to_string(&path).ok()?;
+                    let mut session_lines = text
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .filter(|line| is_session_meta(line))
+                        .filter_map(|line| serde_json::from_str::<Line>(line).ok());
+                    let has_id = |l: &Line| l.payload.get("id").and_then(Value::as_str).is_some();
+                    let first = session_lines.next()?;
+                    let has_meta = has_id(&first) || session_lines.any(|l| has_id(&l));
+                    has_meta.then(|| {
+                        let mut meta = meta_from_lines(std::slice::from_ref(&first));
+                        if meta.id.is_empty() {
+                            meta.id = jsonl::file_id(&path);
+                        }
+                        Discovered {
+                            meta,
+                            reference: path,
+                        }
                     })
                 })
                 .collect())
@@ -737,6 +750,19 @@ impl Store for CodexStore {
             .map(|p| (p.to_string_lossy().into_owned(), file_fingerprint(p)))
             .collect())
     }
+}
+
+/// The `type` tag alone — the cheapest classification of a line. `kind` is
+/// required, as on [`Line`], so a line the full parse would skip fails the
+/// probe too.
+#[derive(Deserialize)]
+struct KindProbe {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+fn is_session_meta(line: &str) -> bool {
+    serde_json::from_str::<KindProbe>(line).is_ok_and(|p| p.kind == "session_meta")
 }
 
 fn meta_from_lines(lines: &[Line]) -> Meta {

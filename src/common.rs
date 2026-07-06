@@ -218,8 +218,11 @@ impl Tool {
     /// the mapping is always lossless.
     #[must_use]
     pub fn from_canonical(name: &str, input: Value) -> Tool {
+        // Deserializing from `&Value` copies each string once, straight into
+        // the typed struct — no intermediate clone of the whole input tree —
+        // and leaves `input` intact for the `Tool::Raw` fallback.
         fn typed<A: for<'de> Deserialize<'de>>(input: &Value) -> Option<A> {
-            serde_json::from_value(input.clone()).ok()
+            A::deserialize(input).ok()
         }
         match name {
             "Read" => typed::<ReadArgs>(&input)
@@ -294,7 +297,7 @@ impl Tool {
             } => (
                 "Read".into(),
                 value(serde_json::to_value(ReadArgs {
-                    file_path: file_path.clone(),
+                    file_path: file_path.as_str(),
                     offset: *offset,
                     limit: *limit,
                 })),
@@ -302,8 +305,8 @@ impl Tool {
             Tool::Write { file_path, content } => (
                 "Write".into(),
                 value(serde_json::to_value(WriteArgs {
-                    file_path: file_path.clone(),
-                    content: content.clone(),
+                    file_path: file_path.as_str(),
+                    content: content.as_str(),
                 })),
             ),
             Tool::Edit {
@@ -314,17 +317,17 @@ impl Tool {
             } => (
                 "Edit".into(),
                 value(serde_json::to_value(EditArgs {
-                    file_path: file_path.clone(),
-                    old_string: old_string.clone(),
-                    new_string: new_string.clone(),
+                    file_path: file_path.as_str(),
+                    old_string: old_string.as_str(),
+                    new_string: new_string.as_str(),
                     replace_all: *replace_all,
                 })),
             ),
             Tool::MultiEdit { file_path, edits } => (
                 "MultiEdit".into(),
                 value(serde_json::to_value(MultiEditArgs {
-                    file_path: file_path.clone(),
-                    edits: edits.clone(),
+                    file_path: file_path.as_str(),
+                    edits: edits.as_slice(),
                 })),
             ),
             Tool::Bash {
@@ -336,10 +339,10 @@ impl Tool {
             } => (
                 "Bash".into(),
                 value(serde_json::to_value(BashArgs {
-                    command: command.clone(),
-                    workdir: workdir.clone(),
+                    command: command.as_str(),
+                    workdir: workdir.as_deref(),
                     timeout_ms: *timeout_ms,
-                    description: description.clone(),
+                    description: description.as_deref(),
                     run_in_background: *run_in_background,
                 })),
             ),
@@ -351,10 +354,15 @@ impl Tool {
 // Argument structs for the typed tools. `deny_unknown_fields` is what makes
 // `from_canonical` lossless: an input carrying a key we don't model fails to
 // parse and falls back to `Tool::Raw` rather than silently losing the key.
+//
+// Generic over the string type so both directions use one schema:
+// `from_canonical` deserializes the owning default (`S = String`), while
+// `to_canonical` serializes borrows (`S = &str`) instead of cloning fields
+// just to render them.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReadArgs {
-    file_path: String,
+struct ReadArgs<S = String> {
+    file_path: S,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     offset: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -363,38 +371,38 @@ struct ReadArgs {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WriteArgs {
-    file_path: String,
-    content: String,
+struct WriteArgs<S = String> {
+    file_path: S,
+    content: S,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct EditArgs {
-    file_path: String,
-    old_string: String,
-    new_string: String,
+struct EditArgs<S = String> {
+    file_path: S,
+    old_string: S,
+    new_string: S,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     replace_all: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MultiEditArgs {
-    file_path: String,
-    edits: Vec<EditOp>,
+struct MultiEditArgs<S = String, E = Vec<EditOp>> {
+    file_path: S,
+    edits: E,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BashArgs {
-    command: String,
+struct BashArgs<S = String> {
+    command: S,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    workdir: Option<String>,
+    workdir: Option<S>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
+    description: Option<S>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     run_in_background: bool,
 }
