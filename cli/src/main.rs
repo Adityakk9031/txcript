@@ -279,6 +279,15 @@ fn continue_session(
             ),
             None => eprintln!("resuming: {shown}"),
         }
+        // A beat between announcing and exec'ing, and the only clean cancel
+        // window (after the exec, ctrl-c hits the harness): a glance at the
+        // line is ~300ms and choice reaction another ~300ms, while past ~1s
+        // a pause stops reading as deliberate and starts reading as lag —
+        // 600ms catches the flinch without breaking flow. Scripts (stderr
+        // piped) don't pay it.
+        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+        }
         handoff(&bin, &args, workdir.as_deref())
     } else {
         println!("  resume with: {} {}", bin, args.join(" "));
