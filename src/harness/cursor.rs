@@ -200,10 +200,9 @@ impl Store for CursorStore {
         })
     }
 
-    /// The `Ref` is the session's `store.db`; the session is its parent
-    /// directory (`store.db` + `meta.json` + `prompt_history.json`), removed
-    /// whole. Guarded on the file name so a mistaken reference can't take out
-    /// an unrelated directory.
+    /// The `Ref` is the session's `store.db`; deleting removes its parent
+    /// directory. Guarded on the file name to avoid deleting unrelated
+    /// directories.
     fn delete(&self, reference: &PathBuf) -> Result<()> {
         let session_dir = reference
             .parent()
@@ -1822,8 +1821,7 @@ fn dirs_home() -> Option<PathBuf> {
 
 // -- hashes and hex ------------------------------------------------------
 
-// RFC 1321's own variable naming and sine-table construction; renaming or
-// "safe"-casting here would only obscure the spec correspondence.
+// MD5 implementation follows RFC 1321 naming and table generation.
 #[allow(
     clippy::many_single_char_names,
     clippy::cast_possible_truncation,

@@ -5,9 +5,8 @@
 //! cargo run --release --example search_bench -- relay   # also print top hits for a pattern
 //! ```
 //!
-//! Loads every local session from every harness store, builds a hot
-//! [`Index`], then times fuzzy and substring queries — the per-keystroke
-//! cost a TUI would pay.
+//! Loads local sessions, builds an [`Index`], and times fuzzy/substring
+//! queries.
 
 use std::time::Instant;
 
@@ -66,7 +65,7 @@ fn main() {
 
     let build = started.elapsed();
     println!(
-        "indexed {loaded} sessions ({failed} unreadable): {} lines, {} MB of text in {build:.2?} (load+parse+extract)",
+        "indexed {loaded} sessions ({failed} unreadable): {} lines, {} MB in {build:.2?}",
         index.lines(),
         index.chars() / 1_000_000,
     );
@@ -82,7 +81,7 @@ fn main() {
             q
         },
         {
-            // What a picker TUI actually issues per keystroke.
+            // Picker-style per-keystroke query.
             let mut q = Query::fuzzy("relay protocol refactor");
             q.limit = Some(64);
             q

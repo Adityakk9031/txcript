@@ -1,6 +1,4 @@
-//! Shared JSONL parse/render for the line-based harnesses (`claude_code`, codex,
-//! pi, campfire): one JSON record per line. The per-harness `TextCodec` impls
-//! are then just "parse lines, extract meta" / "render lines".
+//! Shared JSONL parse/render for line-based harnesses.
 
 use std::path::Path;
 
@@ -9,8 +7,7 @@ use serde::de::DeserializeOwned;
 
 use crate::error::Result;
 
-/// Parse JSONL text into records, skipping blank and unparseable lines (a
-/// single corrupt line shouldn't sink the whole session).
+/// Parse JSONL records, skipping blank and invalid lines.
 pub(crate) fn parse<R: DeserializeOwned>(text: &str) -> Vec<R> {
     text.lines()
         .filter(|line| !line.trim().is_empty())

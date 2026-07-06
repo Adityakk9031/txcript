@@ -1,11 +1,7 @@
 # txcript
 
-**txcript lets you swap the agent you're using in the middle of a session.**
-
-It converts session transcripts between Claude Code, Codex, OpenCode, pi,
-Campfire, Cursor, and Grok CLI. Your messages, the agent's reasoning, tool calls, and
-images all come across, so the new agent picks up the conversation where the
-old one left off.
+Convert coding-agent session transcripts between Claude Code, Codex, OpenCode,
+pi, Campfire, Cursor, and Grok CLI.
 
 <p align="center">
   <a href="https://claude.com/claude-code"><img src="https://github.com/anthropics.png?size=160" alt="Claude Code" height="48" width="48"></a>
@@ -19,11 +15,10 @@ old one left off.
   <a href="https://cursor.com"><img src="https://github.com/cursor.png?size=160" alt="Cursor" height="48" width="48"></a>
 </p>
 
-Each harness has its own native transcript shape. This crate maps those shapes
-through a typed common model, then re-emits them for another harness. Native
-load/save stays byte-lossless; cross-harness transformation preserves the
-semantic conversation: messages, reasoning, tool calls, tool results, images,
-metadata, and usage where available.
+txcript maps each native transcript format through a typed common model. Native
+load/save is byte-lossless; cross-harness conversion preserves messages,
+reasoning, tool calls, tool results, images, metadata, and usage where
+available.
 
 Supported harnesses (string ids in parentheses, used by the CLI and WASM):
 
@@ -35,8 +30,8 @@ Supported harnesses (string ids in parentheses, used by the CLI and WASM):
 - Cursor (`cursor`)
 - Grok CLI (`grok`)
 
-It ships three ways: a **Rust library**, a **CLI**, and a **WASM module** for
-Bun / Node / the browser.
+Available as a **Rust library**, **CLI**, and **WASM module** for Bun, Node, and
+browsers.
 
 ## Use as a library
 
@@ -87,9 +82,8 @@ The canonical model is `Transcript<Common>` — `Meta` + `Vec<Message>`, where a
 
 ### Search (feature `search`, on by default)
 
-`txcript::search` does fuzzy and substring search over transcripts, built on
-[nucleo](https://github.com/helix-editor/nucleo) (helix's matcher). One-shot,
-for find-in-transcript:
+`txcript::search` supports fuzzy and substring search over transcripts via
+[nucleo](https://github.com/helix-editor/nucleo). One-shot search:
 
 ```rust
 use txcript::search::{Query, search};
@@ -101,8 +95,7 @@ for hit in hits {
 }
 ```
 
-Hot, for a picker that queries per keystroke — insert once, query cheaply and
-repeatedly (`Index` is `Send + Sync`, scoring shards across cores natively):
+For picker-style search, build an `Index` once and query it per keystroke:
 
 ```rust
 use txcript::search::{DocKey, Index, Query};
@@ -112,12 +105,9 @@ index.insert(DocKey { harness, id }, &common);   // re-insert replaces; caller o
 let matches = index.query(&Query::fuzzy("srch")); // ranked docs, best lines as hits
 ```
 
-An empty pattern lists all documents newest-first (the pre-keystroke picker
-state). Tool outputs are excluded from the default search scope (`Origin::ALL`
-opts in); `Query.harnesses` scopes to specific harnesses; `Query.limit` caps
-returned documents and `Query.hits_per_doc` (default 8) caps materialized
-lines per document. Indexing ~600 real sessions (~90 MB of text) takes ~1.5 s;
-queries run 3–40 ms.
+An empty pattern returns documents newest-first. Tool outputs are excluded by
+default; use `Origin::ALL` to include them. `Query.harnesses`, `Query.limit`,
+and `Query.hits_per_doc` narrow results.
 
 ## Use as a CLI
 

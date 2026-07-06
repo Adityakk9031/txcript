@@ -148,12 +148,10 @@ pub trait TextCodec: Harness + Sized {
     fn to_text(transcript: &Transcript<Self>) -> Result<String>;
 }
 
-/// Procuring and persisting native transcripts against a real backend (a
-/// session directory, a `SQLite` database, an `import` subprocess).
+/// Reading and writing native transcripts against a real backend (a session
+/// directory, a `SQLite` database, an `import` subprocess).
 ///
-/// Kept separate from [`Codec`] because the mechanism is wildly asymmetric per
-/// harness — JSONL files vs. reading `SQLite` but writing through an external
-/// importer — while the semantic mapping in [`Codec`] is uniform.
+/// Separate from [`Codec`] because storage mechanisms vary by harness.
 pub trait Store {
     /// The harness this store reads and writes.
     type H: Harness;

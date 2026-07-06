@@ -1,6 +1,5 @@
-//! A small CLI over the `txcript` crate — the offline half of replay's
-//! `continue --local`: discover the AI coding sessions already on this machine
-//! and continue one in any harness, writing its native, resumable format.
+//! CLI over the `txcript` crate: list, search, and continue local AI coding
+//! sessions across supported harnesses.
 //!
 //! ```text
 //! txcript list                          # all local sessions, every harness
@@ -16,14 +15,12 @@
 //!     [--with <harness>]                    #   continue the pick in <harness>
 //! ```
 //!
-//! By default `continue` hands the terminal to the harness (on Unix it `exec`s,
-//! replacing this process), launched from the session's own working directory
-//! when it still exists — the world the transcript assumes. The resume command
-//! is overridable per harness via `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}`
-//! template).
+//! By default `continue` launches the harness from the recorded working
+//! directory when it still exists. Resume commands are overridable per harness
+//! via `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template).
 //!
-//! All the actual work lives in [`txcript::local`] and [`txcript::search`];
-//! this crate is argument parsing (clap) and terminal presentation.
+//! Session discovery/conversion lives in [`txcript::local`]; ranking lives in
+//! [`txcript::search`].
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -243,10 +240,7 @@ fn continue_session(
     let target = with.unwrap_or(found.harness);
 
     let resume_id = if target == found.harness && out.is_none() {
-        // Fast path: same harness, live root — the session is already on disk.
-        // Don't re-synthesize over it (that would round-trip through Common and
-        // could shed detail); resume the original in place. The resume line
-        // is the whole story, so nothing is announced here.
+        // Same-harness live sessions can resume by id without rewriting.
         found.meta.id.clone()
     } else {
         let common = found.read().map_err(|e| e.to_string())?;
@@ -279,12 +273,7 @@ fn continue_session(
             ),
             None => eprintln!("resuming: {shown}"),
         }
-        // A beat between announcing and exec'ing, and the only clean cancel
-        // window (after the exec, ctrl-c hits the harness): a glance at the
-        // line is ~300ms and choice reaction another ~300ms, while past ~1s
-        // a pause stops reading as deliberate and starts reading as lag —
-        // 600ms catches the flinch without breaking flow. Scripts (stderr
-        // piped) don't pay it.
+        // Brief pause so users can read or cancel before exec.
         if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
             std::thread::sleep(std::time::Duration::from_millis(600));
         }
@@ -295,17 +284,17 @@ fn continue_session(
     }
 }
 
-/// The directory to resume in: the session's own cwd — the world its
-/// transcript assumes (CLAUDE.md, the git repo, every relative path) —
-/// or the current directory, with a warning, when the recorded one no
-/// longer exists.
+/// Return the recorded cwd if it exists; otherwise warn and use the current
+/// directory.
 fn resume_workdir(cwd: Option<&str>) -> Option<PathBuf> {
     cwd.filter(|c| !c.is_empty()).and_then(|c| {
         let dir = PathBuf::from(c);
         if dir.is_dir() {
             Some(dir)
         } else {
-            eprintln!("warning: session cwd `{c}` no longer exists; resuming from the current directory");
+            eprintln!(
+                "warning: session cwd `{c}` no longer exists; resuming from the current directory"
+            );
             None
         }
     })
@@ -316,17 +305,18 @@ fn discover_with_spinner() -> Vec<local::Session> {
     let sessions = local::discover_with(|harness, count| {
         spinner.set(format!("scanning {harness}… ({count} found)"));
     });
-    // No summary: whatever the caller does next (the table, the index count,
-    // the resume line) already says what was found.
     spinner.finish();
     sessions
 }
 
-/// Replace this process with the harness so it owns the terminal (a true
-/// handoff), from `workdir` when given. On non-Unix, spawn-and-wait, then
-/// report the child's code.
+/// Replace this process with the harness from `workdir` when given. On
+/// non-Unix, spawn and wait, then report the child's code.
 #[cfg(unix)]
-fn handoff(bin: &str, args: &[String], workdir: Option<&std::path::Path>) -> Result<ExitCode, String> {
+fn handoff(
+    bin: &str,
+    args: &[String],
+    workdir: Option<&std::path::Path>,
+) -> Result<ExitCode, String> {
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(bin);
     cmd.args(args);
@@ -339,7 +329,11 @@ fn handoff(bin: &str, args: &[String], workdir: Option<&std::path::Path>) -> Res
 }
 
 #[cfg(not(unix))]
-fn handoff(bin: &str, args: &[String], workdir: Option<&std::path::Path>) -> Result<ExitCode, String> {
+fn handoff(
+    bin: &str,
+    args: &[String],
+    workdir: Option<&std::path::Path>,
+) -> Result<ExitCode, String> {
     let mut cmd = std::process::Command::new(bin);
     cmd.args(args);
     if let Some(dir) = workdir {
@@ -420,8 +414,7 @@ mod spin {
             }
         }
 
-        /// Stop the animation and clear the line, leaving nothing behind:
-        /// the spinner narrates progress, never results.
+        /// Stop the spinner and clear its line.
         pub fn finish(self) {
             self.running.store(false, Ordering::Relaxed);
             if let Some(h) = self.handle {
@@ -455,7 +448,7 @@ mod query {
         match pattern {
             Some(pattern) => {
                 if with.is_some() {
-                    eprintln!("note: --with only affects the interactive picker; ignored here");
+                    eprintln!("warning: --with ignored with a pattern");
                 }
                 one_shot(&index, &pattern);
                 Ok(std::process::ExitCode::SUCCESS)
@@ -466,7 +459,7 @@ mod query {
                 Some(key) => {
                     let session = sessions
                         .get(&(key.harness, key.id.clone()))
-                        .ok_or("picked session vanished from the map")?;
+                        .ok_or("internal error: picked session not found")?;
                     drop(index);
                     super::continue_session(session, with, None, true)
                 }
@@ -474,8 +467,7 @@ mod query {
         }
     }
 
-    /// Load every local session (scoped to `--from` if given) into a hot
-    /// index, keyed back to its `Session` for the continue step.
+    /// Build the search index and session lookup.
     fn build_index(from: Option<HarnessId>) -> (Index, Sessions) {
         let found = super::discover_with_spinner();
         let spinner = super::spin::Spinner::start("indexing…");
@@ -502,8 +494,6 @@ mod query {
                 sessions.insert((session.harness, session.meta.id.clone()), session);
             }
         }
-        // No summary: the picker's own counter shows the total, and one-shot
-        // output follows immediately.
         spinner.finish();
         (index, sessions)
     }
@@ -532,8 +522,7 @@ mod query {
         }
     }
 
-    /// What kind of content a hit came from, spelled out — matches the
-    /// [`Origin`] names one to one, wide enough to never abbreviate.
+    /// Label used in query result columns.
     pub(super) fn origin_label(origin: Origin) -> &'static str {
         match origin {
             Origin::User => "user",
@@ -604,8 +593,7 @@ mod query {
 
         use txcript::search::{DocKey, Index, Query};
 
-        /// Raw-mode + alternate-screen guard: constructing enters, dropping
-        /// restores — including on error paths and cancels.
+        /// RAII guard for raw mode and the alternate screen.
         struct Term {
             saved: String,
         }
@@ -691,8 +679,7 @@ mod query {
                     selected = selected.min(matches.len().saturating_sub(1));
                     render(&input, &matches, selected, index.len(), rows, cols);
 
-                    // Poll until a key changes state (break: re-render) or
-                    // settles the pick (break 'ui).
+                    // Poll until input changes state or selects/cancels.
                     loop {
                         match read_key(&mut stdin)? {
                             // A poll timeout: nothing pressed, keep waiting.
@@ -765,7 +752,8 @@ mod query {
                     // kill the selection underline mid-line: re-assert it
                     // after each, and pad to the row edge so the underline
                     // runs the full width.
-                    let pad = " ".repeat(cols.saturating_sub(2).saturating_sub(visible_width(&line)));
+                    let pad =
+                        " ".repeat(cols.saturating_sub(2).saturating_sub(visible_width(&line)));
                     let line = line.replace("\x1b[0m", "\x1b[0m\x1b[4m");
                     let _ = write!(frame, "\r\n\x1b[4m▌{line}{pad}\x1b[0m");
                 } else {
@@ -838,8 +826,7 @@ mod query {
 
         /// Read one key, decoding UTF-8 and the arrow escape sequences. With
         /// `min 0 time 1`, a read can legitimately return nothing.
-        // The two `Key::None` arms are deliberately separate: a poll timeout
-        // and an unmapped byte are different conditions, kept explicit.
+        // Separate arms distinguish timeout from ignored input.
         #[allow(clippy::match_same_arms)]
         fn read_key(stdin: &mut impl Read) -> Result<Key, String> {
             let key = match read_byte(stdin)? {

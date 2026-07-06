@@ -84,7 +84,7 @@ pub fn search_transcript(input: &str, from: &str, query_json: &str) -> Result<St
     serde_json::to_string(&crate::search::search(&common, &query)).map_err(js)
 }
 
-/// The hot index: insert sessions once, query per keystroke.
+/// In-memory index: insert sessions once, query per keystroke.
 ///
 /// ```js
 /// const s = new Searcher();

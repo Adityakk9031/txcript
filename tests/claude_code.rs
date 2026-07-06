@@ -1,11 +1,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-//! Integration tests for the Claude Code harness.
-//!
-//! These check the two fidelity guarantees from the crate docs — native ↔ disk
-//! is byte-faithful (Store round-trip), and native → Common → native is
-//! semantically lossless (Codec fixpoint) — plus that `to_common` actually
-//! extracts the right conversation.
+//! Covers Store round-trip fidelity, Common codec fixpoints, and conversation
+//! extraction.
 
 use chrono::{DateTime, Utc};
 use serde_json::json;

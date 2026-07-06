@@ -20,10 +20,9 @@
 //! Grok regenerates what it needs.
 //!
 //! `to_common` reads the conversation from `chat_history.jsonl` and backfills
-//! what that log lacks from `updates.jsonl`: per-message timestamps (chat
-//! records carry none), tool-result error status, and per-turn stop reasons
-//! (`turn_completed`). `from_common` regenerates BOTH logs plus
-//! `summary.json` — the codex dual-log lesson applies verbatim.
+//! what that log lacks from `updates.jsonl`: per-message timestamps, tool-result
+//! error status, and per-turn stop reasons. `from_common` regenerates
+//! `chat_history.jsonl`, `updates.jsonl`, and `summary.json`.
 //!
 //! User images follow Grok's own split: the display log carries the bytes
 //! (an ACP `{"type": "image", data, mimeType}` chunk of the prompt), while
@@ -31,17 +30,9 @@
 //! which we cannot synthesize — an image-only prompt gets an `[image]`
 //! placeholder there).
 //!
-//! Known representational losses in `from_common` (Common detail with no
-//! native slot): per-turn token usage (Grok only records aggregate totals in
-//! `signals.json`), thinking-block `signature` (Anthropic-style; Grok's
-//! reasoning records carry `encrypted_content` instead, which *is* preserved),
-//! `StopReason` on assistant messages that don't end a turn (Grok records
-//! one stop reason per prompt turn), and structured `ToolOutput::Json`
-//! results (Grok's `tool_result.content` is a plain string — anything else
-//! fails its session load — so block arrays flatten to their text and other
-//! JSON is stringified). Reasoning record ids and the system prompt record
-//! are Grok-internal and are not synthesized; Grok rebuilds its system
-//! prompt on resume.
+//! `from_common` cannot preserve per-turn usage, non-turn stop reasons,
+//! reasoning signatures, structured tool-result JSON, reasoning record ids, or
+//! system prompt records.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;

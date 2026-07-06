@@ -286,12 +286,8 @@ fn ranking_prefers_the_better_match() {
     assert!(matches[0].score > matches[1].score);
 }
 
-/// fzf's word-boundary bonuses let a gapped alignment across word starts
-/// ("**con**struct … **sequence**") rival a contiguous occurrence, which
-/// misorders prose. A line containing the pattern literally must outrank
-/// every gapped alignment — whatever nucleo's raw scores say, and despite
-/// the gapped doc being newer — and its highlight must cover the literal
-/// occurrence as one contiguous span.
+/// Literal substring occurrences outrank gapped fuzzy alignments and highlight
+/// as one contiguous span.
 #[test]
 fn exact_occurrence_outranks_gappy_fuzzy() {
     let gappy = Transcript::new(

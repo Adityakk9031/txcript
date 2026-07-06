@@ -94,11 +94,7 @@ pub struct ApiMessage {
     pub extra: Map<String, Value>,
 }
 
-// Lossless typed <-> Value: classify on the `type` tag, route to a typed line,
-// fall back to `Other(Value)` for anything unrecognized or malformed.
-// Deserializing from `&v` copies each field once, straight into the typed
-// line — no intermediate clone of the whole Value — and leaves `v` intact
-// for the fallback.
+// Classify by type; malformed known records fall back to Other.
 impl From<Value> for Record {
     fn from(v: Value) -> Self {
         match v.get("type").and_then(Value::as_str) {

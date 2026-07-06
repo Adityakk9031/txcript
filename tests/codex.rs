@@ -1,9 +1,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-//! Integration tests for the Codex harness — on-disk Store fidelity, the full
-//! stateful `to_common` aggregation (shell + `apply_patch` normalization,
-//! web-search pairing, usage/model backfill, fallback-result dedup), and the
-//! codec fixpoint through Common.
+//! Integration tests for Codex Store fidelity, `to_common` aggregation, and
+//! Common codec fixpoints.
 
 use chrono::{DateTime, Utc};
 use txcript::common;
@@ -14,11 +12,8 @@ fn ts(s: &str) -> DateTime<Utc> {
     s.parse().unwrap()
 }
 
-/// The provider's canonical exercise: a turn with an image, reasoning, a shell
-/// call + its event-log result, a duplicate `function_call_output` (must be
-/// deduped against the canonical exec result), an `apply_patch` edit, a custom
-/// tool result, a web-search call/result pair, a final assistant message, and
-/// the `token_count/task_complete` that backfill usage and model.
+/// Fixture covering image input, reasoning, shell, `apply_patch`, web search,
+/// assistant text, usage, and model backfill.
 fn exercise_rollout() -> String {
     [
         r#"{"timestamp":"2026-04-01T00:00:00Z","type":"turn_context","payload":{"turn_id":"turn-1","model":"gpt-5.2-codex"}}"#,

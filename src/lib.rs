@@ -1,23 +1,14 @@
-//! A typed intermediate representation for AI coding-agent session transcripts.
+//! Typed conversion for coding-agent session transcripts.
 //!
-//! Claude Code, Codex, `OpenCode`, and pi all record the same thing — a sequence
-//! of user/assistant turns carrying text, reasoning, tool calls, tool results,
-//! and images — in mutually incompatible on-disk formats. This crate models
-//! that shared shape once, as [`Transcript<Common>`], and gives each harness a
-//! [`Codec`] to and from it. Converting a session from one harness to another
-//! is then [`convert::<A, B>`](convert): `A` → [`Common`] → `B`.
+//! Claude Code, Codex, `OpenCode`, pi, Campfire, Cursor, and Grok record
+//! similar conversation data in different on-disk formats. This crate maps
+//! each format through [`Transcript<Common>`] and converts with
+//! [`convert::<A, B>`](convert): `A` -> [`Common`] -> `B`.
 //!
-//! # The two-layer fidelity contract
+//! # Fidelity
 //!
-//! - **Native ↔ disk is byte-lossless.** Each harness keeps a faithful typed
-//!   representation of its records ([`Harness::Body`]); a [`Store`] round-trips
-//!   it to disk without loss. This is what a same-harness resume uses.
-//! - **Through [`Common`] is semantically lossless.** [`Codec::to_common`] may
-//!   canonicalize representation so a thread is functional in another harness,
-//!   but it never discards detail: anything a same-harness round-trip needs is
-//!   preserved in [`Common`]'s typed fields. It is not byte-exact, by design —
-//!   canonicalization and byte-faithfulness pull in opposite directions, and
-//!   byte-faithfulness already lives at the native ↔ disk layer.
+//! Stores preserve native disk shape. [`Common`] preserves resumable
+//! conversation semantics, not byte identity.
 //!
 //! # Shape
 //!

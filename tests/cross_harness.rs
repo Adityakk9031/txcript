@@ -1,14 +1,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-//! The whole point of the crate: a transcript converts between harnesses
-//! through the Common hub without losing the conversation. This chains one
-//! transcript Claude -> Codex -> `OpenCode` -> pi -> Campfire and checks that the
-//! semantic content (roles, text, the typed Edit tool and its result) is
-//! identical at every hop.
-//!
-//! Message *grouping* and harness-specific attribution (model, `stop_reason`,
-//! usage, timestamps) legitimately differ across harnesses; the block-level
-//! conversation does not. The signature below captures exactly that invariant.
+//! Cross-harness conversion preserves block-level conversation content while
+//! allowing harness-specific grouping and metadata differences.
 
 use chrono::{DateTime, Utc};
 use txcript::common;

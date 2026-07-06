@@ -9,11 +9,9 @@
 //! are normalized to canonical (`exec_command`/`shell` → Bash, `apply_patch` →
 //! Edit/Write/ApplyPatch).
 //!
-//! `from_common` writes BOTH logs — emit only `response_item` and the TUI
-//! resumes to an empty conversation. It also emits `turn_context` +
-//! `token_count` + `task_complete` so model and usage survive a round trip
-//! (the CLI's resume path skips these to avoid touching codex's turn
-//! bookkeeping; the library favors fidelity).
+//! `from_common` emits both `response_item` and `event_msg` logs so Codex can
+//! resume and replay the session. It also emits `turn_context`, `token_count`,
+//! and `task_complete` records for model and usage metadata.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -906,9 +904,7 @@ fn command_value_to_display(value: &Value) -> Option<String> {
     }
 }
 
-// A single-pass parser of the apply_patch envelope format; the state types
-// below are its private grammar and the length is the grammar's, not the
-// function's.
+// Parser for the apply_patch envelope grammar.
 #[allow(clippy::too_many_lines)]
 fn normalize_apply_patch_input(input: Value) -> (String, Value) {
     enum Op {

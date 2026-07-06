@@ -36,9 +36,8 @@ impl Harness for Pi {
 
 // ── native records ─────────────────────────────────────────────────────
 
-/// One JSONL line. The `message` payload is kept as raw JSON — pi's message
-/// union (user/assistant/toolResult/bashExecution) is messy enough that a
-/// faithful `Value` is the lossless choice; the codec is what types it.
+/// One JSONL line. The message union is preserved as raw JSON and typed by the
+/// codec.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Record {
     Session(SessionHeader),

@@ -1,17 +1,16 @@
 //! Fuzzy and substring search over transcripts (feature `search`).
 //!
-//! Two entry points, one behavior:
+//! Two entry points:
 //!
 //! - [`search`] — one-shot: scan a single [`Transcript<Common>`] and return
 //!   the matching lines. No state; use it for find-in-transcript or a
 //!   load-search-drop CLI pass.
-//! - [`Index`] — hot: feed transcripts in once with [`Index::insert`], then
-//!   run [`Index::query`] per keystroke. Text is extracted and pre-converted
-//!   to UTF-32 at insert, so a query is a pure scan — no parsing, no
-//!   transcoding, no per-line allocation.
+//! - [`Index`] — feed transcripts in once with [`Index::insert`], then run
+//!   [`Index::query`] per keystroke. Text is extracted and pre-converted to
+//!   UTF-32 at insert, so queries scan without parsing or transcoding.
 //!
-//! Both share [`Query`] and [`Hit`], and one-shot search is literally the hot
-//! path run over a single unnamed document, so the two can never disagree.
+//! Both share [`Query`] and [`Hit`]; one-shot search uses the same query path
+//! over one temporary document.
 //!
 //! Matching is [nucleo](https://github.com/helix-editor/nucleo) — helix's
 //! matcher. [`Mode::Fuzzy`] accepts the full fzf-style pattern language
@@ -20,10 +19,8 @@
 //! and Latin diacritic folding are handled by the matcher; nothing is folded
 //! ahead of time.
 //!
-//! Ranking is two-tier: a line containing the pattern literally (under the
-//! query's case rule) always outranks every gapped fuzzy alignment, and
-//! nucleo's scoring orders lines within each tier — see [`Compiled`] for why
-//! raw fzf scoring alone misorders prose.
+//! Ranking adds a literal-occurrence tier above gapped fuzzy matches; nucleo
+//! scoring orders lines within each tier.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -184,10 +181,9 @@ impl Query {
                 };
                 Compiled::Fuzzy {
                     pattern: Pattern::parse(&self.pattern, case, Normalization::Smart),
-                    // The whole pattern as one literal needle, for the
-                    // exact-occurrence tier. Atom syntax (`'`, `^`, `!`) in
-                    // the pattern simply never occurs literally, so the
-                    // bonus just doesn't fire for it.
+                    // Whole-pattern literal needle for the exact-occurrence
+                    // tier. Atom syntax (`'`, `^`, `!`) will not match
+                    // literally, so the bonus is not applied.
                     exact: Needle::new(self.pattern.trim(), self.case),
                 }
             }
@@ -268,7 +264,7 @@ pub fn search(transcript: &Transcript<Common>, query: &Query) -> Vec<Hit> {
     }
 }
 
-// ── hot index ──────────────────────────────────────────────────────────
+// ── index ──────────────────────────────────────────────────────────────
 
 /// An in-memory search index over many transcripts.
 ///
@@ -604,14 +600,8 @@ fn pattern_is_empty(_: &Compiled, query: &Query) -> bool {
 
 /// A compiled [`Query`] pattern.
 ///
-/// Fuzzy goes through nucleo's `Pattern` (full fzf syntax), with one
-/// domain correction: nucleo scores with fzf's word-boundary bonuses, tuned
-/// for file paths, where a gapped alignment landing on word starts
-/// (`con…sequence` across "construct … sequence") rivals a contiguous
-/// occurrence of the needle — in prose that reads as random ordering. So a
-/// line containing the pattern *literally* (under the query's case rule)
-/// gets [`EXACT_BONUS`], which no fuzzy alignment can reach: exact lines
-/// always outrank gapped ones, and nucleo's scoring orders within each tier.
+/// Fuzzy scoring adds an exact-occurrence bonus so literal matches outrank
+/// gapped matches.
 ///
 /// Substring is our own scan: nucleo 0.3.1's case-insensitive substring
 /// matcher misses matches near the end of a line when the needle's first
@@ -624,10 +614,8 @@ enum Compiled {
     Substring(Needle),
 }
 
-/// Added to a line's fuzzy score when the whole pattern occurs in it
-/// literally. Far above any per-character bonus sum a real query can earn,
-/// so the tiers never interleave; the fuzzy match stays the gate (a `!not`
-/// atom can still reject a line that happens to contain the pattern text).
+/// Added to a fuzzy score when the whole pattern occurs literally. High enough
+/// to keep exact and gapped tiers separate while preserving fuzzy filtering.
 const EXACT_BONUS: u32 = 1 << 16;
 
 impl Compiled {
@@ -864,8 +852,7 @@ fn extract(meta: &Meta, messages: &[Message]) -> Vec<Line> {
     lines
 }
 
-/// The searchable strings of a tool invocation — the command you remember
-/// running, the path you remember touching.
+/// Searchable strings from a tool invocation.
 fn extract_tool(tool: &Tool, mut push: impl FnMut(&str)) {
     match tool {
         Tool::Read { file_path, .. } => push(file_path),

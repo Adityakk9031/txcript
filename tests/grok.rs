@@ -1,9 +1,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
-//! Grok CLI harness: session-directory store round trip, metadata discovery,
-//! faithful extraction through Common, the fixpoint contract, and the quirks
-//! the format forces (display-log backfill, `<user_query>` scaffolding,
-//! JSON-in-a-string tool arguments).
+//! Grok CLI harness tests: Store round trip, metadata discovery, Common
+//! extraction, codec fixpoints, and format-specific behavior.
 
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
@@ -484,7 +482,7 @@ fn from_common_regenerates_both_logs_and_summary() {
         "user prompts are re-wrapped for Grok: {text}"
     );
 
-    // The display log: without it `grok --resume` shows nothing.
+    // Display log required for resume UI.
     let kinds: Vec<&str> = native
         .body
         .updates

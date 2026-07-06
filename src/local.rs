@@ -1,5 +1,4 @@
-//! The sessions on *this* machine, across every harness — the dispatch layer
-//! a CLI, TUI, or daemon builds on instead of matching over stores itself.
+//! Local sessions across every harness.
 //!
 //! The seven operations, in terms of this module:
 //!
@@ -13,10 +12,8 @@
 //! | continue  | [`Session::read`] + [`write`] + [`resume_command`] |
 //! | delete    | [`Session::delete`] |
 //!
-//! Everything here uses each harness's default on-disk location
-//! (`~/.claude`, `~/.codex`, …). For custom roots, use the per-harness
-//! `Store`s directly — this module is deliberately the easy path, not the
-//! configurable one.
+//! Everything here uses each harness's default on-disk location. For custom
+//! roots, use the per-harness `Store`s directly.
 
 use std::path::{Path, PathBuf};
 
@@ -40,9 +37,8 @@ enum Locator {
     Id(String),
 }
 
-/// Every local session, every harness, newest first. Unreadable stores and
-/// sessions are skipped, not fatal — listing what exists must not die on one
-/// corrupt file.
+/// Every local session, newest first. Unreadable stores and sessions are
+/// skipped.
 #[must_use]
 pub fn discover() -> Vec<Session> {
     discover_with(|_, _| {})
@@ -319,7 +315,7 @@ pub fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
             .map(String::from)
             .collect::<Vec<_>>()
             .into_iter();
-        // A template with no words names no binary; ignore the override.
+        // Ignore empty override templates.
         parts.next().map(|bin| (bin, parts.collect()))
     });
     overridden.unwrap_or_else(|| {
