@@ -121,8 +121,12 @@ queries run 3–40 ms.
 
 ## Use as a CLI
 
+The binary lives in its own workspace crate (`cli/`, package `txcript-cli`)
+so its dependencies (clap) never touch library consumers:
+
 ```sh
-cargo install txcript        # installs the `txcript` binary
+cargo install --git https://github.com/skillsynchq/txcript txcript-cli   # installs `txcript`
+# or from a checkout: cargo install --path cli
 ```
 
 It discovers local sessions and continues one in any harness — the offline half

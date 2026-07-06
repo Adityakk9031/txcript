@@ -22,9 +22,10 @@ jobs:
       - name: Tag matches Cargo.toml version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          ver="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          ver="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "txcript") | .version')"
           echo "tag=$tag manifest=$ver"
           [ "$tag" = "$ver" ] || { echo "::error::tag $tag != Cargo.toml version $ver"; exit 1; }
-      - run: cargo publish --locked
+      # Only the library goes to crates.io; the cli crate is publish = false.
+      - run: cargo publish --locked -p txcript
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

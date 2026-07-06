@@ -1,0 +1,22 @@
+[package]
+name = "txcript-cli"
+version = "0.2.0"
+edition = "2024"
+description = "CLI for txcript: list, search, and continue AI coding-agent sessions across harnesses."
+license = "Apache-2.0"
+repository = "https://github.com/skillsynchq/txcript"
+# Not published: crates.io ships only the txcript library. Install the CLI
+# from git (`cargo install --git … txcript-cli`) or a local checkout.
+publish = false
+
+# The binary keeps the crate-family name.
+[[bin]]
+name = "txcript"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "wrap_help"] }
+txcript = { version = "0.2.0", path = "..", features = ["opencode", "search"] }
+
+[lints]
+workspace = true

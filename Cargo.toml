@@ -1,3 +1,15 @@
+# Workspace: the txcript lib (this package, at the root) plus the CLI in
+# cli/. Bin-only dependencies (clap) live in the cli crate so lib consumers
+# never compile them.
+[workspace]
+members = ["cli"]
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
 [package]
 name = "txcript"
 version = "0.2.0"
@@ -23,15 +35,12 @@ wasm-bindgen = { version = "0.2.126", optional = true }
 [dev-dependencies]
 tempfile = "3.27.0"
 
-# cdylib for the WASM/C-ABI output; rlib so the bin and tests still link it.
-# Library name follows the package: `use txcript::…`, WASM artifact `txcript.wasm`.
+# cdylib for the WASM/C-ABI output; rlib so the cli crate and tests still
+# link it. Library name follows the package: `use txcript::…`, WASM artifact
+# `txcript.wasm`.
 [lib]
 name = "txcript"
 crate-type = ["cdylib", "rlib"]
-
-[[bin]]
-name = "txcript"
-path = "src/bin/cli.rs"
 
 [features]
 default = ["opencode", "search"]
@@ -47,8 +56,5 @@ search = ["dep:nucleo-matcher", "dep:memchr"]
 # (native SQLite) is excluded.
 wasm = ["dep:wasm-bindgen", "uuid/js"]
 
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
+[lints]
+workspace = true

@@ -19,59 +19,101 @@
 //! replacing this process). The resume command is overridable per harness via
 //! `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template).
 //!
-//! `<harness>` is one of: `claude_code`, codex, opencode, pi, campfire, cursor,
-//! grok.
-//!
-//! All the actual work lives in [`txcript::local`]; this file is argument
-//! parsing and terminal presentation.
+//! All the actual work lives in [`txcript::local`] and [`txcript::search`];
+//! this crate is argument parsing (clap) and terminal presentation.
 
 use std::path::PathBuf;
 
+use clap::{Parser, Subcommand};
 use txcript::{HarnessId, local};
 
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    }
+const HARNESSES: &str = "harnesses: claude_code, codex, opencode, pi, campfire, cursor, grok";
+
+#[derive(Parser)]
+#[command(
+    name = "txcript",
+    version,
+    about = "List, search, and continue local AI coding sessions in any harness",
+    after_help = HARNESSES
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
 }
 
-fn run() -> Result<(), String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("list") => {
+#[derive(Subcommand)]
+enum Command {
+    /// List local sessions across every harness, newest first
+    List,
+    /// Continue a session, then launch its harness
+    ///
+    /// Same-harness continues resume the original in place; --with
+    /// re-synthesizes into another harness's native, resumable format first.
+    #[command(after_help = HARNESSES)]
+    Continue {
+        /// Session id, or its exact title
+        id: String,
+        /// Continue in this harness instead of the session's own
+        #[arg(long, value_name = "HARNESS", value_parser = harness)]
+        with: Option<HarnessId>,
+        /// Only look for the session in this harness
+        #[arg(long, value_name = "HARNESS", value_parser = harness)]
+        from: Option<HarnessId>,
+        /// Write under this directory instead of the harness's live root
+        /// (implies --no-resume: the harness wouldn't see the copy)
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// Write the session but don't launch the harness
+        #[arg(long)]
+        no_resume: bool,
+    },
+    /// Search session content; without a pattern, open an fzf-style picker
+    ///
+    /// A pattern prints ranked hits, labeled by what matched (user text,
+    /// assistant text, thinking, tool use, session metadata). The picker
+    /// filters per keystroke; Enter continues the selection, Esc cancels.
+    #[command(after_help = HARNESSES)]
+    Query {
+        /// fzf-style pattern ('exact, ^prefix, suffix$, !not); omit to pick
+        /// interactively
+        pattern: Option<String>,
+        /// Continue the picked session in this harness
+        #[arg(long, value_name = "HARNESS", value_parser = harness)]
+        with: Option<HarnessId>,
+        /// Search only this harness
+        #[arg(long, value_name = "HARNESS", value_parser = harness)]
+        from: Option<HarnessId>,
+    },
+}
+
+fn harness(s: &str) -> Result<HarnessId, txcript::Error> {
+    s.parse()
+}
+
+fn main() {
+    let cli = Cli::parse();
+    let result = match cli.command {
+        Command::List => {
             cmd_list();
             Ok(())
         }
-        Some("continue") => cmd_continue(&args[1..]),
-        #[cfg(feature = "search")]
-        Some("query") => query::cmd_query(&args[1..]),
-        #[cfg(not(feature = "search"))]
-        Some("query") => Err("query needs the `search` feature compiled in".to_string()),
-        Some("-h" | "--help" | "help") | None => {
-            usage();
-            Ok(())
-        }
-        Some(other) => {
-            usage();
-            Err(format!("unknown command `{other}`"))
-        }
+        Command::Continue {
+            id,
+            with,
+            from,
+            out,
+            no_resume,
+        } => cmd_continue(&id, with, from, out.as_ref(), no_resume),
+        Command::Query {
+            pattern,
+            with,
+            from,
+        } => query::cmd_query(pattern, with, from),
+    };
+    if let Err(e) = result {
+        eprintln!("error: {e}");
+        std::process::exit(1);
     }
-}
-
-fn usage() {
-    eprintln!(
-        "txcript — continue local AI coding sessions in any harness\n\n\
-         usage:\n  \
-         txcript list\n  \
-         txcript continue <id> [--with <harness>] [--from <harness>] [--out <dir>] [--no-resume]\n  \
-         txcript query ['<pattern>'] [--from <harness>] [--with <harness>]\n\n\
-         continue launches the harness afterward; --with crosses into another,\n\
-         --out/--no-resume write the session without launching.\n\
-         query with a pattern prints ranked hits; without one it opens an\n\
-         fzf-style picker (type to filter, Enter continues the selection).\n\
-         harnesses: claude_code, codex, opencode, pi, campfire, cursor, grok"
-    );
 }
 
 fn cmd_list() {
@@ -96,50 +138,20 @@ fn cmd_list() {
     }
 }
 
-fn cmd_continue(args: &[String]) -> Result<(), String> {
-    let parse_harness = |v: Option<&String>, flag: &str| -> Result<HarnessId, String> {
-        v.ok_or_else(|| format!("{flag} needs a harness"))?
-            .parse()
-            .map_err(|e: txcript::Error| e.to_string())
-    };
-
-    let mut id: Option<String> = None;
-    let mut with: Option<HarnessId> = None;
-    let mut from: Option<HarnessId> = None;
-    let mut out: Option<PathBuf> = None;
-    let mut no_resume = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--with" => {
-                i += 1;
-                with = Some(parse_harness(args.get(i), "--with")?);
-            }
-            "--from" => {
-                i += 1;
-                from = Some(parse_harness(args.get(i), "--from")?);
-            }
-            "--out" => {
-                i += 1;
-                out = Some(PathBuf::from(args.get(i).ok_or("--out needs a directory")?));
-            }
-            "--no-resume" => no_resume = true,
-            other if id.is_none() => id = Some(other.to_string()),
-            other => return Err(format!("unexpected argument `{other}`")),
-        }
-        i += 1;
-    }
-
-    let id = id.ok_or("missing session id (try `txcript list`)")?;
-
+fn cmd_continue(
+    id: &str,
+    with: Option<HarnessId>,
+    from: Option<HarnessId>,
+    out: Option<&PathBuf>,
+    no_resume: bool,
+) -> Result<(), String> {
     // Locate the session by exact id or title, optionally scoped to one harness.
     let sessions = discover_with_spinner();
     let found = sessions
         .iter()
         .find(|s| {
             from.is_none_or(|h| s.harness == h)
-                && (s.meta.id == id || s.meta.title.as_deref() == Some(id.as_str()))
+                && (s.meta.id == id || s.meta.title.as_deref() == Some(id))
         })
         .ok_or_else(|| match from {
             Some(h) => format!("no {h} session matches `{id}` (try `txcript list`)"),
@@ -149,7 +161,7 @@ fn cmd_continue(args: &[String]) -> Result<(), String> {
     // Resuming an `--out` copy can't work — the harness reads its live root, not
     // our redirect — so a redirect implies "write only".
     let resume = out.is_none() && !no_resume;
-    continue_session(found, with, out.as_deref(), resume)
+    continue_session(found, with, out.map(PathBuf::as_path), resume)
 }
 
 /// Continue `found` in `with` (default: its own harness): same-harness resumes
@@ -296,7 +308,6 @@ mod spin {
 
 // ── query: one-shot search and the fzf-style picker ─────────────────────
 
-#[cfg(feature = "search")]
 mod query {
     use std::collections::HashMap;
 
@@ -305,35 +316,11 @@ mod query {
 
     type Sessions = HashMap<(HarnessId, String), local::Session>;
 
-    pub(super) fn cmd_query(args: &[String]) -> Result<(), String> {
-        let mut pattern: Option<String> = None;
-        let mut with: Option<HarnessId> = None;
-        let mut from: Option<HarnessId> = None;
-
-        let parse = |v: Option<&String>, flag: &str| -> Result<HarnessId, String> {
-            v.ok_or_else(|| format!("{flag} needs a harness"))?
-                .parse()
-                .map_err(|e: txcript::Error| e.to_string())
-        };
-        let mut i = 0;
-        while i < args.len() {
-            match args[i].as_str() {
-                "--with" => {
-                    i += 1;
-                    with = Some(parse(args.get(i), "--with")?);
-                }
-                "--from" => {
-                    i += 1;
-                    from = Some(parse(args.get(i), "--from")?);
-                }
-                other if pattern.is_none() && !other.starts_with("--") => {
-                    pattern = Some(other.to_string());
-                }
-                other => return Err(format!("unexpected argument `{other}`")),
-            }
-            i += 1;
-        }
-
+    pub(super) fn cmd_query(
+        pattern: Option<String>,
+        with: Option<HarnessId>,
+        from: Option<HarnessId>,
+    ) -> Result<(), String> {
         let (index, sessions) = build_index(from);
         if let Some(pattern) = pattern {
             if with.is_some() {
