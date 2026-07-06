@@ -10,7 +10,7 @@
   ],
   "scripts": {
     "setup": "rustup target add wasm32-unknown-unknown && cargo install wasm-bindgen-cli --version 0.2.126 --locked",
-    "build": "cargo build --lib --release --target wasm32-unknown-unknown --no-default-features --features wasm && wasm-bindgen target/wasm32-unknown-unknown/release/txcript.wasm --out-dir pkg --target nodejs",
+    "build": "cargo build --lib --release --target wasm32-unknown-unknown --no-default-features --features wasm,search && wasm-bindgen target/wasm32-unknown-unknown/release/txcript.wasm --out-dir pkg --target nodejs",
     "prepare": "bun run build"
   }
 }

@@ -30,6 +30,8 @@
 pub mod common;
 pub mod error;
 pub mod harness;
+#[cfg(feature = "search")]
+pub mod search;
 mod transcript;
 
 #[cfg(feature = "wasm")]

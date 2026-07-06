@@ -3,7 +3,7 @@
 //! The boundary is text-in / text-out: the JS host (Bun, a browser, Node) owns
 //! all I/O — reading session files, writing the result — and calls these pure
 //! functions for the transformation. Only the codec crosses into WASM; the
-//! `Store` layer (filesystem, SQLite, subprocess) stays native.
+//! `Store` layer (filesystem, `SQLite`, subprocess) stays native.
 //!
 //! Build: `wasm-pack build --target nodejs --no-default-features --features wasm`
 //! (Bun imports the generated ES module directly), or
@@ -18,7 +18,7 @@ use crate::transcript::{Codec, Common, HarnessId, TextCodec, Transcript};
 
 /// Continue/convert a session from one harness's native text into another's.
 ///
-/// `input` is the source session text (JSONL for claude_code/codex/pi/campfire,
+/// `input` is the source session text (JSONL for `claude_code`/codex/pi/campfire,
 /// the Cursor JSON DB export for cursor, the `opencode export` JSON for
 /// opencode, the JSON bundle of the session directory for grok); `from`/`to`
 /// are harness names (`"claude_code"`, `"codex"`, `"opencode"`, `"pi"`,
@@ -61,6 +61,106 @@ pub fn harnesses() -> Vec<String> {
         .iter()
         .map(|h| h.as_str().to_string())
         .collect()
+}
+
+// ── search (features `wasm` + `search`) ────────────────────────────────
+
+/// One-shot search of a single session. `input`/`from` as in [`convert`];
+/// `query_json` deserializes into [`crate::search::Query`] (only `pattern`
+/// is required). Returns a JSON array of hits.
+#[cfg(feature = "search")]
+#[wasm_bindgen(js_name = searchTranscript)]
+pub fn search_transcript(input: &str, from: &str, query_json: &str) -> Result<String, JsError> {
+    let from = parse_harness(from)?;
+    let common = parse_to_common(from, input).map_err(js)?;
+    let query: crate::search::Query = serde_json::from_str(query_json).map_err(js)?;
+    serde_json::to_string(&crate::search::search(&common, &query)).map_err(js)
+}
+
+/// The hot index: insert sessions once, query per keystroke.
+///
+/// ```js
+/// const s = new Searcher();
+/// s.insert("claude_code", id, sessionText);
+/// const matches = JSON.parse(s.query(JSON.stringify({ pattern: "relay bug" })));
+/// ```
+#[cfg(feature = "search")]
+#[wasm_bindgen]
+pub struct Searcher {
+    index: crate::search::Index,
+}
+
+#[cfg(feature = "search")]
+#[wasm_bindgen]
+impl Searcher {
+    #[wasm_bindgen(constructor)]
+    #[must_use]
+    pub fn new() -> Searcher {
+        Searcher {
+            index: crate::search::Index::new(),
+        }
+    }
+
+    /// Parse a session's native text and index it under `harness` + `id`,
+    /// replacing any document already indexed under the same key.
+    pub fn insert(&mut self, harness: &str, id: &str, input: &str) -> Result<(), JsError> {
+        let harness = parse_harness(harness)?;
+        let common = parse_to_common(harness, input).map_err(js)?;
+        let key = crate::search::DocKey {
+            harness,
+            id: id.to_string(),
+        };
+        self.index.insert(key, &common);
+        Ok(())
+    }
+
+    /// Drop the session indexed under `harness` + `id`; returns whether it
+    /// existed.
+    pub fn remove(&mut self, harness: &str, id: &str) -> Result<bool, JsError> {
+        let key = crate::search::DocKey {
+            harness: parse_harness(harness)?,
+            id: id.to_string(),
+        };
+        Ok(self.index.remove(&key))
+    }
+
+    /// Number of indexed sessions.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    /// Run a query (JSON, only `pattern` required). Returns a JSON array of
+    /// `{ key, meta, score, hits }`, ranked.
+    pub fn query(&self, query_json: &str) -> Result<String, JsError> {
+        #[derive(Serialize)]
+        struct MatchJson<'a> {
+            key: &'a crate::search::DocKey,
+            meta: &'a common::Meta,
+            score: u32,
+            hits: Vec<crate::search::Hit>,
+        }
+        let query: crate::search::Query = serde_json::from_str(query_json).map_err(js)?;
+        let matches: Vec<MatchJson> = self
+            .index
+            .query(&query)
+            .into_iter()
+            .map(|m| MatchJson {
+                key: m.key,
+                meta: m.meta,
+                score: m.score,
+                hits: m.hits,
+            })
+            .collect();
+        serde_json::to_string(&matches).map_err(js)
+    }
+}
+
+#[cfg(feature = "search")]
+impl Default for Searcher {
+    fn default() -> Searcher {
+        Searcher::new()
+    }
 }
 
 // ── dispatch ───────────────────────────────────────────────────────────

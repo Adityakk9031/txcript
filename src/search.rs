@@ -1,0 +1,875 @@
+//! Fuzzy and substring search over transcripts (feature `search`).
+//!
+//! Two entry points, one behavior:
+//!
+//! - [`search`] — one-shot: scan a single [`Transcript<Common>`] and return
+//!   the matching lines. No state; use it for find-in-transcript or a
+//!   load-search-drop CLI pass.
+//! - [`Index`] — hot: feed transcripts in once with [`Index::insert`], then
+//!   run [`Index::query`] per keystroke. Text is extracted and pre-converted
+//!   to UTF-32 at insert, so a query is a pure scan — no parsing, no
+//!   transcoding, no per-line allocation.
+//!
+//! Both share [`Query`] and [`Hit`], and one-shot search is literally the hot
+//! path run over a single unnamed document, so the two can never disagree.
+//!
+//! Matching is [nucleo](https://github.com/helix-editor/nucleo) — helix's
+//! matcher. [`Mode::Fuzzy`] accepts the full fzf-style pattern language
+//! (`foo bar` all-of, `'exact`, `^prefix`, `suffix$`, `!not`);
+//! [`Mode::Substring`] treats the pattern as one literal needle. Smart case
+//! and Latin diacritic folding are handled by the matcher; nothing is folded
+//! ahead of time.
+
+use std::collections::HashMap;
+use std::fmt;
+use std::ops::Range;
+
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str, Utf32String};
+use serde::{Deserialize, Serialize};
+
+use crate::common::{Block, Message, Meta, Role, Tool, ToolOutput};
+use crate::{Common, HarnessId, Transcript};
+
+// ── query ──────────────────────────────────────────────────────────────
+
+/// How the pattern matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// fzf-style fuzzy: space-separated atoms must all match; an atom may use
+    /// `'exact`, `^prefix`, `suffix$`, `!negate` syntax.
+    Fuzzy,
+    /// The whole pattern is one literal substring, spaces included.
+    Substring,
+}
+
+/// Case sensitivity. [`Case::Smart`] is case-insensitive until the pattern
+/// contains an uppercase character (vim smartcase).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Case {
+    Smart,
+    Insensitive,
+    Sensitive,
+}
+
+/// What kind of content a line came from — the "what am I looking at" label
+/// on every [`Hit`], and the filter axis of [`Query::origins`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    /// Text the user typed.
+    User,
+    /// Text the assistant wrote.
+    Assistant,
+    /// Model reasoning.
+    Thinking,
+    /// Tool inputs: the Bash command, the file path, the written content.
+    ToolUse,
+    /// Tool outputs. Bulky (whole file reads land here), so excluded from
+    /// [`Origin::DEFAULT`]; opt in via [`Origin::ALL`] or an explicit list.
+    ToolResult,
+    /// Session metadata: title, cwd, git branch. [`Hit::message`]/[`Hit::block`]
+    /// are `0` for these.
+    Meta,
+}
+
+impl Origin {
+    /// Every origin, including the noisy [`Origin::ToolResult`].
+    pub const ALL: [Origin; 6] = [
+        Origin::User,
+        Origin::Assistant,
+        Origin::Thinking,
+        Origin::ToolUse,
+        Origin::ToolResult,
+        Origin::Meta,
+    ];
+    /// The default query scope: everything except [`Origin::ToolResult`].
+    pub const DEFAULT: [Origin; 5] = [
+        Origin::User,
+        Origin::Assistant,
+        Origin::Thinking,
+        Origin::ToolUse,
+        Origin::Meta,
+    ];
+
+    const fn bit(self) -> u8 {
+        1 << (self as u8)
+    }
+}
+
+/// A search request. Build with [`Query::fuzzy`] or [`Query::substring`],
+/// then adjust fields as needed; the same value drives both [`search`] and
+/// [`Index::query`]. Deserializes from as little as `{"pattern": "…"}` —
+/// every other field has the constructor's default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Query {
+    pub pattern: String,
+    pub mode: Mode,
+    pub case: Case,
+    /// Which content kinds to search. Defaults to [`Origin::DEFAULT`]
+    /// (everything but tool output).
+    pub origins: Vec<Origin>,
+    /// Restrict to sessions from these harnesses; `None` searches all.
+    /// Only meaningful for [`Index::query`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harnesses: Option<Vec<HarnessId>>,
+    /// For [`Index::query`], the maximum number of documents returned; for
+    /// [`search`], the maximum number of hits. `None` is unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// Maximum [`Hit`]s materialized per document by [`Index::query`] — the
+    /// document's best-scoring lines, in transcript order. Defaults to `8`:
+    /// matching documents are cheap to *find* but each materialized hit
+    /// allocates its line text, and a loose pattern can match hundreds of
+    /// thousands of lines. `None` materializes every match.
+    #[serde(
+        default = "default_hits_per_doc",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub hits_per_doc: Option<usize>,
+}
+
+#[allow(clippy::unnecessary_wraps)] // serde default for an Option field
+fn default_hits_per_doc() -> Option<usize> {
+    Some(8)
+}
+
+impl Default for Query {
+    /// An empty fuzzy query — matches every document with no hits.
+    fn default() -> Query {
+        Query::fuzzy("")
+    }
+}
+
+impl Query {
+    /// A fuzzy query with smart case over the default origins.
+    #[must_use]
+    pub fn fuzzy(pattern: impl Into<String>) -> Query {
+        Query::new(pattern, Mode::Fuzzy)
+    }
+
+    /// A literal substring query with smart case over the default origins.
+    #[must_use]
+    pub fn substring(pattern: impl Into<String>) -> Query {
+        Query::new(pattern, Mode::Substring)
+    }
+
+    fn new(pattern: impl Into<String>, mode: Mode) -> Query {
+        Query {
+            pattern: pattern.into(),
+            mode,
+            case: Case::Smart,
+            origins: Origin::DEFAULT.to_vec(),
+            harnesses: None,
+            limit: None,
+            hits_per_doc: default_hits_per_doc(),
+        }
+    }
+
+    fn compile(&self) -> Compiled {
+        match self.mode {
+            Mode::Fuzzy => {
+                let case = match self.case {
+                    Case::Smart => CaseMatching::Smart,
+                    Case::Insensitive => CaseMatching::Ignore,
+                    Case::Sensitive => CaseMatching::Respect,
+                };
+                Compiled::Fuzzy(Pattern::parse(&self.pattern, case, Normalization::Smart))
+            }
+            Mode::Substring => Compiled::Substring(Needle::new(&self.pattern, self.case)),
+        }
+    }
+
+    fn origin_mask(&self) -> u8 {
+        self.origins.iter().fold(0, |m, o| m | o.bit())
+    }
+}
+
+// ── results ────────────────────────────────────────────────────────────
+
+/// One matching line. `spans` are character-index ranges into `line`, ready
+/// for highlighting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hit {
+    /// Index into the transcript's messages (`0` for [`Origin::Meta`]).
+    pub message: usize,
+    /// Index into that message's content blocks (`0` for [`Origin::Meta`]).
+    pub block: usize,
+    pub origin: Origin,
+    /// The matched line's text.
+    pub line: String,
+    /// Match positions within `line`, in characters, merged and sorted.
+    pub spans: Vec<Range<u32>>,
+    pub score: u32,
+}
+
+/// Identity of an indexed document: which harness's session it is.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DocKey {
+    pub harness: HarnessId,
+    pub id: String,
+}
+
+impl fmt::Display for DocKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.harness, self.id)
+    }
+}
+
+/// One document's result from [`Index::query`]: the session, its best-hit
+/// score, and its matching lines in transcript order.
+#[derive(Debug)]
+pub struct DocMatch<'i> {
+    pub key: &'i DocKey,
+    pub meta: &'i Meta,
+    /// The best line score in the document.
+    pub score: u32,
+    /// Matching lines, in transcript order.
+    pub hits: Vec<Hit>,
+}
+
+// ── one-shot ───────────────────────────────────────────────────────────
+
+/// Search a single transcript. Hits come back in transcript order,
+/// [`Query::limit`] capping their count.
+#[must_use]
+pub fn search(transcript: &Transcript<Common>, query: &Query) -> Vec<Hit> {
+    let lines = extract(&transcript.meta, &transcript.body);
+    let pattern = query.compile();
+    if pattern_is_empty(&pattern, query) {
+        return Vec::new();
+    }
+    let mask = query.origin_mask();
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut indices = Vec::new();
+    let mut hits = Vec::new();
+    for line in &lines {
+        if line.origin.bit() & mask == 0 {
+            continue;
+        }
+        if let Some(hit) = line.hit(&pattern, &mut matcher, &mut indices) {
+            hits.push(hit);
+            if query.limit.is_some_and(|l| hits.len() >= l) {
+                break;
+            }
+        }
+    }
+    hits
+}
+
+// ── hot index ──────────────────────────────────────────────────────────
+
+/// An in-memory search index over many transcripts.
+///
+/// Build once, query repeatedly — [`Index::query`] takes `&self` and does no
+/// I/O, so it is cheap enough to run per keystroke and can be sharded across
+/// threads by the caller (`Index` is `Send + Sync`).
+///
+/// The index never touches a [`Store`](crate::Store) or the filesystem: the
+/// caller decides what goes in and when it is refreshed. Re-inserting an
+/// existing [`DocKey`] replaces that document.
+#[derive(Default)]
+pub struct Index {
+    docs: Vec<Doc>,
+    by_key: HashMap<DocKey, usize>,
+}
+
+struct Doc {
+    key: DocKey,
+    meta: Meta,
+    lines: Vec<Line>,
+    chars: usize,
+}
+
+impl Index {
+    #[must_use]
+    pub fn new() -> Index {
+        Index::default()
+    }
+
+    /// Number of indexed documents.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.docs.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.docs.is_empty()
+    }
+
+    /// Total indexed lines across all documents.
+    #[must_use]
+    pub fn lines(&self) -> usize {
+        self.docs.iter().map(|d| d.lines.len()).sum()
+    }
+
+    /// Total indexed characters across all documents.
+    #[must_use]
+    pub fn chars(&self) -> usize {
+        self.docs.iter().map(|d| d.chars).sum()
+    }
+
+    /// Add a transcript under `key`, replacing any document already indexed
+    /// under the same key.
+    pub fn insert(&mut self, key: DocKey, transcript: &Transcript<Common>) {
+        let lines = extract(&transcript.meta, &transcript.body);
+        let doc = Doc {
+            key: key.clone(),
+            meta: transcript.meta.clone(),
+            chars: lines.iter().map(|l| l.text.len()).sum(),
+            lines,
+        };
+        if let Some(&i) = self.by_key.get(&key) {
+            self.docs[i] = doc;
+        } else {
+            self.by_key.insert(key, self.docs.len());
+            self.docs.push(doc);
+        }
+    }
+
+    /// Remove the document indexed under `key`. Returns whether it existed.
+    pub fn remove(&mut self, key: &DocKey) -> bool {
+        let Some(i) = self.by_key.remove(key) else {
+            return false;
+        };
+        self.docs.swap_remove(i);
+        if let Some(moved) = self.docs.get(i) {
+            self.by_key.insert(moved.key.clone(), i);
+        }
+        true
+    }
+
+    /// Run a query, returning matching documents ranked by best-hit score
+    /// (ties broken newest-first), each with its hits in transcript order.
+    ///
+    /// An empty pattern matches every document with no hits — ranked
+    /// newest-first, so a picker can show the full list before the first
+    /// keystroke.
+    #[must_use]
+    pub fn query(&self, query: &Query) -> Vec<DocMatch<'_>> {
+        let pattern = query.compile();
+        if pattern_is_empty(&pattern, query) {
+            return self.all_docs(query);
+        }
+        let mask = query.origin_mask();
+
+        // Pass 1: score every line, keep per-doc line indices. Highlight
+        // indices are deferred to pass 2 so only surviving docs pay for them.
+        let mut scored = self.score_all(&pattern, mask, query);
+
+        scored.sort_by(|a, b| {
+            b.1.cmp(&a.1).then_with(|| {
+                self.docs[b.0]
+                    .meta
+                    .timestamp
+                    .cmp(&self.docs[a.0].meta.timestamp)
+            })
+        });
+        if let Some(limit) = query.limit {
+            scored.truncate(limit);
+        }
+
+        // Pass 2: highlight spans for the surviving docs' best lines only.
+        self.materialize(scored, &pattern, query)
+    }
+
+    /// Turn pass-1 survivors into [`DocMatch`]es, computing highlight spans.
+    /// Sharded like scoring — span extraction re-runs the matcher per line.
+    /// Chunks of the ranked list concatenate in order, so ranking is kept.
+    fn materialize(
+        &self,
+        mut scored: Vec<Scored>,
+        pattern: &Compiled,
+        query: &Query,
+    ) -> Vec<DocMatch<'_>> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+            if workers > 1 && scored.len() >= 64 {
+                let chunk = scored.len().div_ceil(workers);
+                return std::thread::scope(|scope| {
+                    let handles: Vec<_> = scored
+                        .chunks_mut(chunk)
+                        .map(|part| {
+                            scope.spawn(move || self.materialize_chunk(part, pattern, query))
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .flat_map(|h| h.join().unwrap_or_default())
+                        .collect()
+                });
+            }
+        }
+        self.materialize_chunk(&mut scored, pattern, query)
+    }
+
+    fn materialize_chunk(
+        &self,
+        scored: &mut [Scored],
+        pattern: &Compiled,
+        query: &Query,
+    ) -> Vec<DocMatch<'_>> {
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut indices = Vec::new();
+        scored
+            .iter_mut()
+            .map(|(d, best, hit_lines)| {
+                let doc = &self.docs[*d];
+                let hits = select_hits(std::mem::take(hit_lines), query.hits_per_doc)
+                    .into_iter()
+                    .filter_map(|(l, _)| doc.lines[l].hit(pattern, &mut matcher, &mut indices))
+                    .collect();
+                DocMatch {
+                    key: &doc.key,
+                    meta: &doc.meta,
+                    score: *best,
+                    hits,
+                }
+            })
+            .collect()
+    }
+
+    /// Score every selected document, sharding across cores when the corpus
+    /// is large enough to pay for the threads. wasm32 has no threads; it
+    /// always takes the sequential path.
+    fn score_all(&self, pattern: &Compiled, mask: u8, query: &Query) -> Vec<Scored> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+            // Below ~64k lines a single core finishes in well under a
+            // millisecond; spawning threads would only add latency.
+            if workers > 1 && self.lines() >= 64 * 1024 {
+                // Shard by character volume, not document count — session
+                // sizes are heavily skewed, and one oversized shard would
+                // set the whole query's latency.
+                let shards = self.shards(workers);
+                return std::thread::scope(|scope| {
+                    let handles: Vec<_> = shards
+                        .into_iter()
+                        .map(|shard| {
+                            let docs = &self.docs[shard.clone()];
+                            scope.spawn(move || score_docs(docs, shard.start, pattern, mask, query))
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .flat_map(|h| h.join().unwrap_or_default())
+                        .collect()
+                });
+            }
+        }
+        score_docs(&self.docs, 0, pattern, mask, query)
+    }
+
+    /// Split the document list into up to `workers` contiguous ranges of
+    /// roughly equal character volume.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn shards(&self, workers: usize) -> Vec<std::ops::Range<usize>> {
+        let target = (self.chars() / workers).max(1);
+        let mut shards = Vec::with_capacity(workers);
+        let mut start = 0;
+        let mut acc = 0;
+        for (i, doc) in self.docs.iter().enumerate() {
+            acc += doc.chars;
+            if acc >= target && shards.len() + 1 < workers {
+                shards.push(start..i + 1);
+                start = i + 1;
+                acc = 0;
+            }
+        }
+        if start < self.docs.len() {
+            shards.push(start..self.docs.len());
+        }
+        shards
+    }
+
+    /// Every selected document, newest first, with no hits.
+    fn all_docs(&self, query: &Query) -> Vec<DocMatch<'_>> {
+        let mut all: Vec<&Doc> = self.docs.iter().filter(|d| d.selected(query)).collect();
+        all.sort_by_key(|doc| std::cmp::Reverse(doc.meta.timestamp));
+        if let Some(limit) = query.limit {
+            all.truncate(limit);
+        }
+        all.into_iter()
+            .map(|doc| DocMatch {
+                key: &doc.key,
+                meta: &doc.meta,
+                score: 0,
+                hits: Vec::new(),
+            })
+            .collect()
+    }
+}
+
+impl Doc {
+    fn selected(&self, query: &Query) -> bool {
+        query
+            .harnesses
+            .as_ref()
+            .is_none_or(|hs| hs.contains(&self.key.harness))
+    }
+}
+
+/// Pass-1 result for one document: its index, best line score, and each
+/// matched line with its score.
+type Scored = (usize, u32, Vec<(usize, u32)>);
+
+fn score_docs(
+    docs: &[Doc],
+    base: usize,
+    pattern: &Compiled,
+    mask: u8,
+    query: &Query,
+) -> Vec<Scored> {
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut scored = Vec::new();
+    for (d, doc) in docs.iter().enumerate() {
+        if !doc.selected(query) {
+            continue;
+        }
+        let mut best = 0;
+        let mut hit_lines = Vec::new();
+        for (l, line) in doc.lines.iter().enumerate() {
+            if line.origin.bit() & mask == 0 {
+                continue;
+            }
+            if let Some(score) = pattern.score(line.text.slice(..), &mut matcher) {
+                best = best.max(score);
+                hit_lines.push((l, score));
+            }
+        }
+        if !hit_lines.is_empty() {
+            scored.push((base + d, best, hit_lines));
+        }
+    }
+    scored
+}
+
+/// Reduce a doc's matched lines to the ones worth materializing: the
+/// `cap` best-scoring, put back into transcript order.
+fn select_hits(mut hit_lines: Vec<(usize, u32)>, cap: Option<usize>) -> Vec<(usize, u32)> {
+    if let Some(cap) = cap
+        && hit_lines.len() > cap
+    {
+        hit_lines.sort_unstable_by_key(|&(_, score)| std::cmp::Reverse(score));
+        hit_lines.truncate(cap);
+        hit_lines.sort_unstable_by_key(|&(line, _)| line);
+    }
+    hit_lines
+}
+
+/// An empty/whitespace pattern parses to zero atoms, which scores everything
+/// 0. Detect it from the input.
+fn pattern_is_empty(_: &Compiled, query: &Query) -> bool {
+    query.pattern.trim().is_empty()
+}
+
+// ── matchers ───────────────────────────────────────────────────────────
+
+/// A compiled [`Query`] pattern.
+///
+/// Fuzzy goes through nucleo's `Pattern` (full fzf syntax). Substring is our
+/// own scan: nucleo 0.3.1's case-insensitive substring matcher misses
+/// matches near the end of a line when the needle's first lowercase letter
+/// sits at position ≥ 2 (flag-shaped needles like `--nocapture`), and its
+/// `Pattern::new` splits on whitespace, which is not "one literal needle".
+/// Occurrences are still scored through nucleo's `exact_match`, so fuzzy and
+/// substring scores stay on one scale.
+enum Compiled {
+    Fuzzy(Pattern),
+    Substring(Needle),
+}
+
+impl Compiled {
+    fn score(&self, hay: Utf32Str<'_>, matcher: &mut Matcher) -> Option<u32> {
+        match self {
+            Compiled::Fuzzy(pattern) => pattern.score(hay, matcher),
+            Compiled::Substring(needle) => needle
+                .find(hay)
+                .map(|start| needle.score_at(hay, start, matcher)),
+        }
+    }
+
+    fn indices(&self, hay: Utf32Str<'_>, matcher: &mut Matcher, out: &mut Vec<u32>) -> Option<u32> {
+        match self {
+            Compiled::Fuzzy(pattern) => pattern.indices(hay, matcher, out),
+            Compiled::Substring(needle) => needle.find(hay).map(|start| {
+                out.extend(start..start + needle.len_u32());
+                needle.score_at(hay, start, matcher)
+            }),
+        }
+    }
+}
+
+/// One literal needle, pre-folded per the query's case rule. ASCII needles
+/// carry a byte copy so ASCII haystacks (the overwhelming majority) run on
+/// memchr/memmem instead of a per-char loop.
+struct Needle {
+    chars: Vec<char>,
+    bytes: Option<Vec<u8>>,
+    utf32: Utf32String,
+    sensitive: bool,
+}
+
+impl Needle {
+    fn new(pattern: &str, case: Case) -> Needle {
+        let sensitive = match case {
+            Case::Sensitive => true,
+            Case::Insensitive => false,
+            Case::Smart => pattern.chars().any(char::is_uppercase),
+        };
+        let chars: Vec<char> = pattern
+            .chars()
+            .map(|c| if sensitive { c } else { fold(c) })
+            .collect();
+        let bytes = chars
+            .iter()
+            .all(char::is_ascii)
+            .then(|| chars.iter().map(|&c| c as u8).collect());
+        Needle {
+            chars,
+            bytes,
+            utf32: Utf32String::from(pattern),
+            sensitive,
+        }
+    }
+
+    fn len_u32(&self) -> u32 {
+        u32::try_from(self.chars.len()).unwrap_or(u32::MAX)
+    }
+
+    /// Character index of the first occurrence in `hay`, under this needle's
+    /// case rule.
+    fn find(&self, hay: Utf32Str<'_>) -> Option<u32> {
+        let n = self.chars.len();
+        if n == 0 || n > hay.len() {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation)] // haystacks are single lines
+        match hay {
+            Utf32Str::Ascii(bytes) => {
+                // A needle with non-ASCII characters cannot occur in an
+                // ASCII haystack.
+                let needle = self.bytes.as_deref()?;
+                if self.sensitive {
+                    return memchr::memmem::find(bytes, needle).map(|i| i as u32);
+                }
+                // Needle is folded lowercase; walk candidate positions of its
+                // first byte (either case) and verify the window.
+                let (first, upper) = (needle[0], needle[0].to_ascii_uppercase());
+                let mut offset = 0;
+                let candidates = &bytes[..=bytes.len() - n];
+                while let Some(i) = memchr::memchr2(first, upper, &candidates[offset..]) {
+                    let at = offset + i;
+                    if bytes[at..at + n].eq_ignore_ascii_case(needle) {
+                        return Some(at as u32);
+                    }
+                    offset = at + 1;
+                    if offset >= candidates.len() {
+                        return None;
+                    }
+                }
+                None
+            }
+            Utf32Str::Unicode(chars) => chars
+                .windows(n)
+                .position(|w| {
+                    w.iter().zip(&self.chars).all(|(&c, &want)| {
+                        if self.sensitive {
+                            c == want
+                        } else {
+                            fold(c) == want
+                        }
+                    })
+                })
+                .map(|i| i as u32),
+        }
+    }
+
+    /// Score the verified occurrence at `start` with nucleo's exact matcher,
+    /// keeping substring scores on nucleo's scale.
+    fn score_at(&self, hay: Utf32Str<'_>, start: u32, matcher: &mut Matcher) -> u32 {
+        let m = matcher.exact_match(
+            hay.slice_u32(start..start + self.len_u32()),
+            self.utf32.slice(..),
+        );
+        // The occurrence is already verified; a scoring miss (case rules
+        // stricter than ours) still counts as a plain match.
+        m.map_or(u32::from(SCORE_FALLBACK), u32::from)
+    }
+}
+
+const SCORE_FALLBACK: u16 = 16;
+
+/// Single-char case fold, matching nucleo's one-to-one folding model.
+fn fold(c: char) -> char {
+    let mut lower = c.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(l), None) => l,
+        _ => c, // multi-char lowercase expansions stay unfolded
+    }
+}
+
+// ── extraction ─────────────────────────────────────────────────────────
+
+/// One searchable line, pre-converted to UTF-32 so queries never transcode.
+struct Line {
+    message: u32,
+    block: u32,
+    origin: Origin,
+    text: Utf32String,
+}
+
+impl Line {
+    fn hit(
+        &self,
+        pattern: &Compiled,
+        matcher: &mut Matcher,
+        indices: &mut Vec<u32>,
+    ) -> Option<Hit> {
+        indices.clear();
+        let score = pattern.indices(self.text.slice(..), matcher, indices)?;
+        indices.sort_unstable();
+        indices.dedup();
+        Some(Hit {
+            message: self.message as usize,
+            block: self.block as usize,
+            origin: self.origin,
+            line: self.text.to_string(),
+            spans: merge_spans(indices),
+            score,
+        })
+    }
+}
+
+/// Collapse sorted, deduplicated character indices into contiguous ranges.
+fn merge_spans(indices: &[u32]) -> Vec<Range<u32>> {
+    let mut spans: Vec<Range<u32>> = Vec::new();
+    for &i in indices {
+        match spans.last_mut() {
+            Some(last) if last.end == i => last.end = i + 1,
+            _ => spans.push(i..i + 1),
+        }
+    }
+    spans
+}
+
+fn extract(meta: &Meta, messages: &[Message]) -> Vec<Line> {
+    let mut lines = Vec::new();
+    let mut push = |message: u32, block: u32, origin: Origin, text: &str| {
+        for line in text.lines() {
+            let line = line.trim_end();
+            if !line.trim_start().is_empty() {
+                lines.push(Line {
+                    message,
+                    block,
+                    origin,
+                    text: Utf32String::from(line),
+                });
+            }
+        }
+    };
+
+    for text in [&meta.title, &meta.cwd, &meta.git_branch]
+        .into_iter()
+        .flatten()
+    {
+        push(0, 0, Origin::Meta, text);
+    }
+
+    for (m, message) in messages.iter().enumerate() {
+        let m = u32::try_from(m).unwrap_or(u32::MAX);
+        for (b, block) in message.content.iter().enumerate() {
+            let b = u32::try_from(b).unwrap_or(u32::MAX);
+            match block {
+                Block::Text { text } => {
+                    let origin = match message.role {
+                        Role::User => Origin::User,
+                        Role::Assistant => Origin::Assistant,
+                    };
+                    push(m, b, origin, text);
+                }
+                Block::Thinking { text, .. } => push(m, b, Origin::Thinking, text),
+                Block::ToolUse { tool, .. } => {
+                    extract_tool(tool, |text| push(m, b, Origin::ToolUse, text));
+                }
+                Block::ToolResult { content, .. } => match content {
+                    ToolOutput::Text(text) => push(m, b, Origin::ToolResult, text),
+                    ToolOutput::Json(value) => {
+                        push(m, b, Origin::ToolResult, &value.to_string());
+                    }
+                },
+                Block::Image { .. } => {}
+            }
+        }
+    }
+    lines
+}
+
+/// The searchable strings of a tool invocation — the command you remember
+/// running, the path you remember touching.
+fn extract_tool(tool: &Tool, mut push: impl FnMut(&str)) {
+    match tool {
+        Tool::Read { file_path, .. } => push(file_path),
+        Tool::Write { file_path, content } => {
+            push(file_path);
+            push(content);
+        }
+        Tool::Edit {
+            file_path,
+            old_string,
+            new_string,
+            ..
+        } => {
+            push(file_path);
+            push(old_string);
+            push(new_string);
+        }
+        Tool::MultiEdit { file_path, edits } => {
+            push(file_path);
+            for edit in edits {
+                push(&edit.old_string);
+                push(&edit.new_string);
+            }
+        }
+        Tool::Bash {
+            command,
+            description,
+            ..
+        } => {
+            push(command);
+            if let Some(description) = description {
+                push(description);
+            }
+        }
+        Tool::Raw { tool_name, input } => {
+            push(tool_name);
+            if !input.is_null() {
+                push(&input.to_string());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Index` must stay shareable across threads for caller-side sharding.
+    #[test]
+    fn index_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Index>();
+    }
+
+    #[test]
+    fn merge_spans_groups_consecutive_indices() {
+        assert_eq!(merge_spans(&[0, 1, 2, 5, 6, 9]), vec![0..3, 5..7, 9..10]);
+        assert_eq!(merge_spans(&[]), Vec::<Range<u32>>::new());
+    }
+}

@@ -1,0 +1,333 @@
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+//! Behavior of `txcript::search`: cold/hot parity, origin labeling and
+//! filtering, ranking, replacement, and span math.
+#![cfg(feature = "search")]
+
+use chrono::{TimeZone, Utc};
+use txcript::common::{Block, Message, Meta, Role, Tool, ToolOutput};
+use txcript::search::{DocKey, Hit, Index, Origin, Query, search};
+use txcript::{Common, HarnessId, Transcript};
+
+fn meta(id: &str, secs: i64) -> Meta {
+    Meta {
+        id: id.to_string(),
+        timestamp: Utc
+            .timestamp_opt(1_780_000_000 + secs, 0)
+            .single()
+            .unwrap_or_default(),
+        cwd: Some("/work/replay".to_string()),
+        git_branch: Some("relay-protocol-v6".to_string()),
+        title: Some(format!("session {id}")),
+        cli_version: None,
+        model: None,
+    }
+}
+
+fn message(role: Role, blocks: Vec<Block>) -> Message {
+    Message {
+        role,
+        content: blocks,
+        timestamp: Utc
+            .timestamp_opt(1_780_000_000, 0)
+            .single()
+            .unwrap_or_default(),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    }
+}
+
+fn text(t: &str) -> Block {
+    Block::Text {
+        text: t.to_string(),
+    }
+}
+
+/// A transcript exercising every origin.
+fn rich_transcript(id: &str, secs: i64) -> Transcript<Common> {
+    Transcript::new(
+        meta(id, secs),
+        vec![
+            message(
+                Role::User,
+                vec![text("please fix the flaky websocket test")],
+            ),
+            message(
+                Role::Assistant,
+                vec![
+                    Block::Thinking {
+                        text: "the reconnect timer races the handshake".to_string(),
+                        signature: None,
+                        encrypted: None,
+                    },
+                    text("looking at the reconnect logic now"),
+                    Block::ToolUse {
+                        id: "t1".to_string(),
+                        tool: Tool::Bash {
+                            command: "cargo test websocket -- --nocapture".to_string(),
+                            workdir: None,
+                            timeout_ms: None,
+                            description: None,
+                            run_in_background: false,
+                        },
+                    },
+                ],
+            ),
+            message(
+                Role::User,
+                vec![Block::ToolResult {
+                    tool_use_id: "t1".to_string(),
+                    content: ToolOutput::Text("test websocket_reconnect ... FAILED".to_string()),
+                    is_error: true,
+                }],
+            ),
+        ],
+    )
+}
+
+fn key(harness: HarnessId, id: &str) -> DocKey {
+    DocKey {
+        harness,
+        id: id.to_string(),
+    }
+}
+
+#[test]
+fn cold_and_hot_agree() {
+    let t = rich_transcript("a", 0);
+    let q = Query::fuzzy("reconnect");
+
+    let cold = search(&t, &q);
+    let mut index = Index::new();
+    index.insert(key(HarnessId::ClaudeCode, "a"), &t);
+    let hot = index.query(&q);
+
+    assert_eq!(hot.len(), 1);
+    assert_eq!(hot[0].hits, cold);
+    assert!(!cold.is_empty());
+}
+
+#[test]
+fn hits_are_labeled_by_origin() {
+    let t = rich_transcript("a", 0);
+    let origin_of = |q: &Query| -> Vec<Origin> { search(&t, q).iter().map(|h| h.origin).collect() };
+
+    assert_eq!(
+        origin_of(&Query::substring("flaky websocket")),
+        vec![Origin::User]
+    );
+    assert_eq!(
+        origin_of(&Query::substring("races the handshake")),
+        vec![Origin::Thinking]
+    );
+    assert_eq!(
+        origin_of(&Query::substring("looking at the reconnect")),
+        vec![Origin::Assistant]
+    );
+    assert_eq!(
+        origin_of(&Query::substring("--nocapture")),
+        vec![Origin::ToolUse]
+    );
+}
+
+#[test]
+fn tool_result_needs_opt_in() {
+    let t = rich_transcript("a", 0);
+
+    // Default origins exclude tool output.
+    assert!(search(&t, &Query::substring("websocket_reconnect ... FAILED")).is_empty());
+
+    let mut q = Query::substring("websocket_reconnect ... FAILED");
+    q.origins = Origin::ALL.to_vec();
+    let hits = search(&t, &q);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].origin, Origin::ToolResult);
+}
+
+#[test]
+fn meta_fields_are_searchable() {
+    let t = rich_transcript("a", 0);
+    let hits = search(&t, &Query::substring("relay-protocol-v6"));
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].origin, Origin::Meta);
+    assert_eq!((hits[0].message, hits[0].block), (0, 0));
+}
+
+#[test]
+fn spans_cover_the_substring_in_characters() {
+    let t = Transcript::new(
+        meta("a", 0),
+        vec![message(Role::User, vec![text("naïve needle here")])],
+    );
+    let hits = search(&t, &Query::substring("needle"));
+    assert_eq!(hits.len(), 1);
+    // "naïve " is 6 characters; the span is char-indexed, not byte-indexed.
+    assert_eq!(hits[0].spans, vec![6..12]);
+    let chars: Vec<char> = hits[0].line.chars().collect();
+    let matched: String = chars[6..12].iter().collect();
+    assert_eq!(matched, "needle");
+}
+
+#[test]
+fn smart_case_is_insensitive_until_uppercase() {
+    let t = Transcript::new(
+        meta("a", 0),
+        vec![message(Role::User, vec![text("read the README first")])],
+    );
+    assert!(!search(&t, &Query::substring("readme")).is_empty());
+    // Uppercase in the pattern demands a case match: no "REadme" text exists.
+    assert!(search(&t, &Query::substring("REadme")).is_empty());
+}
+
+#[test]
+fn fuzzy_uses_fzf_pattern_syntax() {
+    let t = rich_transcript("a", 0);
+    // Two atoms, both must match somewhere on the line.
+    assert!(!search(&t, &Query::fuzzy("cargo websocket")).is_empty());
+    // Negation atom rejects lines containing the term.
+    let hits = search(&t, &Query::fuzzy("reconnect !handshake"));
+    assert!(hits.iter().all(|h| !h.line.contains("handshake")));
+    assert!(!hits.is_empty());
+}
+
+#[test]
+fn empty_pattern_lists_documents_newest_first() {
+    let mut index = Index::new();
+    index.insert(
+        key(HarnessId::ClaudeCode, "old"),
+        &rich_transcript("old", 0),
+    );
+    index.insert(key(HarnessId::Codex, "new"), &rich_transcript("new", 1000));
+
+    let matches = index.query(&Query::fuzzy("  "));
+    let ids: Vec<&str> = matches.iter().map(|m| m.key.id.as_str()).collect();
+    assert_eq!(ids, vec!["new", "old"]);
+    assert!(matches.iter().all(|m| m.hits.is_empty() && m.score == 0));
+}
+
+#[test]
+fn harness_filter_scopes_the_query() {
+    let mut index = Index::new();
+    index.insert(key(HarnessId::ClaudeCode, "a"), &rich_transcript("a", 0));
+    index.insert(key(HarnessId::Codex, "b"), &rich_transcript("b", 0));
+
+    let mut q = Query::fuzzy("reconnect");
+    q.harnesses = Some(vec![HarnessId::Codex]);
+    let matches = index.query(&q);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].key.harness, HarnessId::Codex);
+}
+
+#[test]
+fn insert_replaces_and_remove_keeps_the_map_consistent() {
+    let mut index = Index::new();
+    index.insert(key(HarnessId::ClaudeCode, "a"), &rich_transcript("a", 0));
+    index.insert(key(HarnessId::Codex, "b"), &rich_transcript("b", 0));
+    index.insert(key(HarnessId::Pi, "c"), &rich_transcript("c", 0));
+
+    // Replace: same key, new content; the old content must be gone.
+    let replacement = Transcript::new(
+        meta("a", 0),
+        vec![message(Role::User, vec![text("entirely different topic")])],
+    );
+    index.insert(key(HarnessId::ClaudeCode, "a"), &replacement);
+    assert_eq!(index.len(), 3);
+    let mut q = Query::substring("reconnect");
+    assert_eq!(index.query(&q).len(), 2);
+
+    // Remove the first doc; the swap-moved doc must still be reachable.
+    assert!(index.remove(&key(HarnessId::ClaudeCode, "a")));
+    assert!(!index.remove(&key(HarnessId::ClaudeCode, "a")));
+    assert_eq!(index.len(), 2);
+    q.pattern = "different topic".to_string();
+    assert!(index.query(&q).is_empty());
+    assert_eq!(index.query(&Query::substring("reconnect")).len(), 2);
+}
+
+#[test]
+fn limit_caps_documents_hot_and_hits_cold() {
+    let mut index = Index::new();
+    for (i, id) in ["a", "b", "c"].iter().enumerate() {
+        index.insert(
+            key(HarnessId::ClaudeCode, id),
+            &rich_transcript(id, i64::try_from(i).unwrap_or(0)),
+        );
+    }
+    let mut q = Query::fuzzy("reconnect");
+    q.limit = Some(2);
+    assert_eq!(index.query(&q).len(), 2);
+
+    let mut q = Query::substring("e");
+    q.limit = Some(1);
+    assert_eq!(search(&rich_transcript("a", 0), &q).len(), 1);
+}
+
+#[test]
+fn ranking_prefers_the_better_match() {
+    let tight = Transcript::new(
+        meta("tight", 0),
+        vec![message(Role::User, vec![text("relay protocol")])],
+    );
+    let loose = Transcript::new(
+        meta("loose", 1000),
+        vec![message(
+            Role::User,
+            vec![text("the r-e-l-a-y thing uses a p.r.o.t.o.c.o.l of sorts")],
+        )],
+    );
+    let mut index = Index::new();
+    index.insert(key(HarnessId::ClaudeCode, "tight"), &tight);
+    index.insert(key(HarnessId::ClaudeCode, "loose"), &loose);
+
+    let matches = index.query(&Query::fuzzy("relay protocol"));
+    assert_eq!(matches.len(), 2, "both fuzzy-match");
+    // The contiguous match must outrank the scattered one despite being older.
+    assert_eq!(matches[0].key.id, "tight");
+    assert!(matches[0].score > matches[1].score);
+}
+
+/// Regression: nucleo 0.3.1's case-insensitive substring matcher misses
+/// needles whose first lowercase letter sits at position >= 2 when the match
+/// lands near the end of the line (`--nocapture` at line end). Our own
+/// substring scan must not.
+#[test]
+fn substring_matches_flag_shaped_needles() {
+    let t = rich_transcript("a", 0);
+    for pattern in [
+        "--nocapture",
+        "-- --nocapture",
+        "test websocket -- --nocapture",
+    ] {
+        let hits = search(&t, &Query::substring(pattern));
+        assert_eq!(hits.len(), 1, "pattern `{pattern}` must match");
+        assert_eq!(hits[0].origin, Origin::ToolUse);
+    }
+}
+
+/// Substring mode is one literal needle: spaces are part of it, and matches
+/// in uppercase text are found case-insensitively.
+#[test]
+fn substring_is_literal_and_folds_case() {
+    let t = Transcript::new(
+        meta("a", 0),
+        vec![message(Role::User, vec![text("RUN --NOCAPTURE NOW")])],
+    );
+    assert_eq!(search(&t, &Query::substring("--nocapture now")).len(), 1);
+    // A literal with a space only matches the contiguous text.
+    assert!(search(&t, &Query::substring("run now")).is_empty());
+}
+
+#[test]
+fn query_deserializes_from_pattern_only() {
+    let q: Query = serde_json::from_str(r#"{"pattern":"relay"}"#).unwrap_or_default();
+    assert_eq!(q, Query::fuzzy("relay"));
+}
+
+#[test]
+fn hit_serializes_for_the_wire() {
+    let t = rich_transcript("a", 0);
+    let hits = search(&t, &Query::substring("flaky"));
+    let json = serde_json::to_string(&hits).unwrap_or_default();
+    let back: Vec<Hit> = serde_json::from_str(&json).unwrap_or_default();
+    assert_eq!(back, hits);
+}

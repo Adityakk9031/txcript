@@ -11,6 +11,8 @@ categories = ["command-line-utilities", "wasm"]
 
 [dependencies]
 chrono = { version = "0.4.45", features = ["serde"] }
+memchr = { version = "2.8.2", optional = true }
+nucleo-matcher = { version = "0.3.1", optional = true }
 rusqlite = { version = "0.40.1", features = ["bundled"], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
@@ -32,10 +34,14 @@ name = "txcript"
 path = "src/bin/cli.rs"
 
 [features]
-default = ["opencode"]
+default = ["opencode", "search"]
 # The OpenCode harness store reads OpenCode's SQLite database. The OpenCode
 # codec itself is always available; only the on-disk store needs rusqlite.
 opencode = ["dep:rusqlite"]
+# Fuzzy/substring search over transcripts (`txcript::search`). nucleo-matcher
+# is pure Rust (helix's matcher) and compiles to wasm32; combine with `wasm`
+# to expose the bindings.
+search = ["dep:nucleo-matcher", "dep:memchr"]
 # WASM bindings (wasm32-unknown-unknown). uuid/js gives getrandom a JS backend
 # for the rare empty-id fallback; build with --no-default-features so rusqlite
 # (native SQLite) is excluded.
