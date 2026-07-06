@@ -19,6 +19,11 @@
 //! [`Mode::Substring`] treats the pattern as one literal needle. Smart case
 //! and Latin diacritic folding are handled by the matcher; nothing is folded
 //! ahead of time.
+//!
+//! Ranking is two-tier: a line containing the pattern literally (under the
+//! query's case rule) always outranks every gapped fuzzy alignment, and
+//! nucleo's scoring orders lines within each tier — see [`Compiled`] for why
+//! raw fzf scoring alone misorders prose.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -177,7 +182,14 @@ impl Query {
                     Case::Insensitive => CaseMatching::Ignore,
                     Case::Sensitive => CaseMatching::Respect,
                 };
-                Compiled::Fuzzy(Pattern::parse(&self.pattern, case, Normalization::Smart))
+                Compiled::Fuzzy {
+                    pattern: Pattern::parse(&self.pattern, case, Normalization::Smart),
+                    // The whole pattern as one literal needle, for the
+                    // exact-occurrence tier. Atom syntax (`'`, `^`, `!`) in
+                    // the pattern simply never occurs literally, so the
+                    // bonus just doesn't fire for it.
+                    exact: Needle::new(self.pattern.trim(), self.case),
+                }
             }
             Mode::Substring => Compiled::Substring(Needle::new(&self.pattern, self.case)),
         }
@@ -592,22 +604,38 @@ fn pattern_is_empty(_: &Compiled, query: &Query) -> bool {
 
 /// A compiled [`Query`] pattern.
 ///
-/// Fuzzy goes through nucleo's `Pattern` (full fzf syntax). Substring is our
-/// own scan: nucleo 0.3.1's case-insensitive substring matcher misses
-/// matches near the end of a line when the needle's first lowercase letter
-/// sits at position ≥ 2 (flag-shaped needles like `--nocapture`), and its
-/// `Pattern::new` splits on whitespace, which is not "one literal needle".
-/// Occurrences are still scored through nucleo's `exact_match`, so fuzzy and
-/// substring scores stay on one scale.
+/// Fuzzy goes through nucleo's `Pattern` (full fzf syntax), with one
+/// domain correction: nucleo scores with fzf's word-boundary bonuses, tuned
+/// for file paths, where a gapped alignment landing on word starts
+/// (`con…sequence` across "construct … sequence") rivals a contiguous
+/// occurrence of the needle — in prose that reads as random ordering. So a
+/// line containing the pattern *literally* (under the query's case rule)
+/// gets [`EXACT_BONUS`], which no fuzzy alignment can reach: exact lines
+/// always outrank gapped ones, and nucleo's scoring orders within each tier.
+///
+/// Substring is our own scan: nucleo 0.3.1's case-insensitive substring
+/// matcher misses matches near the end of a line when the needle's first
+/// lowercase letter sits at position ≥ 2 (flag-shaped needles like
+/// `--nocapture`), and its `Pattern::new` splits on whitespace, which is not
+/// "one literal needle". Occurrences are still scored through nucleo's
+/// `exact_match`, so fuzzy and substring scores stay on one scale.
 enum Compiled {
-    Fuzzy(Pattern),
+    Fuzzy { pattern: Pattern, exact: Needle },
     Substring(Needle),
 }
+
+/// Added to a line's fuzzy score when the whole pattern occurs in it
+/// literally. Far above any per-character bonus sum a real query can earn,
+/// so the tiers never interleave; the fuzzy match stays the gate (a `!not`
+/// atom can still reject a line that happens to contain the pattern text).
+const EXACT_BONUS: u32 = 1 << 16;
 
 impl Compiled {
     fn score(&self, hay: Utf32Str<'_>, matcher: &mut Matcher) -> Option<u32> {
         match self {
-            Compiled::Fuzzy(pattern) => pattern.score(hay, matcher),
+            Compiled::Fuzzy { pattern, exact } => pattern
+                .score(hay, matcher)
+                .map(|score| score + exact.find(hay).map_or(0, |_| EXACT_BONUS)),
             Compiled::Substring(needle) => needle
                 .find(hay)
                 .map(|start| needle.score_at(hay, start, matcher)),
@@ -616,7 +644,15 @@ impl Compiled {
 
     fn indices(&self, hay: Utf32Str<'_>, matcher: &mut Matcher, out: &mut Vec<u32>) -> Option<u32> {
         match self {
-            Compiled::Fuzzy(pattern) => pattern.indices(hay, matcher, out),
+            Compiled::Fuzzy { pattern, exact } => match exact.find(hay) {
+                // The literal occurrence is what ranked the line; highlight
+                // it, not whichever gapped alignment the matcher preferred.
+                Some(start) => pattern.score(hay, matcher).map(|score| {
+                    out.extend(start..start + exact.len_u32());
+                    score + EXACT_BONUS
+                }),
+                None => pattern.indices(hay, matcher, out),
+            },
             Compiled::Substring(needle) => needle.find(hay).map(|start| {
                 out.extend(start..start + needle.len_u32());
                 needle.score_at(hay, start, matcher)

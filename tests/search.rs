@@ -286,6 +286,43 @@ fn ranking_prefers_the_better_match() {
     assert!(matches[0].score > matches[1].score);
 }
 
+/// fzf's word-boundary bonuses let a gapped alignment across word starts
+/// ("**con**struct … **sequence**") rival a contiguous occurrence, which
+/// misorders prose. A line containing the pattern literally must outrank
+/// every gapped alignment — whatever nucleo's raw scores say, and despite
+/// the gapped doc being newer — and its highlight must cover the literal
+/// occurrence as one contiguous span.
+#[test]
+fn exact_occurrence_outranks_gappy_fuzzy() {
+    let gappy = Transcript::new(
+        meta("gappy", 1000),
+        vec![message(
+            Role::Assistant,
+            vec![text("construct the proper sequence")],
+        )],
+    );
+    let exact = Transcript::new(
+        meta("exact", 0),
+        vec![message(
+            Role::Assistant,
+            vec![text("one consequence of the change")],
+        )],
+    );
+    let mut index = Index::new();
+    index.insert(key(HarnessId::ClaudeCode, "gappy"), &gappy);
+    index.insert(key(HarnessId::ClaudeCode, "exact"), &exact);
+
+    let matches = index.query(&Query::fuzzy("consequence"));
+    assert_eq!(matches.len(), 2, "both fuzzy-match");
+    assert_eq!(matches[0].key.id, "exact");
+    assert!(matches[0].score > matches[1].score);
+    assert_eq!(
+        matches[0].hits[0].spans,
+        vec![4..15],
+        "highlight covers the literal occurrence"
+    );
+}
+
 /// Regression: nucleo 0.3.1's case-insensitive substring matcher misses
 /// needles whose first lowercase letter sits at position >= 2 when the match
 /// lands near the end of the line (`--nocapture` at line end). Our own
