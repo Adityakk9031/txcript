@@ -169,6 +169,11 @@ mod style {
         std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
     }
 
+    /// [`enabled`], but for output on stderr (the status lines).
+    pub fn enabled_err() -> bool {
+        std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
+    }
+
     pub fn dim(s: &str, on: bool) -> String {
         if on {
             format!("\x1b[2m{s}\x1b[0m")
@@ -240,15 +245,21 @@ fn continue_session(
     let resume_id = if target == found.harness && out.is_none() {
         // Fast path: same harness, live root — the session is already on disk.
         // Don't re-synthesize over it (that would round-trip through Common and
-        // could shed detail); resume the original in place.
-        eprintln!("continuing existing {target} session {}", found.meta.id);
+        // could shed detail); resume the original in place. The resume line
+        // is the whole story, so nothing is announced here.
         found.meta.id.clone()
     } else {
         let common = found.read().map_err(|e| e.to_string())?;
-        eprintln!("continuing {} session as {target}", found.harness);
         let written = local::write(target, &common, out).map_err(|e| e.to_string())?;
-        println!("wrote {target} session {}", written.id);
-        println!("  at {}", written.location);
+        let on = style::enabled();
+        println!(
+            "{} → {}  {}",
+            style::harness(found.harness, 0, on),
+            style::harness(target, 0, on),
+            // `location` is Debug-rendered by the lib (its Ref is generic);
+            // shed the quotes it puts around paths.
+            style::dim(written.location.trim_matches('"'), on)
+        );
         written.id
     };
 
@@ -262,7 +273,10 @@ fn continue_session(
             .collect::<Vec<_>>()
             .join(" ");
         match &workdir {
-            Some(dir) => eprintln!("resuming: {shown} (in {})", dir.display()),
+            Some(dir) => eprintln!(
+                "resuming: {shown} {}",
+                style::dim(&format!("(in {})", dir.display()), style::enabled_err())
+            ),
             None => eprintln!("resuming: {shown}"),
         }
         handoff(&bin, &args, workdir.as_deref())
@@ -293,7 +307,9 @@ fn discover_with_spinner() -> Vec<local::Session> {
     let sessions = local::discover_with(|harness, count| {
         spinner.set(format!("scanning {harness}… ({count} found)"));
     });
-    spinner.stop(&format!("found {} local session(s)", sessions.len()));
+    // No summary: whatever the caller does next (the table, the index count,
+    // the resume line) already says what was found.
+    spinner.finish();
     sessions
 }
 
@@ -395,8 +411,8 @@ mod spin {
             }
         }
 
-        /// Stop the animation, clear the line, and print a one-line summary.
-        pub fn stop(self, summary: &str) {
+        /// Stop the animation and clear the line, leaving nothing behind.
+        pub fn finish(self) {
             self.running.store(false, Ordering::Relaxed);
             if let Some(h) = self.handle {
                 let _ = h.join();
@@ -406,6 +422,11 @@ mod spin {
                 let _ = write!(err, "\r\x1b[2K");
                 let _ = err.flush();
             }
+        }
+
+        /// Stop the animation, clear the line, and print a one-line summary.
+        pub fn stop(self, summary: &str) {
+            self.finish();
             eprintln!("{summary}");
         }
     }
