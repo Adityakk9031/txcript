@@ -547,22 +547,33 @@ fn cursor_meta_json(body: &cursor::CursorDb) -> serde_json::Value {
 
 fn first_tool_call(body: &cursor::CursorDb) -> Option<Vec<u8>> {
     let root = latest_root_blob(body);
-    for turn_ref in len_fields(&root.data, 8) {
-        let turn_id = hex_encode_test(&turn_ref);
-        let turn_blob = body.blobs.iter().find(|blob| blob.id == turn_id)?;
-        for agent_turn in len_fields(&turn_blob.data, 1) {
-            for step_ref in len_fields(&agent_turn, 2) {
-                let step_id = hex_encode_test(&step_ref);
-                let Some(step_blob) = body.blobs.iter().find(|blob| blob.id == step_id) else {
-                    continue;
-                };
-                if let Some(tool_call) = len_fields(&step_blob.data, 2).into_iter().next() {
-                    return Some(tool_call);
-                }
+    len_fields(&root.data, 8)
+        .into_iter()
+        .find_map(|turn_ref| {
+            let turn_id = hex_encode_test(&turn_ref);
+            match body.blobs.iter().find(|blob| blob.id == turn_id) {
+                // A dangling turn ref ends the walk with no result.
+                None => Some(None),
+                // Otherwise the turn either yields the first call (stop)
+                // or has none (keep walking).
+                Some(turn_blob) => turn_tool_call(body, turn_blob).map(Some),
             }
-        }
-    }
-    None
+        })
+        .flatten()
+}
+
+fn turn_tool_call(body: &cursor::CursorDb, turn_blob: &cursor::CursorBlob) -> Option<Vec<u8>> {
+    len_fields(&turn_blob.data, 1)
+        .into_iter()
+        .flat_map(|agent_turn| len_fields(&agent_turn, 2))
+        .find_map(|step_ref| {
+            let step_id = hex_encode_test(&step_ref);
+            // A step blob may be absent: it simply offers no tool call.
+            body.blobs
+                .iter()
+                .find(|blob| blob.id == step_id)
+                .and_then(|step_blob| len_fields(&step_blob.data, 2).into_iter().next())
+        })
 }
 
 fn string_fields(data: &[u8], wanted_field: u64) -> Vec<String> {
@@ -604,6 +615,8 @@ fn varint_fields(data: &[u8], wanted_field: u64) -> Vec<u64> {
                 i = end;
             }
             5 => i = i.saturating_add(4),
+            // Wire types 3/4 (groups) and 6/7 don't occur in this format:
+            // the buffer is malformed, stop parsing.
             _ => break,
         }
     }
@@ -641,6 +654,8 @@ fn len_fields(data: &[u8], wanted_field: u64) -> Vec<Vec<u8>> {
                 i = end;
             }
             5 => i = i.saturating_add(4),
+            // Wire types 3/4 (groups) and 6/7 don't occur in this format:
+            // the buffer is malformed, stop parsing.
             _ => break,
         }
     }
@@ -650,16 +665,19 @@ fn len_fields(data: &[u8], wanted_field: u64) -> Vec<Vec<u8>> {
 fn read_varint(data: &[u8], i: &mut usize) -> Option<u64> {
     let mut value = 0u64;
     let mut shift = 0u32;
-    while *i < data.len() && shift < 64 {
+    loop {
+        // Ran off the buffer or past 64 bits: not a valid varint.
+        if *i >= data.len() || shift >= 64 {
+            break None;
+        }
         let byte = data[*i];
         *i += 1;
         value |= u64::from(byte & 0x7f) << shift;
         if byte & 0x80 == 0 {
-            return Some(value);
+            break Some(value);
         }
         shift += 7;
     }
-    None
 }
 
 fn hex_decode_test(s: &str) -> Vec<u8> {

@@ -159,57 +159,62 @@ fn lines_to_messages(lines: &[Line], fallback_ts: DateTime<Utc>) -> Vec<Message>
                         }
                     }
                     "exec_command_end" => {
-                        let Some(call_id) = payload
+                        // A result without a call_id cannot pair with its
+                        // call.
+                        if let Some(call_id) = payload
                             .get("call_id")
                             .and_then(Value::as_str)
                             .map(String::from)
-                        else {
-                            continue;
-                        };
-                        canonical_results.insert(call_id.clone());
-                        queued.push(tool_result(
-                            ts,
-                            call_id,
-                            ToolOutput::Text(format_exec_output(payload)),
-                            payload
-                                .get("exit_code")
-                                .and_then(Value::as_i64)
-                                .is_some_and(|c| c != 0),
-                            false,
-                        ));
+                        {
+                            canonical_results.insert(call_id.clone());
+                            queued.push(tool_result(
+                                ts,
+                                call_id,
+                                ToolOutput::Text(format_exec_output(payload)),
+                                payload
+                                    .get("exit_code")
+                                    .and_then(Value::as_i64)
+                                    .is_some_and(|c| c != 0),
+                                false,
+                            ));
+                        }
                     }
                     "web_search_end" => {
-                        let Some(call_id) = payload
+                        // A result without a call_id cannot pair with its
+                        // call.
+                        if let Some(call_id) = payload
                             .get("call_id")
                             .and_then(Value::as_str)
                             .map(String::from)
-                        else {
-                            continue;
-                        };
-                        let action_key = payload
-                            .get("action")
-                            .and_then(|a| serde_json::to_string(a).ok())
-                            .unwrap_or_default();
-                        pending_web_search_ids
-                            .entry(action_key.clone())
-                            .or_default()
-                            .push(call_id.clone());
-                        if let Some(indices) = unresolved_web_search_indices.get_mut(&action_key)
-                            && let Some(index) = indices.pop()
-                            && let Some(Block::ToolUse { id, .. }) =
-                                queued[index].content.get_mut(0)
                         {
-                            id.clone_from(&call_id);
+                            let action_key = payload
+                                .get("action")
+                                .and_then(|a| serde_json::to_string(a).ok())
+                                .unwrap_or_default();
+                            pending_web_search_ids
+                                .entry(action_key.clone())
+                                .or_default()
+                                .push(call_id.clone());
+                            if let Some(indices) =
+                                unresolved_web_search_indices.get_mut(&action_key)
+                                && let Some(index) = indices.pop()
+                                && let Some(Block::ToolUse { id, .. }) =
+                                    queued[index].content.get_mut(0)
+                            {
+                                id.clone_from(&call_id);
+                            }
+                            canonical_results.insert(call_id.clone());
+                            queued.push(tool_result(
+                                ts,
+                                call_id,
+                                ToolOutput::Text(format_web_search_result(payload)),
+                                false,
+                                false,
+                            ));
                         }
-                        canonical_results.insert(call_id.clone());
-                        queued.push(tool_result(
-                            ts,
-                            call_id,
-                            ToolOutput::Text(format_web_search_result(payload)),
-                            false,
-                            false,
-                        ));
                     }
+                    // Remaining display events mirror response_item data or
+                    // carry no conversational content.
                     _ => {}
                 }
             }
@@ -218,153 +223,159 @@ fn lines_to_messages(lines: &[Line], fallback_ts: DateTime<Utc>) -> Vec<Message>
                 match ptype {
                     "message" => {
                         let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
-                        let Some(content) = payload.get("content") else {
-                            continue;
-                        };
-                        match role {
-                            "user" => {
-                                if is_setup_message(content) {
-                                    continue;
+                        // A message without content carries no turn.
+                        if let Some(content) = payload.get("content") {
+                            match role {
+                                // Setup preludes (<environment_context> etc.)
+                                // are harness scaffolding, not conversation.
+                                "user" if is_setup_message(content) => {}
+                                "user" => {
+                                    let blocks = parse_content_blocks(content);
+                                    // An empty parse carries no turn.
+                                    if !blocks.is_empty() {
+                                        queued.push(plain(Role::User, blocks, ts, None));
+                                    }
                                 }
-                                let blocks = parse_content_blocks(content);
-                                if blocks.is_empty() {
-                                    continue;
+                                "assistant" => {
+                                    let blocks = parse_content_blocks(content);
+                                    // An empty parse carries no turn.
+                                    if !blocks.is_empty() {
+                                        queued.push(plain(
+                                            Role::Assistant,
+                                            blocks,
+                                            ts,
+                                            model_for(&current_turn_id, &turn_models),
+                                        ));
+                                        if let Some(turn) = current_turn_id.as_ref() {
+                                            last_assistant_text_by_turn
+                                                .insert(turn.clone(), queued.len() - 1);
+                                        }
+                                    }
                                 }
-                                queued.push(plain(Role::User, blocks, ts, None));
+                                // Other roles (system/developer) are not
+                                // conversational turns.
+                                _ => {}
                             }
-                            "assistant" => {
-                                let blocks = parse_content_blocks(content);
-                                if blocks.is_empty() {
-                                    continue;
-                                }
-                                queued.push(plain(
-                                    Role::Assistant,
-                                    blocks,
-                                    ts,
-                                    model_for(&current_turn_id, &turn_models),
-                                ));
-                                if let Some(turn) = current_turn_id.as_ref() {
-                                    last_assistant_text_by_turn
-                                        .insert(turn.clone(), queued.len() - 1);
-                                }
-                            }
-                            _ => {}
                         }
                     }
                     "reasoning" => {
-                        let Some(thinking) = parse_reasoning_summary(payload) else {
-                            continue;
-                        };
-                        queued.push(plain(
-                            Role::Assistant,
-                            vec![Block::Thinking {
-                                text: thinking,
-                                signature: None,
-                                encrypted: None,
-                            }],
-                            ts,
-                            model_for(&current_turn_id, &turn_models),
-                        ));
+                        // A reasoning item without summary text renders
+                        // nothing.
+                        if let Some(thinking) = parse_reasoning_summary(payload) {
+                            queued.push(plain(
+                                Role::Assistant,
+                                vec![Block::Thinking {
+                                    text: thinking,
+                                    signature: None,
+                                    encrypted: None,
+                                }],
+                                ts,
+                                model_for(&current_turn_id, &turn_models),
+                            ));
+                        }
                     }
                     "function_call" => {
-                        let Some(call_id) = payload
+                        // A call without a call_id cannot pair with its
+                        // result.
+                        if let Some(call_id) = payload
                             .get("call_id")
                             .and_then(Value::as_str)
                             .map(String::from)
-                        else {
-                            continue;
-                        };
-                        let raw_name = payload
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or("tool")
-                            .to_string();
-                        let raw_input = parse_optional_json_string(
-                            payload.get("arguments").and_then(Value::as_str),
-                        );
-                        let (name, input) = normalize_function_tool(&raw_name, raw_input);
-                        queued.push(tool_use(
-                            ts,
-                            model_for(&current_turn_id, &turn_models),
-                            call_id,
-                            &name,
-                            input,
-                        ));
+                        {
+                            let raw_name = payload
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("tool")
+                                .to_string();
+                            let raw_input = parse_optional_json_string(
+                                payload.get("arguments").and_then(Value::as_str),
+                            );
+                            let (name, input) = normalize_function_tool(&raw_name, raw_input);
+                            queued.push(tool_use(
+                                ts,
+                                model_for(&current_turn_id, &turn_models),
+                                call_id,
+                                &name,
+                                input,
+                            ));
+                        }
                     }
                     "function_call_output" => {
-                        let Some(call_id) = payload
+                        // A result without a call_id cannot pair with its
+                        // call.
+                        if let Some(call_id) = payload
                             .get("call_id")
                             .and_then(Value::as_str)
                             .map(String::from)
-                        else {
-                            continue;
-                        };
-                        let content = payload
-                            .get("output")
-                            .and_then(Value::as_str)
-                            .map_or(ToolOutput::Text(String::new()), |s| {
-                                ToolOutput::Text(s.to_string())
-                            });
-                        queued.push(tool_result(ts, call_id, content, false, true));
+                        {
+                            let content = payload
+                                .get("output")
+                                .and_then(Value::as_str)
+                                .map_or(ToolOutput::Text(String::new()), |s| {
+                                    ToolOutput::Text(s.to_string())
+                                });
+                            queued.push(tool_result(ts, call_id, content, false, true));
+                        }
                     }
                     "custom_tool_call" => {
-                        let Some(call_id) = payload
+                        // A call without a call_id cannot pair with its
+                        // result.
+                        if let Some(call_id) = payload
                             .get("call_id")
                             .and_then(Value::as_str)
                             .map(String::from)
-                        else {
-                            continue;
-                        };
-                        let raw_name = payload
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or("custom_tool")
-                            .to_string();
-                        let raw_input = match payload.get("input") {
-                            Some(Value::String(raw)) => parse_json_string_or_raw(raw),
-                            Some(other) => other.clone(),
-                            None => Value::Object(Map::new()),
-                        };
-                        let (name, input) = normalize_custom_tool(&raw_name, raw_input);
-                        queued.push(tool_use(
-                            ts,
-                            model_for(&current_turn_id, &turn_models),
-                            call_id,
-                            &name,
-                            input,
-                        ));
+                        {
+                            let raw_name = payload
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("custom_tool")
+                                .to_string();
+                            let raw_input = match payload.get("input") {
+                                Some(Value::String(raw)) => parse_json_string_or_raw(raw),
+                                Some(other) => other.clone(),
+                                None => Value::Object(Map::new()),
+                            };
+                            let (name, input) = normalize_custom_tool(&raw_name, raw_input);
+                            queued.push(tool_use(
+                                ts,
+                                model_for(&current_turn_id, &turn_models),
+                                call_id,
+                                &name,
+                                input,
+                            ));
+                        }
                     }
                     "custom_tool_call_output" => {
-                        let Some(call_id) = payload
+                        // A result without a call_id cannot pair with its
+                        // call.
+                        if let Some(call_id) = payload
                             .get("call_id")
                             .and_then(Value::as_str)
                             .map(String::from)
-                        else {
-                            continue;
-                        };
-                        let raw = payload
-                            .get("output")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        let (content, is_error) = parse_custom_tool_output(raw);
-                        canonical_results.insert(call_id.clone());
-                        queued.push(tool_result(ts, call_id, content, is_error, false));
+                        {
+                            let raw = payload
+                                .get("output")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            let (content, is_error) = parse_custom_tool_output(raw);
+                            canonical_results.insert(call_id.clone());
+                            queued.push(tool_result(ts, call_id, content, is_error, false));
+                        }
                     }
                     "web_search_call" => {
                         let action = payload.get("action").cloned().unwrap_or(Value::Null);
                         let action_key = serde_json::to_string(&action).unwrap_or_default();
                         let seq = queued.len();
-                        let call_id = if let Some(id) = payload
+                        let call_id = payload
                             .get("call_id")
                             .and_then(Value::as_str)
                             .map(String::from)
-                        {
-                            id
-                        } else if let Some(ids) = pending_web_search_ids.get_mut(&action_key) {
-                            ids.pop().unwrap_or_else(|| format!("web_search:{seq}"))
-                        } else {
-                            format!("web_search:{seq}")
-                        };
+                            .or_else(|| {
+                                pending_web_search_ids
+                                    .get_mut(&action_key)
+                                    .and_then(Vec::pop)
+                            })
+                            .unwrap_or_else(|| format!("web_search:{seq}"));
                         queued.push(tool_use(
                             ts,
                             model_for(&current_turn_id, &turn_models),
@@ -379,9 +390,11 @@ fn lines_to_messages(lines: &[Line], fallback_ts: DateTime<Utc>) -> Vec<Message>
                                 .push(queued.len() - 1);
                         }
                     }
+                    // Other protocol items have no Common representation.
                     _ => {}
                 }
             }
+            // Other envelope kinds carry no conversational content.
             _ => {}
         }
     }
@@ -539,10 +552,9 @@ fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str) {
     for block in &msg.content {
         match block {
             Block::Text { text } => {
-                let kind = if matches!(msg.role, Role::Assistant) {
-                    "output_text"
-                } else {
-                    "input_text"
+                let kind = match msg.role {
+                    Role::Assistant => "output_text",
+                    Role::User => "input_text",
                 };
                 message_content.push(json!({ "type": kind, "text": text }));
                 text_chunks.push(text.clone());
@@ -664,28 +676,29 @@ impl Store for CodexStore {
     type Ref = PathBuf;
 
     fn discover(&self) -> Result<Vec<Discovered<PathBuf>>> {
-        if !self.sessions_dir.is_dir() {
-            return Ok(Vec::new());
+        if self.sessions_dir.is_dir() {
+            let mut files = Vec::new();
+            collect_rollouts(&self.sessions_dir, &mut files);
+            Ok(files
+                .into_iter()
+                .filter_map(|path| {
+                    // A rollout that fails to load, or lacks a session_meta
+                    // with an id, is not a resumable session.
+                    let transcript = self.load(&path).ok()?;
+                    let has_meta = transcript.body.iter().any(|l| {
+                        l.kind == "session_meta"
+                            && l.payload.get("id").and_then(Value::as_str).is_some()
+                    });
+                    has_meta.then_some(Discovered {
+                        meta: transcript.meta,
+                        reference: path,
+                    })
+                })
+                .collect())
+        } else {
+            // A missing sessions root means no sessions, not an error.
+            Ok(Vec::new())
         }
-        let mut files = Vec::new();
-        collect_rollouts(&self.sessions_dir, &mut files);
-        let mut out = Vec::new();
-        for path in files {
-            // A rollout must carry a session_meta with an id.
-            let Ok(transcript) = self.load(&path) else {
-                continue;
-            };
-            let has_meta = transcript.body.iter().any(|l| {
-                l.kind == "session_meta" && l.payload.get("id").and_then(Value::as_str).is_some()
-            });
-            if has_meta {
-                out.push(Discovered {
-                    meta: transcript.meta,
-                    reference: path,
-                });
-            }
-        }
-        Ok(out)
     }
 
     fn load(&self, reference: &PathBuf) -> Result<Transcript<Codex>> {
@@ -736,57 +749,58 @@ fn meta_from_lines(lines: &[Line]) -> Meta {
         cli_version: None,
         model: None,
     };
-    for line in lines {
-        if line.kind == "session_meta" {
-            let p = &line.payload;
-            meta.id = p
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            meta.cwd = p.get("cwd").and_then(Value::as_str).map(String::from);
-            meta.git_branch = p
-                .get("git")
-                .and_then(|g| g.get("branch"))
-                .and_then(Value::as_str)
-                .map(String::from);
-            meta.cli_version = p
-                .get("cli_version")
-                .and_then(Value::as_str)
-                .map(String::from);
-            meta.model = p
-                .get("model")
-                .or_else(|| p.get("model_name"))
-                .and_then(Value::as_str)
-                .map(String::from);
-            if let Some(ts) = p
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(parse_ts)
-            {
-                meta.timestamp = ts;
-            }
-            break;
+    // Only the first session_meta names the session.
+    if let Some(p) = lines
+        .iter()
+        .find(|l| l.kind == "session_meta")
+        .map(|l| &l.payload)
+    {
+        meta.id = p
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        meta.cwd = p.get("cwd").and_then(Value::as_str).map(String::from);
+        meta.git_branch = p
+            .get("git")
+            .and_then(|g| g.get("branch"))
+            .and_then(Value::as_str)
+            .map(String::from);
+        meta.cli_version = p
+            .get("cli_version")
+            .and_then(Value::as_str)
+            .map(String::from);
+        meta.model = p
+            .get("model")
+            .or_else(|| p.get("model_name"))
+            .and_then(Value::as_str)
+            .map(String::from);
+        if let Some(ts) = p
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_ts)
+        {
+            meta.timestamp = ts;
         }
     }
     meta
 }
 
 fn collect_rollouts(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_rollouts(&path, out);
-        } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && name.starts_with("rollout-")
-            && path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
-        {
-            out.push(path);
+    // An unreadable directory contributes no rollouts.
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rollouts(&path, out);
+            } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with("rollout-")
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+            {
+                out.push(path);
+            }
         }
     }
 }
@@ -808,28 +822,31 @@ fn normalize_custom_tool(name: &str, input: Value) -> (String, Value) {
 }
 
 fn normalize_shell_tool_input(input: Value) -> (String, Value) {
-    let Value::Object(obj) = input else {
-        return ("Bash".to_string(), input);
-    };
-    let mut normalized = Map::new();
-    if let Some(command) = obj
-        .get("cmd")
-        .and_then(command_value_to_display)
-        .or_else(|| obj.get("command").and_then(command_value_to_display))
-    {
-        normalized.insert("command".to_string(), Value::String(command));
-    }
-    if let Some(workdir) = obj
-        .get("workdir")
-        .or_else(|| obj.get("cwd"))
-        .and_then(Value::as_str)
-    {
-        normalized.insert("workdir".to_string(), Value::String(workdir.to_string()));
-    }
-    if normalized.is_empty() {
-        ("Bash".to_string(), Value::Object(obj))
-    } else {
-        ("Bash".to_string(), Value::Object(normalized))
+    match input {
+        Value::Object(obj) => {
+            let mut normalized = Map::new();
+            if let Some(command) = obj
+                .get("cmd")
+                .and_then(command_value_to_display)
+                .or_else(|| obj.get("command").and_then(command_value_to_display))
+            {
+                normalized.insert("command".to_string(), Value::String(command));
+            }
+            if let Some(workdir) = obj
+                .get("workdir")
+                .or_else(|| obj.get("cwd"))
+                .and_then(Value::as_str)
+            {
+                normalized.insert("workdir".to_string(), Value::String(workdir.to_string()));
+            }
+            if normalized.is_empty() {
+                ("Bash".to_string(), Value::Object(obj))
+            } else {
+                ("Bash".to_string(), Value::Object(normalized))
+            }
+        }
+        // A non-object input has no fields to normalize; pass it through.
+        other => ("Bash".to_string(), other),
     }
 }
 
@@ -843,7 +860,8 @@ fn command_value_to_display(value: &Value) -> Option<String> {
                     Value::String(t) => Some(t.clone()),
                     Value::Number(n) => Some(n.to_string()),
                     Value::Bool(b) => Some(b.to_string()),
-                    _ => None,
+                    // Nulls and nested containers have no argv rendering.
+                    Value::Null | Value::Array(_) | Value::Object(_) => None,
                 })
                 .collect();
             if strings.is_empty() {
@@ -857,19 +875,16 @@ fn command_value_to_display(value: &Value) -> Option<String> {
                 Some(strings.join(" "))
             }
         }
-        _ => None,
+        // Nulls, scalars, and objects are not command encodings.
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => None,
     }
 }
 
 // A single-pass parser of the apply_patch envelope format; the state types
 // below are its private grammar and the length is the grammar's, not the
 // function's.
-#[allow(clippy::too_many_lines, clippy::items_after_statements)]
+#[allow(clippy::too_many_lines)]
 fn normalize_apply_patch_input(input: Value) -> (String, Value) {
-    let Value::String(patch) = input else {
-        return ("ApplyPatch".to_string(), input);
-    };
-
     enum Op {
         Add {
             file_path: String,
@@ -911,11 +926,8 @@ fn normalize_apply_patch_input(input: Value) -> (String, Value) {
                     if let Some(h) = current {
                         hunks.push(h);
                     }
-                    if hunks.len() != 1 {
-                        return None;
-                    }
-                    let h = hunks.pop()?;
-                    Some(Op::Update {
+                    // Only a single-hunk update maps onto one Edit.
+                    <[Hunk; 1]>::try_from(hunks).ok().map(|[h]| Op::Update {
                         file_path,
                         old: h.old.join("\n"),
                         new: h.new.join("\n"),
@@ -924,105 +936,130 @@ fn normalize_apply_patch_input(input: Value) -> (String, Value) {
             }
         }
     }
-
-    let fallback = |patch: &str| {
-        (
-            "ApplyPatch".to_string(),
-            json!({ "patch": patch, "files": apply_patch_file_paths(patch) }),
-        )
-    };
-
-    let mut ops = Vec::new();
-    let mut current: Option<Pending> = None;
-    for line in patch.lines() {
-        if line == "*** Begin Patch" || line == "*** End Patch" || line == "*** End of File" {
-            continue;
-        }
-        if let Some(fp) = line.strip_prefix("*** Add File: ") {
-            if let Some(p) = current.take() {
-                match p.finish() {
-                    Some(op) => ops.push(op),
-                    None => return fallback(&patch),
-                }
-            }
-            current = Some(Pending::Add {
-                file_path: fp.to_string(),
-                lines: Vec::new(),
-            });
-            continue;
-        }
-        if let Some(fp) = line.strip_prefix("*** Update File: ") {
-            if let Some(p) = current.take() {
-                match p.finish() {
-                    Some(op) => ops.push(op),
-                    None => return fallback(&patch),
-                }
-            }
-            current = Some(Pending::Update {
-                file_path: fp.to_string(),
-                hunks: Vec::new(),
-                current: None,
-            });
-            continue;
-        }
-        if line.starts_with("*** Delete File: ") || line.starts_with("*** Move to: ") {
-            return fallback(&patch);
-        }
-        match current.as_mut() {
-            Some(Pending::Add { lines, .. }) => {
-                if let Some(c) = line.strip_prefix('+') {
-                    lines.push(c.to_string());
-                }
-            }
-            Some(Pending::Update { hunks, current, .. }) => {
-                if line.starts_with("@@") {
-                    if let Some(h) = current.take() {
-                        hunks.push(h);
+    struct Parser {
+        ops: Vec<Op>,
+        current: Option<Pending>,
+    }
+    impl Parser {
+        /// Fold one patch line into the state; `None` means the patch does
+        /// not normalize and the caller keeps the raw envelope.
+        fn feed(&mut self, line: &str) -> Option<()> {
+            if line == "*** Begin Patch" || line == "*** End Patch" || line == "*** End of File" {
+                // Envelope framing carries no file content.
+                Some(())
+            } else if let Some(fp) = line.strip_prefix("*** Add File: ") {
+                self.flush()?;
+                self.current = Some(Pending::Add {
+                    file_path: fp.to_string(),
+                    lines: Vec::new(),
+                });
+                Some(())
+            } else if let Some(fp) = line.strip_prefix("*** Update File: ") {
+                self.flush()?;
+                self.current = Some(Pending::Update {
+                    file_path: fp.to_string(),
+                    hunks: Vec::new(),
+                    current: None,
+                });
+                Some(())
+            } else if line.starts_with("*** Delete File: ") || line.starts_with("*** Move to: ") {
+                // Deletes and moves have no Write/Edit equivalent.
+                None
+            } else {
+                match self.current.as_mut() {
+                    Some(Pending::Add { lines, .. }) => {
+                        if let Some(c) = line.strip_prefix('+') {
+                            lines.push(c.to_string());
+                        }
                     }
-                    *current = Some(Hunk {
-                        old: Vec::new(),
-                        new: Vec::new(),
-                    });
-                    continue;
+                    Some(Pending::Update { hunks, current, .. }) => {
+                        if line.starts_with("@@") {
+                            if let Some(h) = current.take() {
+                                hunks.push(h);
+                            }
+                            *current = Some(Hunk {
+                                old: Vec::new(),
+                                new: Vec::new(),
+                            });
+                        } else if let Some(h) = current.as_mut() {
+                            if let Some(c) = line.strip_prefix(' ') {
+                                h.old.push(c.to_string());
+                                h.new.push(c.to_string());
+                            } else if let Some(c) = line.strip_prefix('-') {
+                                h.old.push(c.to_string());
+                            } else if let Some(c) = line.strip_prefix('+') {
+                                h.new.push(c.to_string());
+                            }
+                        }
+                        // Update lines before the first @@ have no hunk to
+                        // join; they are envelope noise.
+                    }
+                    // Content before any file header has no home.
+                    None => {}
                 }
-                let Some(h) = current.as_mut() else {
-                    continue;
-                };
-                if let Some(c) = line.strip_prefix(' ') {
-                    h.old.push(c.to_string());
-                    h.new.push(c.to_string());
-                } else if let Some(c) = line.strip_prefix('-') {
-                    h.old.push(c.to_string());
-                } else if let Some(c) = line.strip_prefix('+') {
-                    h.new.push(c.to_string());
+                Some(())
+            }
+        }
+
+        fn flush(&mut self) -> Option<()> {
+            match self.current.take() {
+                // Nothing pending is trivially flushed.
+                None => Some(()),
+                Some(p) => {
+                    self.ops.push(p.finish()?);
+                    Some(())
                 }
             }
-            None => {}
+        }
+
+        fn finish(mut self) -> Option<Vec<Op>> {
+            self.flush()?;
+            Some(self.ops)
         }
     }
-    if let Some(p) = current {
-        match p.finish() {
-            Some(op) => ops.push(op),
-            None => return fallback(&patch),
+
+    match input {
+        Value::String(patch) => {
+            let mut parser = Parser {
+                ops: Vec::new(),
+                current: None,
+            };
+            let single = patch
+                .lines()
+                .try_for_each(|line| parser.feed(line))
+                .and_then(|()| parser.finish())
+                // Only a lone Add/Update maps onto Write/Edit.
+                .and_then(|ops| <[Op; 1]>::try_from(ops).ok());
+            match single {
+                Some([Op::Add { file_path, content }]) => (
+                    "Write".to_string(),
+                    json!({ "file_path": file_path, "content": content }),
+                ),
+                Some(
+                    [
+                        Op::Update {
+                            file_path,
+                            old,
+                            new,
+                        },
+                    ],
+                ) => (
+                    "Edit".to_string(),
+                    json!({ "file_path": file_path, "old_string": old, "new_string": new }),
+                ),
+                // Multi-op, delete/move, or malformed patches keep the raw
+                // envelope with the touched paths listed.
+                None => {
+                    let files = apply_patch_file_paths(&patch);
+                    (
+                        "ApplyPatch".to_string(),
+                        json!({ "patch": patch, "files": files }),
+                    )
+                }
+            }
         }
-    }
-    if ops.len() != 1 {
-        return fallback(&patch);
-    }
-    match ops.into_iter().next() {
-        Some(Op::Add { file_path, content }) => (
-            "Write".to_string(),
-            json!({ "file_path": file_path, "content": content }),
-        ),
-        Some(Op::Update {
-            file_path,
-            old,
-            new,
-        }) => (
-            "Edit".to_string(),
-            json!({ "file_path": file_path, "old_string": old, "new_string": new }),
-        ),
-        None => fallback(&patch),
+        // A non-string input is not a patch envelope; pass it through.
+        other => ("ApplyPatch".to_string(), other),
     }
 }
 
@@ -1041,10 +1078,11 @@ fn apply_patch_file_paths(patch: &str) -> Vec<String> {
 // ── payload parsing ────────────────────────────────────────────────────
 
 fn parse_content_blocks(content: &Value) -> Vec<Block> {
-    let Some(arr) = content.as_array() else {
-        return Vec::new();
-    };
-    arr.iter()
+    // Non-array content has no blocks.
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|entry| match entry.get("type").and_then(Value::as_str)? {
             "input_text" | "output_text" => {
                 let text = entry.get("text")?.as_str()?.to_string();
@@ -1054,6 +1092,7 @@ fn parse_content_blocks(content: &Value) -> Vec<Block> {
                 let url = entry.get("image_url")?.as_str()?;
                 parse_data_url_image(url).map(|source| Block::Image { source })
             }
+            // Other content kinds have no Common representation.
             _ => None,
         })
         .collect()
@@ -1073,28 +1112,20 @@ fn parse_data_url_image(image_url: &str) -> Option<ImageSource> {
 }
 
 fn is_setup_message(content: &Value) -> bool {
-    let Some(arr) = content.as_array() else {
-        return false;
-    };
-    let mut saw_text = false;
-    for entry in arr {
-        let Some(kind) = entry.get("type").and_then(Value::as_str) else {
-            return false;
-        };
-        match kind {
-            "input_text" | "output_text" => {
-                let Some(text) = entry.get("text").and_then(Value::as_str) else {
-                    return false;
-                };
-                if !is_setup_text(text) {
-                    return false;
-                }
-                saw_text = true;
-            }
-            _ => return false,
-        }
-    }
-    saw_text
+    // A setup message is a non-empty block array in which every block is a
+    // text block whose text is setup scaffolding.
+    content.as_array().is_some_and(|arr| {
+        !arr.is_empty()
+            && arr.iter().all(|entry| {
+                matches!(
+                    entry.get("type").and_then(Value::as_str),
+                    Some("input_text" | "output_text")
+                ) && entry
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_setup_text)
+            })
+    })
 }
 
 fn is_setup_text(text: &str) -> bool {
@@ -1132,22 +1163,24 @@ fn parse_last_token_usage(payload: &Value) -> Option<Usage> {
 }
 
 fn format_exec_output(payload: &Value) -> String {
+    // aggregated_output already interleaves both streams.
     if let Some(output) = payload.get("aggregated_output").and_then(Value::as_str) {
-        return output.to_string();
-    }
-    let stdout = payload
-        .get("stdout")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let stderr = payload
-        .get("stderr")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    match (stdout.is_empty(), stderr.is_empty()) {
-        (false, false) => format!("{stdout}\n{stderr}"),
-        (false, true) => stdout.to_string(),
-        (true, false) => stderr.to_string(),
-        (true, true) => String::new(),
+        output.to_string()
+    } else {
+        let stdout = payload
+            .get("stdout")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let stderr = payload
+            .get("stderr")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match (stdout.is_empty(), stderr.is_empty()) {
+            (false, false) => format!("{stdout}\n{stderr}"),
+            (false, true) => stdout.to_string(),
+            (true, false) => stderr.to_string(),
+            (true, true) => String::new(),
+        }
     }
 }
 

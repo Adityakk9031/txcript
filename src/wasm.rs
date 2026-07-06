@@ -26,22 +26,27 @@ use crate::transcript::{Codec, Common, HarnessId, TextCodec, Transcript};
 /// text.
 #[wasm_bindgen]
 pub fn convert(input: &str, from: &str, to: &str) -> Result<String, JsError> {
-    let from = parse_harness(from)?;
-    let to = parse_harness(to)?;
-    let common = parse_to_common(from, input).map_err(js)?;
-    render_from_common(to, &common).map_err(js)
+    parse_harness(from)
+        .and_then(|from| parse_harness(to).map(|to| (from, to)))
+        .and_then(|(from, to)| {
+            parse_to_common(from, input)
+                .and_then(|common| render_from_common(to, &common))
+                .map_err(js)
+        })
 }
 
 /// Parse a session into the canonical model as JSON (`{ meta, messages }`).
 #[wasm_bindgen(js_name = toCommon)]
 pub fn to_common(input: &str, from: &str) -> Result<String, JsError> {
-    let from = parse_harness(from)?;
-    let common = parse_to_common(from, input).map_err(js)?;
-    serde_json::to_string(&CommonJson {
-        meta: common.meta,
-        messages: common.body,
-    })
-    .map_err(js)
+    parse_harness(from)
+        .and_then(|from| parse_to_common(from, input).map_err(js))
+        .and_then(|common| {
+            serde_json::to_string(&CommonJson {
+                meta: common.meta,
+                messages: common.body,
+            })
+            .map_err(js)
+        })
 }
 
 /// Render a canonical model (`{ meta, messages }` JSON) into a harness's native
@@ -49,9 +54,11 @@ pub fn to_common(input: &str, from: &str) -> Result<String, JsError> {
 #[wasm_bindgen(js_name = fromCommon)]
 pub fn from_common(common_json: &str, to: &str) -> Result<String, JsError> {
     let to = parse_harness(to)?;
-    let parsed: CommonJson = serde_json::from_str(common_json).map_err(js)?;
-    let common = Transcript::new(parsed.meta, parsed.messages);
-    render_from_common(to, &common).map_err(js)
+    serde_json::from_str(common_json)
+        .map_err(js)
+        .and_then(|parsed: CommonJson| {
+            render_from_common(to, &Transcript::new(parsed.meta, parsed.messages)).map_err(js)
+        })
 }
 
 /// The harness names this build understands.

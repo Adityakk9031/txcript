@@ -184,6 +184,7 @@ impl From<Value> for ChatRecord {
             Some("assistant") => typed(&v, ChatRecord::Assistant),
             Some("reasoning") => typed(&v, ChatRecord::Reasoning),
             Some("tool_result") => typed(&v, ChatRecord::ToolResult),
+            // Unknown or untagged kinds stay whole in `Other` below.
             _ => None,
         };
         record.unwrap_or(ChatRecord::Other(v))
@@ -287,11 +288,11 @@ struct PromptChunks {
 
 fn index_updates(updates: &[Value]) -> DisplayIndex {
     let mut idx = DisplayIndex::default();
-    for line in updates {
-        let Some(update) = line.pointer("/params/update") else {
-            continue;
-        };
-        let Some(ts) = update_ts(line) else { continue };
+    // Lines without an update payload or a timestamp index nothing.
+    let dated = updates
+        .iter()
+        .filter_map(|line| line.pointer("/params/update").zip(update_ts(line)));
+    for (update, ts) in dated {
         let call_id = || {
             update
                 .get("toolCallId")
@@ -343,6 +344,8 @@ fn index_updates(updates: &[Value]) -> DisplayIndex {
                             idx.result_ts.insert(id.clone(), ts);
                             idx.failed.insert(id);
                         }
+                        // Interim statuses (pending, in_progress) carry no
+                        // result timestamp or failure verdict yet.
                         _ => {}
                     }
                 }
@@ -354,6 +357,8 @@ fn index_updates(updates: &[Value]) -> DisplayIndex {
                     .unwrap_or("end_turn");
                 idx.stop_reasons.push(parse_stop_reason(reason));
             }
+            // Other update kinds (plans, command lists, …) don't touch the
+            // conversation.
             _ => {}
         }
     }
@@ -391,64 +396,64 @@ fn body_to_messages(body: &GrokSession, fallback_ts: DateTime<Utc>) -> Vec<Messa
 
     for record in &body.chat_history {
         match record {
+            // Grok's injected `<user_info>` preamble is context, not a prompt.
+            ChatRecord::User(line) if is_user_info(&line.content) => {}
             ChatRecord::User(line) => {
-                if is_user_info(&line.content) {
-                    continue;
-                }
                 let mut content = parse_user_blocks(&line.content);
-                if content.is_empty() {
-                    continue;
+                // A prompt whose blocks parse to nothing carries no turn.
+                if !content.is_empty() {
+                    if in_turn {
+                        turn_last_assistant.push(current_last_assistant.take());
+                    }
+                    if line.prior_turn_interrupt.is_some() && !turn_last_assistant.is_empty() {
+                        interrupted_turns.insert(turn_last_assistant.len() - 1);
+                    }
+                    in_turn = true;
+                    // The prompt's images live only in the display log.
+                    let prompt = prompts.next();
+                    let images = prompt.map(|p| p.images.as_slice()).unwrap_or_default();
+                    content.extend(images.iter().cloned().map(|source| Block::Image { source }));
+                    let ts = prompt.and_then(|p| p.ts).unwrap_or(fallback_ts);
+                    messages.push(plain_message(Role::User, content, ts));
                 }
-                if in_turn {
-                    turn_last_assistant.push(current_last_assistant.take());
-                }
-                if line.prior_turn_interrupt.is_some() && !turn_last_assistant.is_empty() {
-                    interrupted_turns.insert(turn_last_assistant.len() - 1);
-                }
-                in_turn = true;
-                // The prompt's images live only in the display log.
-                let prompt = prompts.next();
-                let images = prompt.map(|p| p.images.as_slice()).unwrap_or_default();
-                content.extend(images.iter().cloned().map(|source| Block::Image { source }));
-                let ts = prompt.and_then(|p| p.ts).unwrap_or(fallback_ts);
-                messages.push(plain_message(Role::User, content, ts));
             }
             ChatRecord::Assistant(line) => {
                 let (content, first_call_id) = assistant_blocks(line);
-                if content.is_empty() {
-                    continue;
+                // A line with no text and no tool calls renders nothing.
+                if !content.is_empty() {
+                    // A text-bearing message streamed as an agent_message_chunk;
+                    // a tool-only message's time is its first tool_call.
+                    let timestamp =
+                        if line.content.as_str().is_some_and(|t| !t.trim().is_empty()) {
+                            agent_ts.next().copied()
+                        } else {
+                            first_call_id.and_then(|id| idx.call_ts.get(&id).copied())
+                        }
+                        .unwrap_or(fallback_ts);
+                    messages.push(Message {
+                        role: Role::Assistant,
+                        content,
+                        timestamp,
+                        model: line.model_id.clone(),
+                        stop_reason: None,
+                        usage: None,
+                    });
+                    current_last_assistant = Some(messages.len() - 1);
                 }
-                // A text-bearing message streamed as an agent_message_chunk;
-                // a tool-only message's time is its first tool_call.
-                let timestamp = if line.content.as_str().is_some_and(|t| !t.trim().is_empty()) {
-                    agent_ts.next().copied()
-                } else {
-                    first_call_id.and_then(|id| idx.call_ts.get(&id).copied())
-                }
-                .unwrap_or(fallback_ts);
-                messages.push(Message {
-                    role: Role::Assistant,
-                    content,
-                    timestamp,
-                    model: line.model_id.clone(),
-                    stop_reason: None,
-                    usage: None,
-                });
-                current_last_assistant = Some(messages.len() - 1);
             }
             ChatRecord::Reasoning(line) => {
-                let Some(text) = reasoning_summary_text(&line.summary) else {
-                    continue;
-                };
-                messages.push(plain_message(
-                    Role::Assistant,
-                    vec![Block::Thinking {
-                        text,
-                        signature: None,
-                        encrypted: line.encrypted_content.clone(),
-                    }],
-                    thought_ts.next().copied().unwrap_or(fallback_ts),
-                ));
+                // A reasoning line whose summary holds no text renders nothing.
+                if let Some(text) = reasoning_summary_text(&line.summary) {
+                    messages.push(plain_message(
+                        Role::Assistant,
+                        vec![Block::Thinking {
+                            text,
+                            signature: None,
+                            encrypted: line.encrypted_content.clone(),
+                        }],
+                        thought_ts.next().copied().unwrap_or(fallback_ts),
+                    ));
+                }
             }
             ChatRecord::ToolResult(line) => {
                 let content = match &line.content {
@@ -494,12 +499,16 @@ fn backfill_stop_reasons(
     interrupted_turns: &HashSet<usize>,
     idx: &DisplayIndex,
 ) {
-    for (turn, last) in turn_last_assistant.iter().enumerate() {
-        let Some(msg_idx) = last else { continue };
+    // Turns that produced no assistant message have nothing to stamp.
+    let stamped = turn_last_assistant
+        .iter()
+        .enumerate()
+        .filter_map(|(turn, last)| last.map(|msg_idx| (turn, msg_idx)));
+    for (turn, msg_idx) in stamped {
         if let Some(reason) = idx.stop_reasons.get(turn) {
-            messages[*msg_idx].stop_reason = Some(reason.clone());
+            messages[msg_idx].stop_reason = Some(reason.clone());
         } else if interrupted_turns.contains(&turn) {
-            messages[*msg_idx].stop_reason = Some(StopReason::Aborted);
+            messages[msg_idx].stop_reason = Some(StopReason::Aborted);
         }
     }
 }
@@ -525,16 +534,15 @@ fn assistant_blocks(line: &AssistantLine) -> (Vec<Block>, Option<String>) {
         });
     }
     let mut first_call_id = None;
-    for call in line
+    // A call missing its id cannot be paired with a result.
+    let calls = line
         .tool_calls
         .as_ref()
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-    {
-        let Some(id) = call.get("id").and_then(Value::as_str) else {
-            continue;
-        };
+        .filter_map(|call| call.get("id").and_then(Value::as_str).map(|id| (id, call)));
+    for (id, call) in calls {
         first_call_id.get_or_insert_with(|| id.to_string());
         let name = call.get("name").and_then(Value::as_str).unwrap_or("tool");
         let input = parse_arguments(call.get("arguments"));
@@ -551,18 +559,15 @@ fn is_user_info(content: &Value) -> bool {
 }
 
 fn user_texts(content: &Value) -> impl Iterator<Item = &str> {
-    let mut out = Vec::new();
-    match content {
-        Value::String(s) => out.push(s.as_str()),
-        Value::Array(arr) => {
-            for block in arr {
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    out.push(text);
-                }
-            }
-        }
-        _ => {}
-    }
+    let out: Vec<&str> = match content {
+        Value::String(s) => vec![s.as_str()],
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect(),
+        // Other JSON shapes carry no user text.
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => Vec::new(),
+    };
     out.into_iter()
 }
 
@@ -573,10 +578,13 @@ fn parse_user_blocks(content: &Value) -> Vec<Block> {
             .iter()
             .filter_map(|v| match v.get("type").and_then(Value::as_str) {
                 Some("text") => text_block(v.get("text").and_then(Value::as_str).unwrap_or("")),
+                // Non-text chunk kinds (images live in the display log)
+                // parse to nothing.
                 _ => None,
             })
             .collect(),
-        _ => Vec::new(),
+        // Other JSON shapes hold no prompt blocks.
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => Vec::new(),
     }
 }
 
@@ -680,25 +688,25 @@ fn normalize_tool(name: &str, input: Value) -> Tool {
 }
 
 fn normalize_args(tool: &str, args: Value) -> Value {
-    let Value::Object(obj) = args else {
-        return args;
-    };
-    let mut out = Map::new();
-    for (k, v) in obj {
-        let (key, value) = match (tool, k.as_str()) {
-            ("Read" | "Write" | "Edit" | "MultiEdit", "path") => ("file_path".into(), v),
-            ("Write", "contents") => ("content".into(), v),
-            ("Bash", "block_until_ms") => match integral(&v) {
-                Some(ms) => ("timeout_ms".into(), Value::from(ms)),
-                None => (k, v),
-            },
-            ("Glob", "glob_pattern") => ("pattern".into(), v),
-            ("Glob", "target_directory") => ("path".into(), v),
-            _ => (k, v),
-        };
-        out.insert(key, value);
+    match args {
+        Value::Object(obj) => Value::Object(
+            obj.into_iter()
+                .map(|(k, v)| match (tool, k.as_str()) {
+                    ("Read" | "Write" | "Edit" | "MultiEdit", "path") => ("file_path".into(), v),
+                    ("Write", "contents") => ("content".into(), v),
+                    ("Bash", "block_until_ms") => match integral(&v) {
+                        Some(ms) => ("timeout_ms".into(), Value::from(ms)),
+                        None => (k, v),
+                    },
+                    ("Glob", "glob_pattern") => ("pattern".into(), v),
+                    ("Glob", "target_directory") => ("path".into(), v),
+                    _ => (k, v),
+                })
+                .collect(),
+        ),
+        // Non-object arguments have no keys to rename; pass through.
+        other => other,
     }
-    Value::Object(out)
 }
 
 /// The inverse of [`normalize_tool`], for `from_common`.
@@ -714,22 +722,25 @@ fn denormalize_tool(tool: &Tool) -> (String, Value) {
 }
 
 fn denormalize_args(tool: &str, input: Value) -> Value {
-    let Value::Object(obj) = input else {
-        return input;
-    };
-    let mut out = Map::new();
-    for (k, v) in obj {
-        let key = match (tool, k.as_str()) {
-            ("Read" | "Write" | "Edit" | "MultiEdit", "file_path") => "path".into(),
-            ("Write", "content") => "contents".into(),
-            ("Bash", "timeout_ms") => "block_until_ms".into(),
-            ("Glob", "pattern") => "glob_pattern".into(),
-            ("Glob", "path") => "target_directory".into(),
-            _ => k,
-        };
-        out.insert(key, v);
+    match input {
+        Value::Object(obj) => Value::Object(
+            obj.into_iter()
+                .map(|(k, v)| {
+                    let key = match (tool, k.as_str()) {
+                        ("Read" | "Write" | "Edit" | "MultiEdit", "file_path") => "path".into(),
+                        ("Write", "content") => "contents".into(),
+                        ("Bash", "timeout_ms") => "block_until_ms".into(),
+                        ("Glob", "pattern") => "glob_pattern".into(),
+                        ("Glob", "path") => "target_directory".into(),
+                        _ => k,
+                    };
+                    (key, v)
+                })
+                .collect(),
+        ),
+        // Non-object input has no keys to rename; pass through.
+        other => other,
     }
-    Value::Object(out)
 }
 
 /// Grok writes `block_until_ms` as a float (`120000.0`); canonical
@@ -785,6 +796,7 @@ fn body_from_messages(meta: &Meta, messages: &[Message]) -> GrokSession {
                             }));
                             updates.tool_result(msg.timestamp, tool_use_id, content, *is_error);
                         }
+                        // Assistant-side blocks have no slot in a user record.
                         Block::Thinking { .. } | Block::ToolUse { .. } => {}
                     }
                 }
@@ -878,31 +890,34 @@ fn push_assistant(
                 }));
                 pending_calls.push((id.clone(), name, input));
             }
+            // User-side blocks have no slot in an assistant record.
             Block::Image { .. } | Block::ToolResult { .. } => {}
         }
     }
     if texts.is_empty() && tool_calls.is_empty() {
-        return false;
+        // Thinking-only: the reasoning lines above are all there is to write.
+        false
+    } else {
+        let text = texts.join("\n\n");
+        chat.push(ChatRecord::Assistant(AssistantLine {
+            content: Value::String(text.clone()),
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(Value::Array(tool_calls))
+            },
+            model_id: msg.model.clone(),
+            model_fingerprint: None,
+            extra: Map::new(),
+        }));
+        if !text.is_empty() {
+            updates.agent_message(msg.timestamp, &text);
+        }
+        for (id, name, input) in pending_calls {
+            updates.tool_call(msg.timestamp, &id, &name, &input);
+        }
+        true
     }
-    let text = texts.join("\n\n");
-    chat.push(ChatRecord::Assistant(AssistantLine {
-        content: Value::String(text.clone()),
-        tool_calls: if tool_calls.is_empty() {
-            None
-        } else {
-            Some(Value::Array(tool_calls))
-        },
-        model_id: msg.model.clone(),
-        model_fingerprint: None,
-        extra: Map::new(),
-    }));
-    if !text.is_empty() {
-        updates.agent_message(msg.timestamp, &text);
-    }
-    for (id, name, input) in pending_calls {
-        updates.tool_call(msg.timestamp, &id, &name, &input);
-    }
-    true
 }
 
 /// Builder for `updates.jsonl` — the display log `grok --resume` replays.
@@ -1063,7 +1078,8 @@ fn tool_output_string(content: &ToolOutput) -> String {
             });
             match block_texts {
                 Some(texts) if !texts.is_empty() => texts.join("\n\n"),
-                _ => v.to_string(),
+                // Not a text-block array (or an empty one): compact JSON.
+                Some(_) | None => v.to_string(),
             }
         }
     }
@@ -1161,7 +1177,12 @@ fn meta_from_body(body: &GrokSession) -> Meta {
     let model = get("current_model_id").or_else(|| {
         body.chat_history.iter().find_map(|r| match r {
             ChatRecord::Assistant(line) => line.model_id.clone(),
-            _ => None,
+            // Only assistant lines carry a model id.
+            ChatRecord::System(_)
+            | ChatRecord::User(_)
+            | ChatRecord::Reasoning(_)
+            | ChatRecord::ToolResult(_)
+            | ChatRecord::Other(_) => None,
         })
     });
 
@@ -1179,14 +1200,17 @@ fn meta_from_body(body: &GrokSession) -> Meta {
 /// Grok injects a `<user_info>` preamble carrying the workspace path; mine it
 /// when `summary.json` is absent.
 fn workspace_from_chat(records: &[ChatRecord]) -> Option<String> {
-    records.iter().find_map(|record| {
-        let ChatRecord::User(line) = record else {
-            return None;
-        };
-        user_texts(&line.content).find_map(|text| {
+    records.iter().find_map(|record| match record {
+        ChatRecord::User(line) => user_texts(&line.content).find_map(|text| {
             text.lines()
                 .find_map(|l| l.strip_prefix("Workspace Path: ").map(String::from))
-        })
+        }),
+        // Only user lines carry the injected preamble.
+        ChatRecord::System(_)
+        | ChatRecord::Assistant(_)
+        | ChatRecord::Reasoning(_)
+        | ChatRecord::ToolResult(_)
+        | ChatRecord::Other(_) => None,
     })
 }
 
@@ -1210,10 +1234,13 @@ impl GrokStore {
     /// `~/.grok/sessions`.
     #[must_use]
     pub fn default_root() -> Option<Self> {
-        if let Some(home) = std::env::var_os("GROK_HOME").filter(|v| !v.is_empty()) {
-            return Some(Self::new(PathBuf::from(home).join("sessions")));
-        }
-        std::env::var_os("HOME").map(|h| Self::new(PathBuf::from(h).join(".grok").join("sessions")))
+        std::env::var_os("GROK_HOME")
+            .filter(|v| !v.is_empty())
+            .map(|home| Self::new(PathBuf::from(home).join("sessions")))
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(|h| Self::new(PathBuf::from(h).join(".grok").join("sessions")))
+            })
     }
 }
 
@@ -1222,71 +1249,70 @@ impl Store for GrokStore {
     type Ref = PathBuf;
 
     fn discover(&self) -> Result<Vec<Discovered<PathBuf>>> {
-        let Ok(projects) = fs::read_dir(&self.sessions_dir) else {
-            return Ok(Vec::new());
-        };
-        let mut out = Vec::new();
-        for project in projects.flatten() {
-            let project_dir = project.path();
-            if !project_dir.is_dir() {
-                continue;
-            }
-            let Ok(sessions) = fs::read_dir(&project_dir) else {
-                continue;
-            };
-            for session in sessions.flatten() {
-                let dir = session.path();
+        match fs::read_dir(&self.sessions_dir) {
+            // No sessions root (Grok never ran here) means no sessions.
+            Err(_) => Ok(Vec::new()),
+            Ok(projects) => Ok(projects
+                .flatten()
+                .map(|project| project.path())
+                // Stray files at the project level aren't project dirs.
+                .filter(|project_dir| project_dir.is_dir())
+                // An unreadable project dir contributes nothing.
+                .filter_map(|project_dir| fs::read_dir(project_dir).ok())
+                .flat_map(Iterator::flatten)
+                .map(|session| session.path())
                 // Sniff: a Grok session directory carries at least one of its
                 // two conversation logs.
-                if !dir.join("updates.jsonl").is_file() && !dir.join("chat_history.jsonl").is_file()
-                {
-                    continue;
-                }
-                let Ok(transcript) = self.load(&dir) else {
-                    continue;
-                };
-                out.push(Discovered {
-                    meta: transcript.meta,
-                    reference: dir,
-                });
-            }
+                .filter(|dir| {
+                    dir.join("updates.jsonl").is_file() || dir.join("chat_history.jsonl").is_file()
+                })
+                // A directory that doesn't load as a session is skipped.
+                .filter_map(|dir| {
+                    let transcript = self.load(&dir).ok()?;
+                    Some(Discovered {
+                        meta: transcript.meta,
+                        reference: dir,
+                    })
+                })
+                .collect()),
         }
-        Ok(out)
     }
 
     fn load(&self, reference: &PathBuf) -> Result<Transcript<Grok>> {
-        if !reference.is_dir() {
-            return Err(std::io::Error::new(
+        if reference.is_dir() {
+            let text = |name: &str| fs::read_to_string(reference.join(name)).ok();
+            let lines = |name: &str| -> Vec<Value> {
+                text(name).map(|t| jsonl::parse(&t)).unwrap_or_default()
+            };
+            let value = |name: &str| -> Option<Value> {
+                text(name).and_then(|t| serde_json::from_str(&t).ok())
+            };
+
+            let body = GrokSession {
+                chat_history: text("chat_history.jsonl")
+                    .map(|t| jsonl::parse(&t))
+                    .unwrap_or_default(),
+                updates: lines("updates.jsonl"),
+                events: lines("events.jsonl"),
+                rewind_points: lines("rewind_points.jsonl"),
+                summary: value("summary.json"),
+                prompt_context: value("prompt_context.json"),
+                resources_state: value("resources_state.json"),
+                signals: value("signals.json"),
+                system_prompt: text("system_prompt.txt"),
+            };
+            let mut meta = meta_from_body(&body);
+            if meta.id.is_empty() {
+                meta.id = jsonl::file_id(reference);
+            }
+            Ok(Transcript::new(meta, body))
+        } else {
+            Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("no session directory at {}", reference.display()),
             )
-            .into());
+            .into())
         }
-        let text = |name: &str| fs::read_to_string(reference.join(name)).ok();
-        let lines =
-            |name: &str| -> Vec<Value> { text(name).map(|t| jsonl::parse(&t)).unwrap_or_default() };
-        let value = |name: &str| -> Option<Value> {
-            text(name).and_then(|t| serde_json::from_str(&t).ok())
-        };
-
-        let body = GrokSession {
-            chat_history: text("chat_history.jsonl")
-                .map(|t| jsonl::parse(&t))
-                .unwrap_or_default(),
-            updates: lines("updates.jsonl"),
-            events: lines("events.jsonl"),
-            rewind_points: lines("rewind_points.jsonl"),
-            summary: value("summary.json"),
-            prompt_context: value("prompt_context.json"),
-            resources_state: value("resources_state.json"),
-            signals: value("signals.json"),
-            system_prompt: text("system_prompt.txt"),
-        };
-        let mut meta = meta_from_body(&body);
-        if meta.id.is_empty() {
-            meta.id = jsonl::file_id(reference);
-        }
-        Ok(Transcript::new(meta, body))
     }
 
     fn save(&self, transcript: &Transcript<Grok>) -> Result<Saved<PathBuf>> {

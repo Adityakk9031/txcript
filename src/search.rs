@@ -240,24 +240,20 @@ pub fn search(transcript: &Transcript<Common>, query: &Query) -> Vec<Hit> {
     let lines = extract(&transcript.meta, &transcript.body);
     let pattern = query.compile();
     if pattern_is_empty(&pattern, query) {
-        return Vec::new();
+        // An empty pattern scores everything 0; match nothing instead.
+        Vec::new()
+    } else {
+        let mask = query.origin_mask();
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut indices = Vec::new();
+        lines
+            .iter()
+            // Lines from origins the query did not select are not searched.
+            .filter(|line| line.origin.bit() & mask != 0)
+            .filter_map(|line| line.hit(&pattern, &mut matcher, &mut indices))
+            .take(query.limit.unwrap_or(usize::MAX))
+            .collect()
     }
-    let mask = query.origin_mask();
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let mut indices = Vec::new();
-    let mut hits = Vec::new();
-    for line in &lines {
-        if line.origin.bit() & mask == 0 {
-            continue;
-        }
-        if let Some(hit) = line.hit(&pattern, &mut matcher, &mut indices) {
-            hits.push(hit);
-            if query.limit.is_some_and(|l| hits.len() >= l) {
-                break;
-            }
-        }
-    }
-    hits
 }
 
 // ── hot index ──────────────────────────────────────────────────────────
@@ -333,14 +329,18 @@ impl Index {
 
     /// Remove the document indexed under `key`. Returns whether it existed.
     pub fn remove(&mut self, key: &DocKey) -> bool {
-        let Some(i) = self.by_key.remove(key) else {
-            return false;
-        };
-        self.docs.swap_remove(i);
-        if let Some(moved) = self.docs.get(i) {
-            self.by_key.insert(moved.key.clone(), i);
+        match self.by_key.remove(key) {
+            // Unknown key: nothing to remove.
+            None => false,
+            Some(i) => {
+                self.docs.swap_remove(i);
+                // The doc swapped into slot `i` (if any) gets its index remapped.
+                if let Some(moved) = self.docs.get(i) {
+                    self.by_key.insert(moved.key.clone(), i);
+                }
+                true
+            }
         }
-        true
     }
 
     /// Run a query, returning matching documents ranked by best-hit score
@@ -353,58 +353,71 @@ impl Index {
     pub fn query(&self, query: &Query) -> Vec<DocMatch<'_>> {
         let pattern = query.compile();
         if pattern_is_empty(&pattern, query) {
-            return self.all_docs(query);
+            // Empty pattern: every selected document, newest first, no hits.
+            self.all_docs(query)
+        } else {
+            let mask = query.origin_mask();
+
+            // Pass 1: score every line, keep per-doc line indices. Highlight
+            // indices are deferred to pass 2 so only surviving docs pay for
+            // them.
+            let mut scored = self.score_all(&pattern, mask, query);
+
+            scored.sort_by(|a, b| {
+                b.1.cmp(&a.1).then_with(|| {
+                    self.docs[b.0]
+                        .meta
+                        .timestamp
+                        .cmp(&self.docs[a.0].meta.timestamp)
+                })
+            });
+            if let Some(limit) = query.limit {
+                scored.truncate(limit);
+            }
+
+            // Pass 2: highlight spans for the surviving docs' best lines only.
+            self.materialize(scored, &pattern, query)
         }
-        let mask = query.origin_mask();
-
-        // Pass 1: score every line, keep per-doc line indices. Highlight
-        // indices are deferred to pass 2 so only surviving docs pay for them.
-        let mut scored = self.score_all(&pattern, mask, query);
-
-        scored.sort_by(|a, b| {
-            b.1.cmp(&a.1).then_with(|| {
-                self.docs[b.0]
-                    .meta
-                    .timestamp
-                    .cmp(&self.docs[a.0].meta.timestamp)
-            })
-        });
-        if let Some(limit) = query.limit {
-            scored.truncate(limit);
-        }
-
-        // Pass 2: highlight spans for the surviving docs' best lines only.
-        self.materialize(scored, &pattern, query)
     }
 
     /// Turn pass-1 survivors into [`DocMatch`]es, computing highlight spans.
     /// Sharded like scoring — span extraction re-runs the matcher per line.
     /// Chunks of the ranked list concatenate in order, so ranking is kept.
+    #[cfg(not(target_arch = "wasm32"))]
     fn materialize(
         &self,
         mut scored: Vec<Scored>,
         pattern: &Compiled,
         query: &Query,
     ) -> Vec<DocMatch<'_>> {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-            if workers > 1 && scored.len() >= 64 {
-                let chunk = scored.len().div_ceil(workers);
-                return std::thread::scope(|scope| {
-                    let handles: Vec<_> = scored
-                        .chunks_mut(chunk)
-                        .map(|part| {
-                            scope.spawn(move || self.materialize_chunk(part, pattern, query))
-                        })
-                        .collect();
-                    handles
-                        .into_iter()
-                        .flat_map(|h| h.join().unwrap_or_default())
-                        .collect()
-                });
-            }
+        let workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        if workers > 1 && scored.len() >= 64 {
+            let chunk = scored.len().div_ceil(workers);
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = scored
+                    .chunks_mut(chunk)
+                    .map(|part| scope.spawn(move || self.materialize_chunk(part, pattern, query)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|h| h.join().unwrap_or_default())
+                    .collect()
+            })
+        } else {
+            // One core or a small result set: threads would only add latency.
+            self.materialize_chunk(&mut scored, pattern, query)
         }
+    }
+
+    /// Turn pass-1 survivors into [`DocMatch`]es, computing highlight spans.
+    /// wasm32 has no threads; it always materializes sequentially.
+    #[cfg(target_arch = "wasm32")]
+    fn materialize(
+        &self,
+        mut scored: Vec<Scored>,
+        pattern: &Compiled,
+        query: &Query,
+    ) -> Vec<DocMatch<'_>> {
         self.materialize_chunk(&mut scored, pattern, query)
     }
 
@@ -435,34 +448,39 @@ impl Index {
     }
 
     /// Score every selected document, sharding across cores when the corpus
-    /// is large enough to pay for the threads. wasm32 has no threads; it
-    /// always takes the sequential path.
+    /// is large enough to pay for the threads.
+    #[cfg(not(target_arch = "wasm32"))]
     fn score_all(&self, pattern: &Compiled, mask: u8, query: &Query) -> Vec<Scored> {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-            // Below ~64k lines a single core finishes in well under a
-            // millisecond; spawning threads would only add latency.
-            if workers > 1 && self.lines() >= 64 * 1024 {
-                // Shard by character volume, not document count — session
-                // sizes are heavily skewed, and one oversized shard would
-                // set the whole query's latency.
-                let shards = self.shards(workers);
-                return std::thread::scope(|scope| {
-                    let handles: Vec<_> = shards
-                        .into_iter()
-                        .map(|shard| {
-                            let docs = &self.docs[shard.clone()];
-                            scope.spawn(move || score_docs(docs, shard.start, pattern, mask, query))
-                        })
-                        .collect();
-                    handles
-                        .into_iter()
-                        .flat_map(|h| h.join().unwrap_or_default())
-                        .collect()
-                });
-            }
+        let workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        // Below ~64k lines a single core finishes in well under a
+        // millisecond; spawning threads would only add latency.
+        if workers > 1 && self.lines() >= 64 * 1024 {
+            // Shard by character volume, not document count — session
+            // sizes are heavily skewed, and one oversized shard would
+            // set the whole query's latency.
+            let shards = self.shards(workers);
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = shards
+                    .into_iter()
+                    .map(|shard| {
+                        let docs = &self.docs[shard.clone()];
+                        scope.spawn(move || score_docs(docs, shard.start, pattern, mask, query))
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|h| h.join().unwrap_or_default())
+                    .collect()
+            })
+        } else {
+            score_docs(&self.docs, 0, pattern, mask, query)
         }
+    }
+
+    /// Score every selected document. wasm32 has no threads; it always
+    /// takes the sequential path.
+    #[cfg(target_arch = "wasm32")]
+    fn score_all(&self, pattern: &Compiled, mask: u8, query: &Query) -> Vec<Scored> {
         score_docs(&self.docs, 0, pattern, mask, query)
     }
 
@@ -527,27 +545,28 @@ fn score_docs(
     query: &Query,
 ) -> Vec<Scored> {
     let mut matcher = Matcher::new(Config::DEFAULT);
-    let mut scored = Vec::new();
-    for (d, doc) in docs.iter().enumerate() {
-        if !doc.selected(query) {
-            continue;
-        }
-        let mut best = 0;
-        let mut hit_lines = Vec::new();
-        for (l, line) in doc.lines.iter().enumerate() {
-            if line.origin.bit() & mask == 0 {
-                continue;
-            }
-            if let Some(score) = pattern.score(line.text.slice(..), &mut matcher) {
-                best = best.max(score);
-                hit_lines.push((l, score));
-            }
-        }
-        if !hit_lines.is_empty() {
-            scored.push((base + d, best, hit_lines));
-        }
-    }
-    scored
+    docs.iter()
+        .enumerate()
+        // Documents outside the query's harness filter are not scored.
+        .filter(|(_, doc)| doc.selected(query))
+        .filter_map(|(d, doc)| {
+            let hit_lines: Vec<(usize, u32)> = doc
+                .lines
+                .iter()
+                .enumerate()
+                // Lines from origins the query did not select are not scored.
+                .filter(|(_, line)| line.origin.bit() & mask != 0)
+                .filter_map(|(l, line)| {
+                    pattern
+                        .score(line.text.slice(..), &mut matcher)
+                        .map(|score| (l, score))
+                })
+                .collect();
+            let best = hit_lines.iter().map(|&(_, score)| score).max();
+            // A document with no matching line does not survive pass 1.
+            best.map(|best| (base + d, best, hit_lines))
+        })
+        .collect()
 }
 
 /// Reduce a doc's matched lines to the ones worth materializing: the
@@ -645,49 +664,42 @@ impl Needle {
 
     /// Character index of the first occurrence in `hay`, under this needle's
     /// case rule.
+    #[allow(clippy::cast_possible_truncation)] // haystacks are single lines
     fn find(&self, hay: Utf32Str<'_>) -> Option<u32> {
-        let n = self.chars.len();
-        if n == 0 || n > hay.len() {
-            return None;
-        }
-        #[allow(clippy::cast_possible_truncation)] // haystacks are single lines
-        match hay {
-            Utf32Str::Ascii(bytes) => {
-                // A needle with non-ASCII characters cannot occur in an
-                // ASCII haystack.
-                let needle = self.bytes.as_deref()?;
-                if self.sensitive {
-                    return memchr::memmem::find(bytes, needle).map(|i| i as u32);
-                }
-                // Needle is folded lowercase; walk candidate positions of its
-                // first byte (either case) and verify the window.
-                let (first, upper) = (needle[0], needle[0].to_ascii_uppercase());
-                let mut offset = 0;
-                let candidates = &bytes[..=bytes.len() - n];
-                while let Some(i) = memchr::memchr2(first, upper, &candidates[offset..]) {
-                    let at = offset + i;
-                    if bytes[at..at + n].eq_ignore_ascii_case(needle) {
-                        return Some(at as u32);
+        match self.chars.len() {
+            // An empty needle matches nothing.
+            0 => None,
+            // A needle longer than the haystack cannot fit.
+            n if n > hay.len() => None,
+            n => match hay {
+                // A needle with non-ASCII characters (`bytes` is `None`)
+                // cannot occur in an ASCII haystack.
+                Utf32Str::Ascii(bytes) => self.bytes.as_deref().and_then(|needle| {
+                    if self.sensitive {
+                        memchr::memmem::find(bytes, needle).map(|i| i as u32)
+                    } else {
+                        // Needle is folded lowercase; walk candidate positions
+                        // of its first byte (either case) and verify the
+                        // window.
+                        let (first, upper) = (needle[0], needle[0].to_ascii_uppercase());
+                        memchr::memchr2_iter(first, upper, &bytes[..=bytes.len() - n])
+                            .find(|&at| bytes[at..at + n].eq_ignore_ascii_case(needle))
+                            .map(|at| at as u32)
                     }
-                    offset = at + 1;
-                    if offset >= candidates.len() {
-                        return None;
-                    }
-                }
-                None
-            }
-            Utf32Str::Unicode(chars) => chars
-                .windows(n)
-                .position(|w| {
-                    w.iter().zip(&self.chars).all(|(&c, &want)| {
-                        if self.sensitive {
-                            c == want
-                        } else {
-                            fold(c) == want
-                        }
+                }),
+                Utf32Str::Unicode(chars) => chars
+                    .windows(n)
+                    .position(|w| {
+                        w.iter().zip(&self.chars).all(|(&c, &want)| {
+                            if self.sensitive {
+                                c == want
+                            } else {
+                                fold(c) == want
+                            }
+                        })
                     })
-                })
-                .map(|i| i as u32),
+                    .map(|i| i as u32),
+            },
         }
     }
 
@@ -711,7 +723,9 @@ fn fold(c: char) -> char {
     let mut lower = c.to_lowercase();
     match (lower.next(), lower.next()) {
         (Some(l), None) => l,
-        _ => c, // multi-char lowercase expansions stay unfolded
+        // Multi-char lowercase expansions stay unfolded; `to_lowercase`
+        // never yields an empty expansion.
+        (Some(_), Some(_)) | (None, _) => c,
     }
 }
 
@@ -752,8 +766,10 @@ fn merge_spans(indices: &[u32]) -> Vec<Range<u32>> {
     let mut spans: Vec<Range<u32>> = Vec::new();
     for &i in indices {
         match spans.last_mut() {
+            // Adjacent to the open span: extend it.
             Some(last) if last.end == i => last.end = i + 1,
-            _ => spans.push(i..i + 1),
+            // First index, or a gap after the open span: start a new span.
+            Some(_) | None => spans.push(i..i + 1),
         }
     }
     spans
@@ -804,6 +820,7 @@ fn extract(meta: &Meta, messages: &[Message]) -> Vec<Line> {
                         push(m, b, Origin::ToolResult, &value.to_string());
                     }
                 },
+                // Images carry no searchable text.
                 Block::Image { .. } => {}
             }
         }

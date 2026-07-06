@@ -60,6 +60,8 @@ impl Codec for OpenCode {
                 Some("assistant") => {
                     build_assistant_messages(&record.info, &record.parts, ts, &mut messages);
                 }
+                // Any other role (or a missing one) carries no conversational
+                // turn.
                 _ => {}
             }
         }
@@ -121,33 +123,24 @@ fn meta_from_info(info: &Value) -> Meta {
 }
 
 fn build_user_message(parts: &[Value], ts: DateTime<Utc>, out: &mut Vec<Message>) {
-    let mut blocks = Vec::new();
-    for part in parts {
-        match part.get("type").and_then(Value::as_str) {
-            Some("text") => {
-                if part
-                    .get("synthetic")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                if let Some(text) = part.get("text").and_then(Value::as_str)
-                    && !text.trim().is_empty()
-                {
-                    blocks.push(Block::Text {
-                        text: text.to_string(),
-                    });
-                }
-            }
-            Some("file") => {
-                if let Some(source) = parse_file_image(part) {
-                    blocks.push(Block::Image { source });
-                }
-            }
-            _ => {}
-        }
-    }
+    let blocks: Vec<Block> = parts
+        .iter()
+        .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+            // Synthetic text is harness bookkeeping, not something the user
+            // wrote.
+            Some("text") if is_synthetic(part) => None,
+            Some("text") => part
+                .get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| Block::Text {
+                    text: text.to_string(),
+                }),
+            Some("file") => parse_file_image(part).map(|source| Block::Image { source }),
+            // Tool and bookkeeping parts don't occur on user messages.
+            _ => None,
+        })
+        .collect();
     if !blocks.is_empty() {
         out.push(Message {
             role: Role::User,
@@ -179,14 +172,9 @@ fn build_assistant_messages(
     for part in parts {
         match part.get("type").and_then(Value::as_str) {
             Some("text") => {
-                if part
-                    .get("synthetic")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                if let Some(text) = part.get("text").and_then(Value::as_str)
+                // Synthetic text is harness bookkeeping, not model output.
+                if !is_synthetic(part)
+                    && let Some(text) = part.get("text").and_then(Value::as_str)
                     && !text.trim().is_empty()
                 {
                     pending.push(Block::Text {
@@ -218,29 +206,31 @@ fn build_assistant_messages(
                     ts,
                     model.as_ref(),
                 );
-                let Some((use_block, result_block)) = parse_tool(part) else {
-                    continue;
-                };
-                out.push(Message {
-                    role: Role::Assistant,
-                    content: vec![use_block],
-                    timestamp: ts,
-                    model: model.clone(),
-                    stop_reason: None,
-                    usage: None,
-                });
-                assistant_indices.push(out.len() - 1);
-                if let Some(result_block) = result_block {
+                // A part without a `tool` name has nothing to convert.
+                if let Some((use_block, result_block)) = parse_tool(part) {
                     out.push(Message {
-                        role: Role::User,
-                        content: vec![result_block],
+                        role: Role::Assistant,
+                        content: vec![use_block],
                         timestamp: ts,
-                        model: None,
+                        model: model.clone(),
                         stop_reason: None,
                         usage: None,
                     });
+                    assistant_indices.push(out.len() - 1);
+                    if let Some(result_block) = result_block {
+                        out.push(Message {
+                            role: Role::User,
+                            content: vec![result_block],
+                            timestamp: ts,
+                            model: None,
+                            stop_reason: None,
+                            usage: None,
+                        });
+                    }
                 }
             }
+            // step-start/finish, snapshot, patch, … are bookkeeping, not
+            // conversation content.
             _ => {}
         }
     }
@@ -266,18 +256,17 @@ fn flush_assistant(
     ts: DateTime<Utc>,
     model: Option<&String>,
 ) {
-    if pending.is_empty() {
-        return;
+    if !pending.is_empty() {
+        out.push(Message {
+            role: Role::Assistant,
+            content: std::mem::take(pending),
+            timestamp: ts,
+            model: model.cloned(),
+            stop_reason: None,
+            usage: None,
+        });
+        indices.push(out.len() - 1);
     }
-    out.push(Message {
-        role: Role::Assistant,
-        content: std::mem::take(pending),
-        timestamp: ts,
-        model: model.cloned(),
-        stop_reason: None,
-        usage: None,
-    });
-    indices.push(out.len() - 1);
 }
 
 fn parse_tool(part: &Value) -> Option<(Block, Option<Block>)> {
@@ -456,7 +445,10 @@ fn user_part(
             );
             Some(base(p))
         }
-        _ => None,
+        // Thinking and ToolUse never occur on user turns; a ToolResult is
+        // folded into the preceding tool part by `assistant_part` and has no
+        // user-part shape of its own.
+        Block::Thinking { .. } | Block::ToolUse { .. } | Block::ToolResult { .. } => None,
     }
 }
 
@@ -605,16 +597,22 @@ fn denormalize_tool(name: &str, input: Value) -> (String, Value) {
 
 // ── small helpers ──────────────────────────────────────────────────────
 
+fn is_synthetic(part: &Value) -> bool {
+    part.get("synthetic")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn parse_file_image(part: &Value) -> Option<ImageSource> {
-    let mime = part.get("mime").and_then(Value::as_str)?;
-    if !mime.starts_with("image/") {
-        return None;
-    }
-    let url = part.get("url").and_then(Value::as_str)?;
-    let (header, data) = url.split_once(',')?;
-    if !header.starts_with("data:") {
-        return None;
-    }
+    let mime = part
+        .get("mime")
+        .and_then(Value::as_str)
+        .filter(|mime| mime.starts_with("image/"))?;
+    let (_, data) = part
+        .get("url")
+        .and_then(Value::as_str)?
+        .split_once(',')
+        .filter(|(header, _)| header.starts_with("data:"))?;
     Some(ImageSource {
         source_type: "base64".to_string(),
         media_type: mime.to_string(),
@@ -629,10 +627,8 @@ fn parse_tokens(tokens: Option<&Value>) -> Option<Usage> {
     let cache = tokens.get("cache");
     let cache_read = cache.and_then(|c| c.get("read")).and_then(Value::as_u64);
     let cache_write = cache.and_then(|c| c.get("write")).and_then(Value::as_u64);
-    if input == 0 && output == 0 && cache_read.is_none() && cache_write.is_none() {
-        return None;
-    }
-    Some(Usage {
+    // An all-zero, cache-less token object means no usage was recorded.
+    (input != 0 || output != 0 || cache_read.is_some() || cache_write.is_some()).then_some(Usage {
         input_tokens: input,
         output_tokens: output,
         cache_read_input_tokens: cache_read,
@@ -680,8 +676,15 @@ fn finish_str(r: Option<&StopReason>) -> &'static str {
         Some(StopReason::MaxTokens) => "length",
         Some(StopReason::ToolUse) => "tool_use",
         Some(StopReason::Error) => "error",
-        // OpenCode requires a finish; default the unset/other cases to "stop".
-        _ => "stop",
+        // OpenCode requires a finish and has no spelling for these; they all
+        // collapse to "stop".
+        Some(
+            StopReason::EndTurn
+            | StopReason::StopSequence
+            | StopReason::Aborted
+            | StopReason::Other(_),
+        )
+        | None => "stop",
     }
 }
 
@@ -700,17 +703,20 @@ fn output_to_string(out: &ToolOutput) -> String {
 }
 
 fn rename_keys(input: Value, renames: &[(&str, &str)]) -> Value {
-    let Value::Object(mut obj) = input else {
-        return input;
-    };
-    for (from, to) in renames {
-        if from != to
-            && let Some(value) = obj.remove(*from)
-        {
-            obj.insert((*to).to_string(), value);
+    match input {
+        Value::Object(mut obj) => {
+            for (from, to) in renames {
+                if from != to
+                    && let Some(value) = obj.remove(*from)
+                {
+                    obj.insert((*to).to_string(), value);
+                }
+            }
+            Value::Object(obj)
         }
+        // A non-object input has no keys to rename; pass it through untouched.
+        other => other,
     }
-    Value::Object(obj)
 }
 
 fn title_case(name: &str) -> String {
@@ -778,21 +784,24 @@ mod store {
         /// The default database, honoring `OPENCODE_DB` / `XDG_DATA_HOME`,
         /// falling back to `~/.local/share/opencode/opencode.db`.
         pub fn default_db() -> Option<Self> {
-            if let Some(direct) = std::env::var_os("OPENCODE_DB").filter(|v| !v.is_empty()) {
-                return Some(Self::new(PathBuf::from(direct)));
-            }
-            if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
-                return Some(Self::new(
-                    PathBuf::from(xdg).join("opencode").join("opencode.db"),
-                ));
-            }
-            let home = std::env::var_os("HOME").map(PathBuf::from)?;
-            Some(Self::new(
-                home.join(".local")
-                    .join("share")
-                    .join("opencode")
-                    .join("opencode.db"),
-            ))
+            std::env::var_os("OPENCODE_DB")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("XDG_DATA_HOME")
+                        .filter(|v| !v.is_empty())
+                        .map(|xdg| PathBuf::from(xdg).join("opencode").join("opencode.db"))
+                })
+                .or_else(|| {
+                    std::env::var_os("HOME").map(|home| {
+                        PathBuf::from(home)
+                            .join(".local")
+                            .join("share")
+                            .join("opencode")
+                            .join("opencode.db")
+                    })
+                })
+                .map(Self::new)
         }
 
         fn open(&self) -> Result<Connection> {
@@ -806,50 +815,50 @@ mod store {
         type Ref = String;
 
         fn discover(&self) -> Result<Vec<Discovered<String>>> {
-            if !self.db_path.is_file() {
-                return Ok(Vec::new());
+            if self.db_path.is_file() {
+                let conn = self.open()?;
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, directory, title, version, time_created, model \
+                         FROM session WHERE time_archived IS NULL ORDER BY time_created DESC",
+                    )
+                    .map_err(sqlite_err)?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<i64>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                        ))
+                    })
+                    .map_err(sqlite_err)?;
+                let raw: Vec<_> = rows.collect::<rusqlite::Result<_>>().map_err(sqlite_err)?;
+                Ok(raw
+                    .into_iter()
+                    .map(
+                        |(id, directory, title, version, time_created, model_json)| Discovered {
+                            meta: Meta {
+                                id: id.clone(),
+                                timestamp: time_created
+                                    .and_then(DateTime::from_timestamp_millis)
+                                    .unwrap_or_else(Utc::now),
+                                cwd: directory,
+                                git_branch: None,
+                                title: title.filter(|t| !is_placeholder_title(t)),
+                                cli_version: version,
+                                model: model_json.as_deref().and_then(model_id),
+                            },
+                            reference: id,
+                        },
+                    )
+                    .collect())
+            } else {
+                // No database means OpenCode has no sessions yet, not an error.
+                Ok(Vec::new())
             }
-            let conn = self.open()?;
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, directory, title, version, time_created, model \
-                     FROM session WHERE time_archived IS NULL ORDER BY time_created DESC",
-                )
-                .map_err(sqlite_err)?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                })
-                .map_err(sqlite_err)?;
-            let raw: Vec<_> = rows.collect::<rusqlite::Result<_>>().map_err(sqlite_err)?;
-            drop(stmt);
-
-            let mut out = Vec::new();
-            for (id, directory, title, version, time_created, model_json) in raw {
-                let timestamp = time_created
-                    .and_then(DateTime::from_timestamp_millis)
-                    .unwrap_or_else(Utc::now);
-                out.push(Discovered {
-                    meta: Meta {
-                        id: id.clone(),
-                        timestamp,
-                        cwd: directory,
-                        git_branch: None,
-                        title: title.filter(|t| !is_placeholder_title(t)),
-                        cli_version: version,
-                        model: model_json.as_deref().and_then(model_id),
-                    },
-                    reference: id,
-                });
-            }
-            Ok(out)
         }
 
         fn load(&self, reference: &String) -> Result<Transcript<OpenCode>> {
@@ -886,6 +895,8 @@ mod store {
             let mut parts_by_message: HashMap<String, Vec<Value>> = HashMap::new();
             for row in part_rows {
                 let (message_id, data) = row.map_err(sqlite_err)?;
+                // A part row whose JSON doesn't parse is dropped; the message
+                // survives without it.
                 if let Ok(value) = serde_json::from_str::<Value>(&data) {
                     parts_by_message.entry(message_id).or_default().push(value);
                 }
@@ -934,25 +945,27 @@ mod store {
                     harness: "opencode",
                     detail: format!("running `opencode import`: {e} (is OpenCode on PATH?)"),
                 })?;
-            if !output.status.success() {
-                return Err(Error::Unconvertible {
+            if output.status.success() {
+                let _ = std::fs::remove_file(&tmp);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let id = stdout
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Imported session: ").map(str::trim))
+                    .map_or_else(|| transcript.meta.id.clone(), String::from);
+                Ok(Saved {
+                    reference: id.clone(),
+                    id,
+                })
+            } else {
+                // The export file is left behind on purpose, for debugging.
+                Err(Error::Unconvertible {
                     harness: "opencode",
                     detail: format!(
                         "`opencode import` failed: {}",
                         String::from_utf8_lossy(&output.stderr)
                     ),
-                });
+                })
             }
-            let _ = std::fs::remove_file(&tmp);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let id = stdout
-                .lines()
-                .find_map(|l| l.strip_prefix("Imported session: ").map(str::trim))
-                .map_or_else(|| transcript.meta.id.clone(), String::from);
-            Ok(Saved {
-                reference: id.clone(),
-                id,
-            })
         }
 
         /// The database belongs to `OpenCode`, so "delete" is its own notion
@@ -970,39 +983,42 @@ mod store {
                 )
                 .map_err(sqlite_err)?;
             if updated == 0 {
-                return Err(Error::Malformed {
+                Err(Error::Malformed {
                     harness: "opencode",
                     detail: format!("no active session `{reference}` to archive"),
-                });
+                })
+            } else {
+                Ok(())
             }
-            Ok(())
         }
 
         fn fingerprints(&self, refs: &[String]) -> Result<HashMap<String, String>> {
-            if !self.db_path.is_file() {
-                return Ok(HashMap::new());
+            if self.db_path.is_file() {
+                let conn = self.open()?;
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT session_id, MAX(time_created) FROM message GROUP BY session_id",
+                    )
+                    .map_err(sqlite_err)?;
+                let rows = stmt
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                        ))
+                    })
+                    .map_err(sqlite_err)?;
+                let max_by: HashMap<String, i64> = rows
+                    .map(|row| row.map_err(sqlite_err))
+                    .collect::<Result<_>>()?;
+                Ok(refs
+                    .iter()
+                    .map(|s| (s.clone(), max_by.get(s).copied().unwrap_or(0).to_string()))
+                    .collect())
+            } else {
+                // No database yet: sessions have no fingerprints to report.
+                Ok(HashMap::new())
             }
-            let conn = self.open()?;
-            let mut stmt = conn
-                .prepare("SELECT session_id, MAX(time_created) FROM message GROUP BY session_id")
-                .map_err(sqlite_err)?;
-            let mut max_by: HashMap<String, i64> = HashMap::new();
-            let rows = stmt
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                    ))
-                })
-                .map_err(sqlite_err)?;
-            for row in rows {
-                let (sid, max) = row.map_err(sqlite_err)?;
-                max_by.insert(sid, max);
-            }
-            Ok(refs
-                .iter()
-                .map(|s| (s.clone(), max_by.get(s).copied().unwrap_or(0).to_string()))
-                .collect())
         }
     }
 

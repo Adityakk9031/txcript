@@ -470,7 +470,12 @@ fn from_common_regenerates_both_logs_and_summary() {
         .iter()
         .find_map(|r| match r {
             ChatRecord::User(l) => Some(l),
-            _ => None,
+            // Only user records carry the re-wrapped prompt.
+            ChatRecord::System(_)
+            | ChatRecord::Assistant(_)
+            | ChatRecord::Reasoning(_)
+            | ChatRecord::ToolResult(_)
+            | ChatRecord::Other(_) => None,
         })
         .unwrap();
     let text = first_user.content[0]["text"].as_str().unwrap();
@@ -609,7 +614,12 @@ fn unparseable_tool_arguments_fall_back_to_raw_string() {
         .iter()
         .find_map(|r| match r {
             ChatRecord::Assistant(l) => l.tool_calls.as_ref(),
-            _ => None,
+            // Tool calls hang off assistant records only.
+            ChatRecord::System(_)
+            | ChatRecord::User(_)
+            | ChatRecord::Reasoning(_)
+            | ChatRecord::ToolResult(_)
+            | ChatRecord::Other(_) => None,
         })
         .unwrap();
     assert_eq!(call[0]["arguments"].as_str(), Some("not json {"),);
@@ -642,7 +652,12 @@ fn structured_tool_outputs_flatten_to_strings_in_the_model_log() {
         .iter()
         .filter_map(|r| match r {
             ChatRecord::ToolResult(l) => Some(&l.content),
-            _ => None,
+            // Every other record kind carries no tool output.
+            ChatRecord::System(_)
+            | ChatRecord::User(_)
+            | ChatRecord::Assistant(_)
+            | ChatRecord::Reasoning(_)
+            | ChatRecord::Other(_) => None,
         })
         .collect();
     assert_eq!(

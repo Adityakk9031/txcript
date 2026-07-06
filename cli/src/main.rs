@@ -23,6 +23,7 @@
 //! this crate is argument parsing (clap) and terminal presentation.
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use txcript::{HarnessId, local};
@@ -90,12 +91,12 @@ fn harness(s: &str) -> Result<HarnessId, txcript::Error> {
     s.parse()
 }
 
-fn main() {
+fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::List => {
             cmd_list();
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         }
         Command::Continue {
             id,
@@ -110,31 +111,31 @@ fn main() {
             from,
         } => query::cmd_query(pattern, with, from),
     };
-    if let Err(e) = result {
+    result.unwrap_or_else(|e| {
         eprintln!("error: {e}");
-        std::process::exit(1);
-    }
+        ExitCode::FAILURE
+    })
 }
 
 fn cmd_list() {
     let sessions = discover_with_spinner();
     if sessions.is_empty() {
         println!("no local sessions found");
-        return;
-    }
-    println!("{:<12}  {:<38}  TITLE / FIRST MESSAGE", "HARNESS", "ID");
-    for s in &sessions {
-        let label = s
-            .meta
-            .title
-            .clone()
-            .unwrap_or_else(|| s.meta.cwd.clone().unwrap_or_default());
-        println!(
-            "{:<12}  {:<38}  {}",
-            s.harness.as_str(),
-            truncate(&s.meta.id, 38),
-            truncate(&label, 60)
-        );
+    } else {
+        println!("{:<12}  {:<38}  TITLE / FIRST MESSAGE", "HARNESS", "ID");
+        for s in &sessions {
+            let label = s
+                .meta
+                .title
+                .clone()
+                .unwrap_or_else(|| s.meta.cwd.clone().unwrap_or_default());
+            println!(
+                "{:<12}  {:<38}  {}",
+                s.harness.as_str(),
+                truncate(&s.meta.id, 38),
+                truncate(&label, 60)
+            );
+        }
     }
 }
 
@@ -144,7 +145,7 @@ fn cmd_continue(
     from: Option<HarnessId>,
     out: Option<&PathBuf>,
     no_resume: bool,
-) -> Result<(), String> {
+) -> Result<ExitCode, String> {
     // Locate the session by exact id or title, optionally scoped to one harness.
     let sessions = discover_with_spinner();
     let found = sessions
@@ -171,7 +172,7 @@ fn continue_session(
     with: Option<HarnessId>,
     out: Option<&std::path::Path>,
     resume: bool,
-) -> Result<(), String> {
+) -> Result<ExitCode, String> {
     let target = with.unwrap_or(found.harness);
 
     let resume_id = if target == found.harness && out.is_none() {
@@ -196,7 +197,7 @@ fn continue_session(
         handoff(&bin, &args)
     } else {
         println!("  resume with: {} {}", bin, args.join(" "));
-        Ok(())
+        Ok(ExitCode::SUCCESS)
     }
 }
 
@@ -210,9 +211,9 @@ fn discover_with_spinner() -> Vec<local::Session> {
 }
 
 /// Replace this process with the harness so it owns the terminal (a true
-/// handoff). On non-Unix, spawn-and-wait, then exit with the child's code.
+/// handoff). On non-Unix, spawn-and-wait, then report the child's code.
 #[cfg(unix)]
-fn handoff(bin: &str, args: &[String]) -> Result<(), String> {
+fn handoff(bin: &str, args: &[String]) -> Result<ExitCode, String> {
     use std::os::unix::process::CommandExt;
     // `exec` only returns if it failed to launch.
     let e = std::process::Command::new(bin).args(args).exec();
@@ -220,12 +221,19 @@ fn handoff(bin: &str, args: &[String]) -> Result<(), String> {
 }
 
 #[cfg(not(unix))]
-fn handoff(bin: &str, args: &[String]) -> Result<(), String> {
+fn handoff(bin: &str, args: &[String]) -> Result<ExitCode, String> {
     let status = std::process::Command::new(bin)
         .args(args)
         .status()
         .map_err(|e| format!("failed to launch `{bin}`: {e} (is it on PATH?)"))?;
-    std::process::exit(status.code().unwrap_or(0));
+    Ok(match status.code() {
+        // `ExitCode` is u8-wide; a child code outside 0..=255 still reports
+        // failure, just not the exact value.
+        Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        // No code (killed by a signal-equivalent): treated as success, as the
+        // previous `exit(code.unwrap_or(0))` did.
+        None => ExitCode::SUCCESS,
+    })
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -320,23 +328,28 @@ mod query {
         pattern: Option<String>,
         with: Option<HarnessId>,
         from: Option<HarnessId>,
-    ) -> Result<(), String> {
+    ) -> Result<std::process::ExitCode, String> {
         let (index, sessions) = build_index(from);
-        if let Some(pattern) = pattern {
-            if with.is_some() {
-                eprintln!("note: --with only affects the interactive picker; ignored here");
+        match pattern {
+            Some(pattern) => {
+                if with.is_some() {
+                    eprintln!("note: --with only affects the interactive picker; ignored here");
+                }
+                one_shot(&index, &pattern);
+                Ok(std::process::ExitCode::SUCCESS)
             }
-            one_shot(&index, &pattern);
-            return Ok(());
+            None => match tui::pick(&index)? {
+                // Cancelled; terminal already restored, nothing to continue.
+                None => Ok(std::process::ExitCode::SUCCESS),
+                Some(key) => {
+                    let session = sessions
+                        .get(&(key.harness, key.id.clone()))
+                        .ok_or("picked session vanished from the map")?;
+                    drop(index);
+                    super::continue_session(session, with, None, true)
+                }
+            },
         }
-        let Some(key) = tui::pick(&index)? else {
-            return Ok(()); // cancelled; terminal already restored
-        };
-        let session = sessions
-            .get(&(key.harness, key.id.clone()))
-            .ok_or("picked session vanished from the map")?;
-        drop(index);
-        super::continue_session(session, with, None, true)
     }
 
     /// Load every local session (scoped to `--from` if given) into a hot
@@ -347,24 +360,25 @@ mod query {
         let mut index = Index::new();
         let mut sessions: Sessions = HashMap::new();
         let total = found.len();
-        for (i, session) in found.into_iter().enumerate() {
-            if from.is_some_and(|h| session.harness != h) {
-                continue;
-            }
+        let scoped = found
+            .into_iter()
+            .enumerate()
+            .filter(|(_, session)| from.is_none_or(|h| session.harness == h));
+        for (i, session) in scoped {
             if i % 32 == 0 {
                 spinner.set(format!("indexing… ({i}/{total})"));
             }
-            let Ok(common) = session.read() else {
-                continue; // unreadable sessions are skipped, matching discover
-            };
-            index.insert(
-                DocKey {
-                    harness: session.harness,
-                    id: session.meta.id.clone(),
-                },
-                &common,
-            );
-            sessions.insert((session.harness, session.meta.id.clone()), session);
+            // Unreadable sessions are skipped, matching discover.
+            if let Ok(common) = session.read() {
+                index.insert(
+                    DocKey {
+                        harness: session.harness,
+                        id: session.meta.id.clone(),
+                    },
+                    &common,
+                );
+                sessions.insert((session.harness, session.meta.id.clone()), session);
+            }
         }
         spinner.stop(&format!(
             "indexed {} session(s), {} lines",
@@ -383,17 +397,17 @@ mod query {
         let matches = index.query(&q);
         if matches.is_empty() {
             println!("no matches for `{pattern}`");
-            return;
-        }
-        let color = std::io::stdout().is_terminal();
-        for m in &matches {
-            println!("{}", doc_line(m, color));
-            for hit in &m.hits {
-                let origin = format!("{:?}", hit.origin).to_lowercase();
-                println!(
-                    "  [{origin:>11}] {}",
-                    highlight(&hit.line, &hit.spans, 120, color)
-                );
+        } else {
+            let color = std::io::stdout().is_terminal();
+            for m in &matches {
+                println!("{}", doc_line(m, color));
+                for hit in &m.hits {
+                    let origin = format!("{:?}", hit.origin).to_lowercase();
+                    println!(
+                        "  [{origin:>11}] {}",
+                        highlight(&hit.line, &hit.spans, 120, color)
+                    );
+                }
             }
         }
     }
@@ -527,55 +541,66 @@ mod query {
         /// or `None` on cancel. The terminal is fully restored either way.
         pub(super) fn pick(index: &Index) -> Result<Option<DocKey>, String> {
             if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-                return Err("interactive query needs a terminal (pass a pattern instead)".into());
-            }
-            let term = Term::enter()?;
-            let mut input = String::new();
-            let mut selected = 0usize;
-            let mut stdin = std::io::stdin().lock();
+                // Raw mode and the alternate screen need real terminal stdio.
+                Err("interactive query needs a terminal (pass a pattern instead)".into())
+            } else {
+                let term = Term::enter()?;
+                let mut input = String::new();
+                let mut selected = 0usize;
+                let mut stdin = std::io::stdin().lock();
 
-            loop {
-                let (rows, cols) = term_size();
-                let visible = rows.saturating_sub(2).max(1);
-                let mut q = Query::fuzzy(&input);
-                q.limit = Some(visible);
-                q.hits_per_doc = Some(1);
-                let matches = index.query(&q);
-                selected = selected.min(matches.len().saturating_sub(1));
-                render(&input, &matches, selected, index.len(), rows, cols);
+                let picked = 'ui: loop {
+                    let (rows, cols) = term_size();
+                    let visible = rows.saturating_sub(2).max(1);
+                    let mut q = Query::fuzzy(&input);
+                    q.limit = Some(visible);
+                    q.hits_per_doc = Some(1);
+                    let matches = index.query(&q);
+                    selected = selected.min(matches.len().saturating_sub(1));
+                    render(&input, &matches, selected, index.len(), rows, cols);
 
-                loop {
-                    match read_key(&mut stdin)? {
-                        Key::None => continue,
-                        Key::Char(c) => {
-                            input.push(c);
-                            selected = 0;
-                        }
-                        Key::Backspace => {
-                            input.pop();
-                            selected = 0;
-                        }
-                        Key::Clear => {
-                            input.clear();
-                            selected = 0;
-                        }
-                        Key::Up => selected = selected.saturating_sub(1),
-                        Key::Down => selected += 1,
-                        Key::Enter => {
-                            let key = matches.get(selected).map(|m| m.key.clone());
-                            if key.is_some() {
-                                drop(term);
-                                return Ok(key);
+                    // Poll until a key changes state (break: re-render) or
+                    // settles the pick (break 'ui).
+                    loop {
+                        match read_key(&mut stdin)? {
+                            // A poll timeout: nothing pressed, keep waiting.
+                            Key::None => {}
+                            Key::Char(c) => {
+                                input.push(c);
+                                selected = 0;
+                                break;
                             }
-                            continue;
-                        }
-                        Key::Cancel => {
-                            drop(term);
-                            return Ok(None);
+                            Key::Backspace => {
+                                input.pop();
+                                selected = 0;
+                                break;
+                            }
+                            Key::Clear => {
+                                input.clear();
+                                selected = 0;
+                                break;
+                            }
+                            Key::Up => {
+                                selected = selected.saturating_sub(1);
+                                break;
+                            }
+                            Key::Down => {
+                                selected += 1;
+                                break;
+                            }
+                            // Enter with no match under the cursor: keep
+                            // waiting.
+                            Key::Enter => {
+                                if let Some(m) = matches.get(selected) {
+                                    break 'ui Some(m.key.clone());
+                                }
+                            }
+                            Key::Cancel => break 'ui None,
                         }
                     }
-                    break;
-                }
+                };
+                drop(term);
+                Ok(picked)
             }
         }
 
@@ -659,30 +684,37 @@ mod query {
 
         /// Read one key, decoding UTF-8 and the arrow escape sequences. With
         /// `min 0 time 1`, a read can legitimately return nothing.
+        // The two `Key::None` arms are deliberately separate: a poll timeout
+        // and an unmapped byte are different conditions, kept explicit.
+        #[allow(clippy::match_same_arms)]
         fn read_key(stdin: &mut impl Read) -> Result<Key, String> {
-            let Some(b) = read_byte(stdin)? else {
-                return Ok(Key::None);
-            };
-            Ok(match b {
-                0x03 => Key::Cancel, // ctrl-c
-                0x0a | 0x0d => Key::Enter,
-                0x7f | 0x08 => Key::Backspace,
-                0x15 => Key::Clear, // ctrl-u
-                0x0e => Key::Down,  // ctrl-n
-                0x10 => Key::Up,    // ctrl-p
-                0x1b => match read_byte(stdin)? {
+            let key = match read_byte(stdin)? {
+                // A poll timeout: nothing was pressed.
+                None => Key::None,
+                Some(0x03) => Key::Cancel, // ctrl-c
+                Some(0x0a | 0x0d) => Key::Enter,
+                Some(0x7f | 0x08) => Key::Backspace,
+                Some(0x15) => Key::Clear, // ctrl-u
+                Some(0x0e) => Key::Down,  // ctrl-n
+                Some(0x10) => Key::Up,    // ctrl-p
+                Some(0x1b) => match read_byte(stdin)? {
                     Some(b'[') => match read_byte(stdin)? {
                         Some(b'A') => Key::Up,
                         Some(b'B') => Key::Down,
-                        _ => Key::None,
+                        // Any other (or truncated) CSI sequence: not a
+                        // picker key.
+                        Some(_) | None => Key::None,
                     },
                     None => Key::Cancel, // a lone ESC
-                    _ => Key::None,
+                    // Other escape sequences (alt-chords): not picker keys.
+                    Some(_) => Key::None,
                 },
-                b if (0x20..0x7f).contains(&b) => Key::Char(b as char),
-                b if b >= 0xc2 => utf8_tail(stdin, b)?,
-                _ => Key::None,
-            })
+                Some(b) if (0x20..0x7f).contains(&b) => Key::Char(b as char),
+                Some(b) if b >= 0xc2 => utf8_tail(stdin, b)?,
+                // Unmapped control bytes and stray UTF-8 continuation bytes.
+                Some(_) => Key::None,
+            };
+            Ok(key)
         }
 
         /// Finish a UTF-8 multibyte sequence whose lead byte was `lead`.
@@ -690,17 +722,16 @@ mod query {
             let len = match lead {
                 0xc2..=0xdf => 2,
                 0xe0..=0xef => 3,
-                _ => 4,
+                _ => 4, // 0xf0 and above (the caller guarantees lead >= 0xc2)
             };
-            let mut buf = vec![lead];
-            for _ in 1..len {
-                match read_byte(stdin)? {
-                    Some(b) => buf.push(b),
-                    None => return Ok(Key::None),
-                }
-            }
-            Ok(String::from_utf8(buf)
-                .ok()
+            // `None` folds the whole tail to `None`: a poll timeout
+            // mid-sequence means a truncated character, not a key.
+            let tail: Option<Vec<u8>> = (1..len)
+                .map(|_| read_byte(stdin))
+                .collect::<Result<_, _>>()?;
+            Ok(tail
+                .map(|rest| std::iter::once(lead).chain(rest).collect())
+                .and_then(|buf| String::from_utf8(buf).ok())
                 .and_then(|s| s.chars().next())
                 .map_or(Key::None, Key::Char))
         }

@@ -149,17 +149,19 @@ fn load_files<C, S>(
     C: Codec,
     S: Store<H = C>,
 {
-    let Some(store) = store else { return };
-    for found in store.discover().unwrap_or_default() {
-        match store
-            .load(&found.reference)
-            .and_then(|native| C::to_common(&native))
-        {
-            Ok(common) => {
-                insert(index, harness, found.meta.id, &common);
-                *loaded += 1;
+    // A harness that isn't installed on this machine has no root to scan.
+    if let Some(store) = store {
+        for found in store.discover().unwrap_or_default() {
+            match store
+                .load(&found.reference)
+                .and_then(|native| C::to_common(&native))
+            {
+                Ok(common) => {
+                    insert(index, harness, found.meta.id, &common);
+                    *loaded += 1;
+                }
+                Err(_) => *failed += 1,
             }
-            Err(_) => *failed += 1,
         }
     }
 }

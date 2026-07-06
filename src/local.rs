@@ -56,14 +56,13 @@ pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session>
     where
         S: Store<Ref = PathBuf>,
     {
-        let Some(store) = store else { return };
-        for d in store.discover().unwrap_or_default() {
-            out.push(Session {
-                harness,
-                meta: d.meta,
-                locator: Locator::Path(d.reference),
-            });
-        }
+        // No store (no home directory) or an unreadable one lists nothing.
+        let discovered = store.map_or_else(Vec::new, |s| s.discover().unwrap_or_default());
+        out.extend(discovered.into_iter().map(|d| Session {
+            harness,
+            meta: d.meta,
+            locator: Locator::Path(d.reference),
+        }));
     }
 
     let mut out: Vec<Session> = Vec::new();
@@ -313,27 +312,28 @@ pub fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
         "TRANSCRIPT_{}_RESUME_CMD",
         harness.as_str().to_ascii_uppercase()
     );
-    if let Ok(template) = std::env::var(&key) {
+    let overridden = std::env::var(&key).ok().and_then(|template| {
         let mut parts = template
             .replace("{id}", id)
             .split_whitespace()
             .map(String::from)
             .collect::<Vec<_>>()
             .into_iter();
-        if let Some(bin) = parts.next() {
-            return (bin, parts.collect());
+        // A template with no words names no binary; ignore the override.
+        parts.next().map(|bin| (bin, parts.collect()))
+    });
+    overridden.unwrap_or_else(|| {
+        let id = id.to_string();
+        match harness {
+            HarnessId::ClaudeCode => ("claude".into(), vec!["--resume".into(), id]),
+            HarnessId::Codex => ("codex".into(), vec!["resume".into(), id]),
+            HarnessId::OpenCode => ("opencode".into(), vec!["--session".into(), id]),
+            HarnessId::Pi => ("pi".into(), vec!["--session".into(), id]),
+            HarnessId::Campfire => ("campfire".into(), vec!["--session".into(), id]),
+            HarnessId::Cursor => ("agent".into(), vec![format!("--resume={id}")]),
+            HarnessId::Grok => ("grok".into(), vec!["--resume".into(), id]),
         }
-    }
-    let id = id.to_string();
-    match harness {
-        HarnessId::ClaudeCode => ("claude".into(), vec!["--resume".into(), id]),
-        HarnessId::Codex => ("codex".into(), vec!["resume".into(), id]),
-        HarnessId::OpenCode => ("opencode".into(), vec!["--session".into(), id]),
-        HarnessId::Pi => ("pi".into(), vec!["--session".into(), id]),
-        HarnessId::Campfire => ("campfire".into(), vec!["--session".into(), id]),
-        HarnessId::Cursor => ("agent".into(), vec![format!("--resume={id}")]),
-        HarnessId::Grok => ("grok".into(), vec!["--resume".into(), id]),
-    }
+    })
 }
 
 fn required<S>(store: Option<S>) -> Result<S> {

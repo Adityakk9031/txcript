@@ -148,32 +148,33 @@ impl<'de> Deserialize<'de> for Record {
 impl Codec for ClaudeCode {
     fn to_common(transcript: &Transcript<Self>) -> Result<Transcript<Common>> {
         let fallback_ts = transcript.meta.timestamp;
-        let mut messages = Vec::new();
-        for record in &transcript.body {
-            let (role, entry) = match record {
-                Record::User(e) => (Role::User, e),
-                Record::Assistant(e) => (Role::Assistant, e),
+        let messages = transcript
+            .body
+            .iter()
+            .filter_map(|record| match record {
+                Record::User(e) => Some((Role::User, e)),
+                Record::Assistant(e) => Some((Role::Assistant, e)),
                 // Summaries, titles, snapshots carry no conversational turn.
-                _ => continue,
-            };
-            let content = parse_blocks(&entry.message.content);
-            if content.is_empty() {
-                continue;
-            }
-            let timestamp = entry
-                .timestamp
-                .as_deref()
-                .and_then(parse_ts)
-                .unwrap_or(fallback_ts);
-            messages.push(Message {
-                role,
-                content,
-                timestamp,
-                model: entry.message.model.clone(),
-                stop_reason: entry.message.stop_reason.as_deref().map(parse_stop_reason),
-                usage: entry.message.usage.as_ref().and_then(parse_usage),
-            });
-        }
+                Record::Summary(_) | Record::Other(_) => None,
+            })
+            .filter_map(|(role, entry)| {
+                let content = parse_blocks(&entry.message.content);
+                // An entry whose blocks parse to nothing carries no turn
+                // either.
+                (!content.is_empty()).then(|| Message {
+                    role,
+                    content,
+                    timestamp: entry
+                        .timestamp
+                        .as_deref()
+                        .and_then(parse_ts)
+                        .unwrap_or(fallback_ts),
+                    model: entry.message.model.clone(),
+                    stop_reason: entry.message.stop_reason.as_deref().map(parse_stop_reason),
+                    usage: entry.message.usage.as_ref().and_then(parse_usage),
+                })
+            })
+            .collect();
         Ok(Transcript::new(transcript.meta.clone(), messages))
     }
 
@@ -263,19 +264,16 @@ impl ClaudeStore {
     }
 
     fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
+        // An unreadable directory lists nothing.
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
             let path = entry.path();
             if path.is_dir() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
                 // Subagent and tool-result side-files aren't top-level sessions.
-                if name == "subagents" || name == "tool-results" {
-                    continue;
+                if name != "subagents" && name != "tool-results" {
+                    Self::collect_jsonl(&path, out);
                 }
-                Self::collect_jsonl(&path, out);
             } else if path.extension().is_some_and(|e| e == "jsonl") {
                 out.push(path);
             }
@@ -288,21 +286,23 @@ impl Store for ClaudeStore {
     type Ref = PathBuf;
 
     fn discover(&self) -> Result<Vec<Discovered<PathBuf>>> {
-        if !self.root.is_dir() {
-            return Ok(Vec::new());
+        if self.root.is_dir() {
+            let mut files = Vec::new();
+            Self::collect_jsonl(&self.root, &mut files);
+            Ok(files
+                .into_iter()
+                .filter_map(|path| {
+                    // A session that fails to load is skipped, not fatal.
+                    self.load(&path).ok().map(|transcript| Discovered {
+                        meta: transcript.meta,
+                        reference: path,
+                    })
+                })
+                .collect())
+        } else {
+            // A missing root means no sessions, not an error.
+            Ok(Vec::new())
         }
-        let mut files = Vec::new();
-        Self::collect_jsonl(&self.root, &mut files);
-        let mut out = Vec::new();
-        for path in files {
-            if let Ok(transcript) = self.load(&path) {
-                out.push(Discovered {
-                    meta: transcript.meta,
-                    reference: path,
-                });
-            }
-        }
-        Ok(out)
     }
 
     fn load(&self, reference: &PathBuf) -> Result<Transcript<ClaudeCode>> {
@@ -351,7 +351,9 @@ fn parse_blocks(content: &Value) -> Vec<Block> {
             }
         }
         Value::Array(arr) => arr.iter().filter_map(parse_block).collect(),
-        _ => Vec::new(),
+        // Content is a string or a block array on the wire; any other JSON
+        // shape carries no blocks.
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => Vec::new(),
     }
 }
 
@@ -393,6 +395,8 @@ fn parse_block(v: &Value) -> Option<Block> {
                 },
             })
         }
+        // Block types we don't model carry nothing into the canonical model
+        // (the native `Record` still round-trips them).
         _ => None,
     }
 }
@@ -577,6 +581,7 @@ fn meta_from_records(records: &[Record]) -> Meta {
                 Some("agent-name") if custom_title.is_none() => {
                     custom_title = v.get("agentName").and_then(Value::as_str).map(String::from);
                 }
+                // Other line types carry no session metadata.
                 _ => {}
             },
         }
@@ -605,15 +610,18 @@ fn encode_project_dir(path: &str) -> String {
 }
 
 fn file_fingerprint(path: &Path) -> String {
-    let Ok(meta) = fs::metadata(path) else {
-        return String::new();
-    };
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos());
-    format!("{mtime}:{}", meta.len())
+    match fs::metadata(path) {
+        // An unreadable file has no fingerprint.
+        Err(_) => String::new(),
+        Ok(meta) => {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            format!("{mtime}:{}", meta.len())
+        }
+    }
 }
 
 fn dirs_home() -> Option<PathBuf> {

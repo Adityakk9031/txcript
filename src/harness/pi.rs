@@ -238,6 +238,7 @@ pub(crate) fn records_to_messages(records: &[Record], fallback_ts: DateTime<Utc>
                         bash_seq += 1;
                         push_bash_execution(&entry.message, ts, bash_seq, &mut messages);
                     }
+                    // Unknown or missing roles carry no conversational turn.
                     _ => {}
                 }
             }
@@ -254,6 +255,7 @@ pub(crate) fn records_to_messages(records: &[Record], fallback_ts: DateTime<Utc>
                     ts,
                 );
             }
+            // The header and bookkeeping lines carry no conversational turn.
             Record::Session(_) | Record::Other(_) => {}
         }
     }
@@ -333,6 +335,7 @@ fn pi_payloads_for(
                             "timestamp": ts_ms,
                         }));
                     }
+                    // Not expressible in a pi user message.
                     Block::Thinking { .. } | Block::ToolUse { .. } => {}
                 }
             }
@@ -355,24 +358,25 @@ fn pi_payloads_for(
                             json!({"type": "toolCall", "id": id, "name": pi_name, "arguments": pi_input}),
                         );
                     }
+                    // Not expressible in a pi assistant message.
                     Block::Image { .. } | Block::ToolResult { .. } => {}
                 }
             }
-            if content.is_empty() {
-                return out;
+            // An assistant turn with no expressible blocks emits no record.
+            if !content.is_empty() {
+                let model = msg.model.clone().unwrap_or_default();
+                let (provider, api) = provider_api(&model);
+                out.push(json!({
+                    "role": "assistant",
+                    "content": content,
+                    "api": api,
+                    "provider": provider,
+                    "model": model,
+                    "usage": serialize_usage(msg.usage.as_ref()),
+                    "stopReason": stop_reason_str(msg.stop_reason.as_ref()),
+                    "timestamp": ts_ms,
+                }));
             }
-            let model = msg.model.clone().unwrap_or_default();
-            let (provider, api) = provider_api(&model);
-            out.push(json!({
-                "role": "assistant",
-                "content": content,
-                "api": api,
-                "provider": provider,
-                "model": model,
-                "usage": serialize_usage(msg.usage.as_ref()),
-                "stopReason": stop_reason_str(msg.stop_reason.as_ref()),
-                "timestamp": ts_ms,
-            }));
         }
     }
     out
@@ -441,31 +445,29 @@ where
 }
 
 pub(crate) fn discover_format(sessions_dir: &Path) -> Vec<Discovered<PathBuf>> {
-    if !sessions_dir.is_dir() {
-        return Vec::new();
-    }
     let mut files = Vec::new();
-    collect_jsonl(sessions_dir, &mut files);
-    let mut out = Vec::new();
-    for path in files {
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let records: Vec<Record> = jsonl::parse(&text);
-        // A pi file's first record must be a session header, else skip it.
-        if !matches!(records.first(), Some(Record::Session(_))) {
-            continue;
-        }
-        let mut meta = meta_from_records(&records);
-        if meta.id.is_empty() {
-            meta.id = jsonl::file_id(&path);
-        }
-        out.push(Discovered {
-            meta,
-            reference: path,
-        });
+    if sessions_dir.is_dir() {
+        collect_jsonl(sessions_dir, &mut files);
     }
-    out
+    files
+        .into_iter()
+        .filter_map(|path| {
+            // An unreadable file discovers nothing.
+            let text = fs::read_to_string(&path).ok()?;
+            let records: Vec<Record> = jsonl::parse(&text);
+            // A pi file's first record must be a session header, else skip it.
+            matches!(records.first(), Some(Record::Session(_))).then(|| {
+                let mut meta = meta_from_records(&records);
+                if meta.id.is_empty() {
+                    meta.id = jsonl::file_id(&path);
+                }
+                Discovered {
+                    meta,
+                    reference: path,
+                }
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn write_session(
@@ -523,9 +525,11 @@ pub(crate) fn meta_from_records(records: &[Record]) -> Meta {
                         .filter(|s| !s.is_empty())
                         .map(String::from);
                 }
+                // Other bookkeeping types carry no session metadata.
                 _ => {}
             },
-            _ => {}
+            // Conversational lines carry no session metadata.
+            Record::Message(_) | Record::Custom(_) => {}
         }
     }
     meta
@@ -544,19 +548,16 @@ pub(crate) fn resolve_sessions_dir(config_dir: &str, env_prefix: &str) -> Option
             Some(PathBuf::from(raw))
         }
     };
-    if let Ok(dir) = std::env::var(format!("{env_prefix}_CODING_AGENT_SESSION_DIR"))
-        && let Some(p) = expand(dir)
-    {
-        return Some(p);
-    }
-    let agent_dir = std::env::var(format!("{env_prefix}_CODING_AGENT_DIR"))
-        .ok()
-        .and_then(expand);
-    let agent_dir = match agent_dir {
-        Some(d) => d,
-        None => home()?.join(config_dir).join("agent"),
+    let env_dir = |suffix: &str| {
+        std::env::var(format!("{env_prefix}_CODING_AGENT_{suffix}"))
+            .ok()
+            .and_then(&expand)
     };
-    Some(agent_dir.join("sessions"))
+    env_dir("SESSION_DIR").or_else(|| {
+        env_dir("DIR")
+            .or_else(|| home().map(|h| h.join(config_dir).join("agent")))
+            .map(|agent_dir| agent_dir.join("sessions"))
+    })
 }
 
 // ── content parsing ────────────────────────────────────────────────────
@@ -580,91 +581,98 @@ fn parse_user_content(content: &Value) -> Vec<Block> {
                     })
                 }
                 Some("image") => parse_image(b).map(|source| Block::Image { source }),
+                // Unknown or untagged blocks carry no user content.
                 _ => None,
             })
             .collect(),
-        _ => Vec::new(),
+        // Other JSON shapes carry no user content.
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::Object(_) => Vec::new(),
     }
 }
 
 fn parse_assistant_content(content: &Value) -> Vec<Block> {
-    let Some(arr) = content.as_array() else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|b| match b.get("type").and_then(Value::as_str) {
-            Some("text") => {
-                let text = b.get("text")?.as_str()?;
-                (!text.trim().is_empty()).then(|| Block::Text {
-                    text: text.to_string(),
-                })
-            }
-            Some("thinking") => {
-                let thinking = b.get("thinking")?.as_str()?;
-                (!thinking.trim().is_empty()).then(|| Block::Thinking {
-                    text: thinking.to_string(),
-                    signature: None,
-                    encrypted: None,
-                })
-            }
-            Some("toolCall") => {
-                let id = b
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let raw_name = b.get("name").and_then(Value::as_str).unwrap_or("tool");
-                let raw_input = b
-                    .get("arguments")
-                    .cloned()
-                    .unwrap_or(Value::Object(Map::new()));
-                let (name, input) = normalize_tool(raw_name, raw_input);
-                Some(Block::ToolUse {
-                    id,
-                    tool: Tool::from_canonical(&name, input),
-                })
-            }
-            _ => None,
-        })
-        .collect()
+    // Assistant content is always a block array; anything else carries none.
+    content.as_array().map_or_else(Vec::new, |arr| {
+        arr.iter()
+            .filter_map(|b| match b.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    let text = b.get("text")?.as_str()?;
+                    (!text.trim().is_empty()).then(|| Block::Text {
+                        text: text.to_string(),
+                    })
+                }
+                Some("thinking") => {
+                    let thinking = b.get("thinking")?.as_str()?;
+                    (!thinking.trim().is_empty()).then(|| Block::Thinking {
+                        text: thinking.to_string(),
+                        signature: None,
+                        encrypted: None,
+                    })
+                }
+                Some("toolCall") => {
+                    let id = b
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let raw_name = b.get("name").and_then(Value::as_str).unwrap_or("tool");
+                    let raw_input = b
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or(Value::Object(Map::new()));
+                    let (name, input) = normalize_tool(raw_name, raw_input);
+                    Some(Block::ToolUse {
+                        id,
+                        tool: Tool::from_canonical(&name, input),
+                    })
+                }
+                // Unknown or untagged blocks carry no assistant content.
+                _ => None,
+            })
+            .collect()
+    })
 }
 
 fn parse_tool_result_content(content: &Value) -> ToolOutput {
-    let Some(arr) = content.as_array() else {
-        return match content {
-            Value::String(s) => ToolOutput::Text(s.clone()),
-            other => ToolOutput::Json(other.clone()),
-        };
-    };
-    let has_image = arr
-        .iter()
-        .any(|b| b.get("type").and_then(Value::as_str) == Some("image"));
-    if !has_image {
-        let text = arr
-            .iter()
-            .filter_map(|b| {
-                (b.get("type").and_then(Value::as_str) == Some("text"))
-                    .then(|| b.get("text").and_then(Value::as_str))
-                    .flatten()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        return ToolOutput::Text(text);
+    match content {
+        Value::String(s) => ToolOutput::Text(s.clone()),
+        // An all-text block array flattens to plain text; one with images
+        // keeps the block structure as JSON.
+        Value::Array(arr)
+            if !arr
+                .iter()
+                .any(|b| b.get("type").and_then(Value::as_str) == Some("image")) =>
+        {
+            let text = arr
+                .iter()
+                .filter_map(|b| {
+                    (b.get("type").and_then(Value::as_str) == Some("text"))
+                        .then(|| b.get("text").and_then(Value::as_str))
+                        .flatten()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            ToolOutput::Text(text)
+        }
+        Value::Array(arr) => {
+            let blocks: Vec<Value> = arr
+                .iter()
+                .filter_map(|b| match b.get("type").and_then(Value::as_str) {
+                    Some("text") => Some(json!({"type": "text", "text": b.get("text")?.as_str()?})),
+                    Some("image") => {
+                        let s = parse_image(b)?;
+                        Some(json!({"type": "image", "source": {
+                            "type": s.source_type, "media_type": s.media_type, "data": s.data,
+                        }}))
+                    }
+                    // Unknown or untagged blocks carry no tool output.
+                    _ => None,
+                })
+                .collect();
+            ToolOutput::Json(Value::Array(blocks))
+        }
+        other => ToolOutput::Json(other.clone()),
     }
-    let blocks: Vec<Value> = arr
-        .iter()
-        .filter_map(|b| match b.get("type").and_then(Value::as_str) {
-            Some("text") => Some(json!({"type": "text", "text": b.get("text")?.as_str()?})),
-            Some("image") => {
-                let s = parse_image(b)?;
-                Some(json!({"type": "image", "source": {
-                    "type": s.source_type, "media_type": s.media_type, "data": s.data,
-                }}))
-            }
-            _ => None,
-        })
-        .collect();
-    ToolOutput::Json(Value::Array(blocks))
 }
 
 fn parse_image(block: &Value) -> Option<ImageSource> {
@@ -685,10 +693,10 @@ fn parse_usage(usage: Option<&Value>) -> Option<Usage> {
     let output = usage.get("output").and_then(Value::as_u64).unwrap_or(0);
     let cache_read = usage.get("cacheRead").and_then(Value::as_u64);
     let cache_write = usage.get("cacheWrite").and_then(Value::as_u64);
-    if input == 0 && output == 0 && cache_read.unwrap_or(0) == 0 && cache_write.unwrap_or(0) == 0 {
-        return None;
-    }
-    Some(Usage {
+    // An all-zero usage carries no information.
+    let has_tokens =
+        input != 0 || output != 0 || cache_read.unwrap_or(0) != 0 || cache_write.unwrap_or(0) != 0;
+    has_tokens.then_some(Usage {
         input_tokens: input,
         output_tokens: output,
         cache_read_input_tokens: cache_read,
@@ -710,63 +718,62 @@ fn serialize_usage(usage: Option<&Usage>) -> Value {
 }
 
 fn push_bash_execution(msg: &Value, ts: DateTime<Utc>, seq: usize, out: &mut Vec<Message>) {
-    // pi excludes `!!`-prefixed runs from LLM context; mirror that.
-    if msg
+    let excluded = msg
         .get("excludeFromContext")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return;
+        .unwrap_or(false);
+    match msg.get("command").and_then(Value::as_str) {
+        // pi excludes `!!`-prefixed runs from LLM context; mirror that.
+        _ if excluded => {}
+        // A run without a command carries no turn.
+        None | Some("") => {}
+        Some(command) => {
+            let output = msg.get("output").and_then(Value::as_str).unwrap_or("");
+            let is_error = msg
+                .get("exitCode")
+                .and_then(Value::as_i64)
+                .is_some_and(|c| c != 0);
+            let call_id = format!("bash_exec_{seq}");
+            out.push(Message {
+                role: Role::Assistant,
+                content: vec![Block::ToolUse {
+                    id: call_id.clone(),
+                    tool: Tool::Bash {
+                        command: command.to_string(),
+                        workdir: None,
+                        timeout_ms: None,
+                        description: None,
+                        run_in_background: false,
+                    },
+                }],
+                timestamp: ts,
+                model: None,
+                stop_reason: None,
+                usage: None,
+            });
+            out.push(Message {
+                role: Role::User,
+                content: vec![Block::ToolResult {
+                    tool_use_id: call_id,
+                    content: ToolOutput::Text(output.to_string()),
+                    is_error,
+                }],
+                timestamp: ts,
+                model: None,
+                stop_reason: None,
+                usage: None,
+            });
+        }
     }
-    let command = msg.get("command").and_then(Value::as_str).unwrap_or("");
-    if command.is_empty() {
-        return;
-    }
-    let output = msg.get("output").and_then(Value::as_str).unwrap_or("");
-    let is_error = msg
-        .get("exitCode")
-        .and_then(Value::as_i64)
-        .is_some_and(|c| c != 0);
-    let call_id = format!("bash_exec_{seq}");
-    out.push(Message {
-        role: Role::Assistant,
-        content: vec![Block::ToolUse {
-            id: call_id.clone(),
-            tool: Tool::Bash {
-                command: command.to_string(),
-                workdir: None,
-                timeout_ms: None,
-                description: None,
-                run_in_background: false,
-            },
-        }],
-        timestamp: ts,
-        model: None,
-        stop_reason: None,
-        usage: None,
-    });
-    out.push(Message {
-        role: Role::User,
-        content: vec![Block::ToolResult {
-            tool_use_id: call_id,
-            content: ToolOutput::Text(output.to_string()),
-            is_error,
-        }],
-        timestamp: ts,
-        model: None,
-        stop_reason: None,
-        usage: None,
-    });
 }
 
 // ── tool normalization ─────────────────────────────────────────────────
 
 /// pi tool name + input → canonical (Claude) name + input.
 fn normalize_tool(tool: &str, input: Value) -> (String, Value) {
-    if tool.starts_with("mcp__") {
-        return (tool.to_string(), input);
-    }
     match tool {
+        // MCP tool names are identical on both sides.
+        t if t.starts_with("mcp__") => (t.to_string(), input),
         "bash" => ("Bash".to_string(), input),
         "read" => (
             "Read".to_string(),
@@ -785,53 +792,55 @@ fn normalize_tool(tool: &str, input: Value) -> (String, Value) {
 }
 
 fn normalize_edit(input: Value) -> (String, Value) {
-    let Value::Object(mut obj) = input else {
-        return ("Edit".to_string(), input);
-    };
-    let file_path = obj.remove("path");
-    let edits = obj.remove("edits").and_then(|e| match e {
-        Value::Array(a) => Some(a),
-        _ => None,
-    });
-    let Some(edits) = edits else {
-        if let Some(fp) = file_path {
-            obj.insert("file_path".to_string(), fp);
+    match input {
+        Value::Object(mut obj) => {
+            let file_path = obj.remove("path");
+            if let Some(Value::Array(edits)) = obj.remove("edits") {
+                let mapped: Vec<Value> = edits
+                    .into_iter()
+                    .map(|e| {
+                        rename_keys(e, &[("oldText", "old_string"), ("newText", "new_string")])
+                    })
+                    .collect();
+                if mapped.len() == 1 {
+                    let mut out = Map::new();
+                    if let Some(fp) = file_path {
+                        out.insert("file_path".to_string(), fp);
+                    }
+                    if let Some(old) = mapped[0].get("old_string") {
+                        out.insert("old_string".to_string(), old.clone());
+                    }
+                    if let Some(new) = mapped[0].get("new_string") {
+                        out.insert("new_string".to_string(), new.clone());
+                    }
+                    ("Edit".to_string(), Value::Object(out))
+                } else {
+                    let mut out = Map::new();
+                    if let Some(fp) = file_path {
+                        out.insert("file_path".to_string(), fp);
+                    }
+                    out.insert("edits".to_string(), Value::Array(mapped));
+                    ("MultiEdit".to_string(), Value::Object(out))
+                }
+            } else {
+                // Missing or non-array `edits`: a plain Edit, path renamed.
+                if let Some(fp) = file_path {
+                    obj.insert("file_path".to_string(), fp);
+                }
+                ("Edit".to_string(), Value::Object(obj))
+            }
         }
-        return ("Edit".to_string(), Value::Object(obj));
-    };
-    let mapped: Vec<Value> = edits
-        .into_iter()
-        .map(|e| rename_keys(e, &[("oldText", "old_string"), ("newText", "new_string")]))
-        .collect();
-    if mapped.len() == 1 {
-        let mut out = Map::new();
-        if let Some(fp) = file_path {
-            out.insert("file_path".to_string(), fp);
-        }
-        if let Some(old) = mapped[0].get("old_string") {
-            out.insert("old_string".to_string(), old.clone());
-        }
-        if let Some(new) = mapped[0].get("new_string") {
-            out.insert("new_string".to_string(), new.clone());
-        }
-        ("Edit".to_string(), Value::Object(out))
-    } else {
-        let mut out = Map::new();
-        if let Some(fp) = file_path {
-            out.insert("file_path".to_string(), fp);
-        }
-        out.insert("edits".to_string(), Value::Array(mapped));
-        ("MultiEdit".to_string(), Value::Object(out))
+        // Non-object arguments pass through unchanged.
+        other => ("Edit".to_string(), other),
     }
 }
 
 /// Canonical [`Tool`] → pi tool name + arguments (inverse of `normalize_tool`).
 fn denormalize_tool(tool: &Tool) -> (String, Value) {
     let (name, input) = tool.to_canonical();
-    if name.starts_with("mcp__") {
-        return (name, input);
-    }
     match name.as_str() {
+        // MCP tool names are identical on both sides.
+        n if n.starts_with("mcp__") => (n.to_string(), input),
         "Bash" => ("bash".to_string(), input),
         "Read" => (
             "read".to_string(),
@@ -841,44 +850,48 @@ fn denormalize_tool(tool: &Tool) -> (String, Value) {
             "write".to_string(),
             rename_keys(input, &[("file_path", "path")]),
         ),
-        "Edit" => {
-            let Value::Object(mut obj) = input else {
-                return ("edit".to_string(), input);
-            };
-            let path = obj.remove("file_path");
-            let old = obj.remove("old_string").unwrap_or_default();
-            let new = obj.remove("new_string").unwrap_or_default();
-            let mut out = Map::new();
-            if let Some(p) = path {
-                out.insert("path".to_string(), p);
+        "Edit" => match input {
+            Value::Object(mut obj) => {
+                let path = obj.remove("file_path");
+                let old = obj.remove("old_string").unwrap_or_default();
+                let new = obj.remove("new_string").unwrap_or_default();
+                let mut out = Map::new();
+                if let Some(p) = path {
+                    out.insert("path".to_string(), p);
+                }
+                out.insert(
+                    "edits".to_string(),
+                    json!([{"oldText": old, "newText": new}]),
+                );
+                ("edit".to_string(), Value::Object(out))
             }
-            out.insert(
-                "edits".to_string(),
-                json!([{"oldText": old, "newText": new}]),
-            );
-            ("edit".to_string(), Value::Object(out))
-        }
-        "MultiEdit" => {
-            let Value::Object(mut obj) = input else {
-                return ("edit".to_string(), input);
-            };
-            let path = obj.remove("file_path");
-            let edits = obj.remove("edits").and_then(|e| match e {
-                Value::Array(a) => Some(a),
-                _ => None,
-            });
-            let mapped: Vec<Value> = edits
-                .unwrap_or_default()
-                .into_iter()
-                .map(|e| rename_keys(e, &[("old_string", "oldText"), ("new_string", "newText")]))
-                .collect();
-            let mut out = Map::new();
-            if let Some(p) = path {
-                out.insert("path".to_string(), p);
+            // Non-object arguments pass through unchanged.
+            other => ("edit".to_string(), other),
+        },
+        "MultiEdit" => match input {
+            Value::Object(mut obj) => {
+                let path = obj.remove("file_path");
+                let edits = match obj.remove("edits") {
+                    Some(Value::Array(a)) => a,
+                    // Missing or non-array `edits` maps to an empty list.
+                    None | Some(_) => Vec::new(),
+                };
+                let mapped: Vec<Value> = edits
+                    .into_iter()
+                    .map(|e| {
+                        rename_keys(e, &[("old_string", "oldText"), ("new_string", "newText")])
+                    })
+                    .collect();
+                let mut out = Map::new();
+                if let Some(p) = path {
+                    out.insert("path".to_string(), p);
+                }
+                out.insert("edits".to_string(), Value::Array(mapped));
+                ("edit".to_string(), Value::Object(out))
             }
-            out.insert("edits".to_string(), Value::Array(mapped));
-            ("edit".to_string(), Value::Object(out))
-        }
+            // Non-object arguments pass through unchanged.
+            other => ("edit".to_string(), other),
+        },
         "Grep" => ("grep".to_string(), input),
         "Glob" => ("find".to_string(), input),
         "LS" => ("ls".to_string(), input),
@@ -905,7 +918,11 @@ fn stop_reason_str(r: Option<&StopReason>) -> &'static str {
         Some(StopReason::ToolUse) => "toolUse",
         Some(StopReason::Error) => "error",
         Some(StopReason::Aborted) => "aborted",
-        _ => "stop",
+        // pi's vocabulary ends here: a normal end of turn, a stop sequence,
+        // an unknown reason, or no reason at all all render as "stop".
+        Some(StopReason::EndTurn | StopReason::StopSequence | StopReason::Other(_)) | None => {
+            "stop"
+        }
     }
 }
 
@@ -930,17 +947,20 @@ fn tool_output_text(out: &ToolOutput) -> String {
 }
 
 fn rename_keys(input: Value, renames: &[(&str, &str)]) -> Value {
-    let Value::Object(mut obj) = input else {
-        return input;
-    };
-    for (from, to) in renames {
-        if from != to
-            && let Some(value) = obj.remove(*from)
-        {
-            obj.insert((*to).to_string(), value);
+    match input {
+        Value::Object(mut obj) => {
+            for (from, to) in renames {
+                if from != to
+                    && let Some(value) = obj.remove(*from)
+                {
+                    obj.insert((*to).to_string(), value);
+                }
+            }
+            Value::Object(obj)
         }
+        // Non-object inputs have no keys to rename.
+        other => other,
     }
-    Value::Object(obj)
 }
 
 fn title_case(name: &str) -> String {
@@ -980,15 +1000,15 @@ fn short_id(session_id: &str, i: usize, j: usize) -> String {
 }
 
 fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_jsonl(&path, out);
-        } else if path.extension().is_some_and(|e| e == "jsonl") {
-            out.push(path);
+    // An unreadable directory contributes no files.
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_jsonl(&path, out);
+            } else if path.extension().is_some_and(|e| e == "jsonl") {
+                out.push(path);
+            }
         }
     }
 }

@@ -106,26 +106,19 @@ impl CursorStore {
 
     #[cfg(feature = "opencode")]
     fn collect_sessions(&self) -> Vec<PathBuf> {
-        let Ok(workspaces) = fs::read_dir(&self.chats_dir) else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        for workspace in workspaces.flatten() {
-            let workspace_dir = workspace.path();
-            if !workspace_dir.is_dir() {
-                continue;
-            }
-            let Ok(sessions) = fs::read_dir(workspace_dir) else {
-                continue;
-            };
-            for session in sessions.flatten() {
-                let db = session.path().join("store.db");
-                if db.is_file() {
-                    out.push(db);
-                }
-            }
-        }
-        out
+        // Unreadable directories and entries yield no sessions.
+        fs::read_dir(&self.chats_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|workspace| workspace.path())
+            // Stray files at the workspace level are not session directories.
+            .filter(|workspace_dir| workspace_dir.is_dir())
+            .flat_map(|workspace_dir| fs::read_dir(workspace_dir).into_iter().flatten().flatten())
+            .map(|session| session.path().join("store.db"))
+            // A session directory without a store.db has no transcript.
+            .filter(|db| db.is_file())
+            .collect()
     }
 
     #[cfg(feature = "opencode")]
@@ -148,21 +141,22 @@ impl Store for CursorStore {
     type Ref = PathBuf;
 
     fn discover(&self) -> Result<Vec<Discovered<PathBuf>>> {
-        let mut out = Vec::new();
-        for db_path in self.collect_sessions() {
-            let Ok(body) = read_db(&db_path) else {
-                continue;
-            };
-            let mut meta = meta_from_db(&body, Some(&db_path));
-            if meta.timestamp.timestamp_millis() == 0 {
-                meta.timestamp = Self::file_timestamp(&db_path);
-            }
-            out.push(Discovered {
-                meta,
-                reference: db_path,
-            });
-        }
-        Ok(out)
+        Ok(self
+            .collect_sessions()
+            .into_iter()
+            // A store.db that fails to open or parse is not a session.
+            .filter_map(|db_path| {
+                let body = read_db(&db_path).ok()?;
+                let mut meta = meta_from_db(&body, Some(&db_path));
+                if meta.timestamp.timestamp_millis() == 0 {
+                    meta.timestamp = Self::file_timestamp(&db_path);
+                }
+                Some(Discovered {
+                    meta,
+                    reference: db_path,
+                })
+            })
+            .collect())
     }
 
     fn load(&self, reference: &PathBuf) -> Result<Transcript<Cursor>> {
@@ -351,70 +345,46 @@ fn sqlite_unavailable() -> Error {
 
 fn db_to_messages(db: &CursorDb, meta: &Meta) -> Vec<Message> {
     let fallback_ts = meta.timestamp;
-    let mut messages = Vec::new();
-    let mut message_idx = 0usize;
+    db.blobs.iter().fold(Vec::new(), |mut messages, blob| {
+        // `messages.len()` numbers the message, minting deterministic ids.
+        messages.extend(blob_message(blob, meta, fallback_ts, messages.len()));
+        messages
+    })
+}
 
-    for blob in &db.blobs {
-        let Ok(obj) = serde_json::from_slice::<Value>(&blob.data) else {
-            continue;
-        };
-        let Some(role) = obj.get("role").and_then(Value::as_str) else {
-            continue;
-        };
-        // The system prompt carries no conversational turn.
-        match role {
-            "user" => {
-                if is_context_injection(&obj) {
-                    continue;
-                }
-                let content = parse_user_content(&obj);
-                if content.is_empty() {
-                    continue;
-                }
-                messages.push(Message {
-                    role: Role::User,
-                    content,
-                    timestamp: timestamp_from_obj(&obj).unwrap_or(fallback_ts),
-                    model: None,
-                    stop_reason: None,
-                    usage: None,
-                });
-                message_idx += 1;
-            }
-            "assistant" => {
-                let content = parse_assistant_content(&obj, &meta.id, message_idx);
-                if content.is_empty() {
-                    continue;
-                }
-                messages.push(Message {
-                    role: Role::Assistant,
-                    content,
-                    timestamp: timestamp_from_obj(&obj).unwrap_or(fallback_ts),
-                    model: cursor_model(&obj).or_else(|| meta.model.clone()),
-                    stop_reason: None,
-                    usage: None,
-                });
-                message_idx += 1;
-            }
-            "tool" => {
-                let content = parse_tool_content(&obj);
-                if content.is_empty() {
-                    continue;
-                }
-                messages.push(Message {
-                    role: Role::User,
-                    content,
-                    timestamp: timestamp_from_obj(&obj).unwrap_or(fallback_ts),
-                    model: None,
-                    stop_reason: None,
-                    usage: None,
-                });
-                message_idx += 1;
-            }
-            _ => {}
-        }
-    }
-    messages
+/// The conversational turn one blob carries, if any.
+fn blob_message(
+    blob: &CursorBlob,
+    meta: &Meta,
+    fallback_ts: DateTime<Utc>,
+    message_idx: usize,
+) -> Option<Message> {
+    // Non-JSON blobs carry Cursor's internal graph state, not messages.
+    let obj = serde_json::from_slice::<Value>(&blob.data).ok()?;
+    let (role, content, model) = match obj.get("role").and_then(Value::as_str) {
+        // Editor-injected context is not the user's turn.
+        Some("user") if is_context_injection(&obj) => None,
+        Some("user") => Some((Role::User, parse_user_content(&obj), None)),
+        Some("assistant") => Some((
+            Role::Assistant,
+            parse_assistant_content(&obj, &meta.id, message_idx),
+            cursor_model(&obj).or_else(|| meta.model.clone()),
+        )),
+        // Tool results ride along as user-role messages in `Common`.
+        Some("tool") => Some((Role::User, parse_tool_content(&obj), None)),
+        // The system prompt and unknown roles carry no conversational turn;
+        // a blob without a string `role` is not a message.
+        Some(_) | None => None,
+    }?;
+    // A message whose content parses to nothing carries no turn either.
+    (!content.is_empty()).then(|| Message {
+        role,
+        content,
+        timestamp: timestamp_from_obj(&obj).unwrap_or(fallback_ts),
+        model,
+        stop_reason: None,
+        usage: None,
+    })
 }
 
 fn db_from_messages(meta: &Meta, messages: &[Message]) -> Result<CursorDb> {
@@ -462,12 +432,11 @@ fn db_from_messages(meta: &Meta, messages: &[Message]) -> Result<CursorDb> {
                 }
             }
             Role::Assistant => {
-                let mut content = Vec::new();
-                for block in &message.content {
-                    if let Some(v) = serialize_assistant_block(block, &mut tool_names) {
-                        content.push(v);
-                    }
-                }
+                let content: Vec<Value> = message
+                    .content
+                    .iter()
+                    .filter_map(|block| serialize_assistant_block(block, &mut tool_names))
+                    .collect();
                 if !content.is_empty() {
                     let mut obj = json!({
                         "role": "assistant",
@@ -542,20 +511,20 @@ fn cursor_state_blobs(
         let user_id = sha256(&user_blob.data);
         blobs.push(user_blob);
 
-        let mut step_ids = Vec::new();
-        for step in &turn.steps {
-            let data = match step {
+        let step_blobs: Vec<CursorBlob> = turn
+            .steps
+            .iter()
+            .map(|step| match step {
                 CursorStateStep::Assistant(text) => cursor_assistant_step_proto(text),
                 CursorStateStep::Thinking(text) => cursor_thinking_step_proto(text),
                 CursorStateStep::Tool(call) => cursor_tool_step_proto(meta, call),
-            };
-            if data.is_empty() {
-                continue;
-            }
-            let step_blob = cursor_blob(data);
-            step_ids.push(sha256(&step_blob.data));
-            blobs.push(step_blob);
-        }
+            })
+            // A step that encodes to nothing has no blob in the turn graph.
+            .filter(|data| !data.is_empty())
+            .map(cursor_blob)
+            .collect();
+        let step_ids: Vec<_> = step_blobs.iter().map(|blob| sha256(&blob.data)).collect();
+        blobs.extend(step_blobs);
 
         let turn_blob = cursor_blob(cursor_turn_structure_proto(&user_id, &step_ids));
         turn_ids.push(sha256(&turn_blob.data));
@@ -621,27 +590,28 @@ fn cursor_state_turns(meta: &Meta, messages: &[Message]) -> Vec<CursorStateTurn>
 }
 
 fn cursor_tool_results(messages: &[Message]) -> HashMap<String, CursorStateToolResult> {
-    let mut out = HashMap::new();
-    for message in messages {
-        for block in &message.content {
-            let Block::ToolResult {
+    messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            Block::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
-            } = block
-            else {
-                continue;
-            };
-            out.insert(
+            } => Some((
                 tool_use_id.clone(),
                 CursorStateToolResult {
                     content: content.clone(),
                     is_error: *is_error,
                 },
-            );
-        }
-    }
-    out
+            )),
+            // Only results carry tool output.
+            Block::Text { .. }
+            | Block::Thinking { .. }
+            | Block::ToolUse { .. }
+            | Block::Image { .. } => None,
+        })
+        .collect()
 }
 
 fn cursor_tool_use_ids(messages: &[Message]) -> HashSet<String> {
@@ -650,7 +620,11 @@ fn cursor_tool_use_ids(messages: &[Message]) -> HashSet<String> {
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
             Block::ToolUse { id, .. } => Some(id.clone()),
-            _ => None,
+            // Only tool uses mint ids.
+            Block::Text { .. }
+            | Block::Thinking { .. }
+            | Block::ToolResult { .. }
+            | Block::Image { .. } => None,
         })
         .collect()
 }
@@ -664,6 +638,7 @@ fn user_state_text(blocks: &[Block]) -> String {
             Block::Thinking { text, .. } if !text.trim().is_empty() => {
                 Some(text.trim().to_string())
             }
+            // Empty thinking, tool uses, and results have no user-side text.
             Block::Thinking { .. } | Block::ToolUse { .. } | Block::ToolResult { .. } => None,
         })
         .filter(|s| !s.is_empty())
@@ -693,6 +668,7 @@ fn assistant_state_steps(
                 "[image: {}]",
                 source.media_type
             ))),
+            // Empty text/thinking is no step; results render with their calls.
             Block::Text { .. } | Block::Thinking { .. } | Block::ToolResult { .. } => None,
         })
         .collect()
@@ -707,23 +683,25 @@ fn tool_use_state_text(id: &str, tool: &Tool) -> String {
 fn orphan_tool_result_state_text(blocks: &[Block], known_tool_uses: &HashSet<String>) -> String {
     blocks
         .iter()
-        .filter_map(|block| {
-            let Block::ToolResult {
+        .filter_map(|block| match block {
+            // A result whose call is in the transcript renders with the call.
+            Block::ToolResult { tool_use_id, .. } if known_tool_uses.contains(tool_use_id) => None,
+            Block::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
-            } = block
-            else {
-                return None;
-            };
-            if known_tool_uses.contains(tool_use_id) {
-                return None;
+            } => {
+                let status = if *is_error { "error" } else { "result" };
+                Some(format!(
+                    "Tool {status} for {tool_use_id}:\n{}",
+                    tool_output_text(content)
+                ))
             }
-            let status = if *is_error { "error" } else { "result" };
-            Some(format!(
-                "Tool {status} for {tool_use_id}:\n{}",
-                tool_output_text(content)
-            ))
+            // Other blocks are not tool results.
+            Block::Text { .. }
+            | Block::Thinking { .. }
+            | Block::ToolUse { .. }
+            | Block::Image { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -759,12 +737,15 @@ fn cursor_thinking_step_proto(text: &str) -> Vec<u8> {
 }
 
 fn cursor_tool_step_proto(meta: &Meta, call: &CursorStateToolCall) -> Vec<u8> {
-    let Some(tool_call) = cursor_tool_call_proto(meta, call) else {
-        return cursor_assistant_step_proto(&tool_use_state_text(&call.id, &call.tool));
-    };
-    let mut step = Vec::new();
-    pb_len(&mut step, 2, &tool_call);
-    step
+    match cursor_tool_call_proto(meta, call) {
+        Some(tool_call) => {
+            let mut step = Vec::new();
+            pb_len(&mut step, 2, &tool_call);
+            step
+        }
+        // A tool with no Cursor-native encoding falls back to plain text.
+        None => cursor_assistant_step_proto(&tool_use_state_text(&call.id, &call.tool)),
+    }
 }
 
 fn cursor_tool_call_proto(meta: &Meta, call: &CursorStateToolCall) -> Option<Vec<u8>> {
@@ -775,7 +756,7 @@ fn cursor_tool_call_proto(meta: &Meta, call: &CursorStateToolCall) -> Option<Vec
             timeout_ms,
             description,
             run_in_background,
-        } => (
+        } => Some((
             1,
             cursor_shell_tool_call_proto(
                 command,
@@ -789,15 +770,15 @@ fn cursor_tool_call_proto(meta: &Meta, call: &CursorStateToolCall) -> Option<Vec
                 &call.id,
                 call.result.as_ref(),
             ),
-        ),
+        )),
         Tool::Read {
             file_path,
             offset,
             limit,
-        } => (
+        } => Some((
             8,
             cursor_read_tool_call_proto(file_path, *offset, *limit, call.result.as_ref()),
-        ),
+        )),
         Tool::Edit {
             file_path,
             old_string,
@@ -806,27 +787,28 @@ fn cursor_tool_call_proto(meta: &Meta, call: &CursorStateToolCall) -> Option<Vec
         } => {
             let payload =
                 CursorEditPayload::replace(file_path, old_string, new_string, call.result.as_ref());
-            (
+            Some((
                 12,
                 cursor_edit_tool_call_proto(file_path, &payload, call.result.as_ref()),
-            )
+            ))
         }
         Tool::Write { file_path, content } => {
             let payload = CursorEditPayload::write(file_path, content, call.result.as_ref());
-            (
+            Some((
                 12,
                 cursor_edit_tool_call_proto(file_path, &payload, call.result.as_ref()),
-            )
+            ))
         }
         Tool::MultiEdit { file_path, edits } => {
             let payload = CursorEditPayload::multi_edit(file_path, edits, call.result.as_ref());
-            (
+            Some((
                 12,
                 cursor_edit_tool_call_proto(file_path, &payload, call.result.as_ref()),
-            )
+            ))
         }
-        Tool::Raw { .. } => return None,
-    };
+        // Raw tools have no Cursor-native proto shape.
+        Tool::Raw { .. } => None,
+    }?;
 
     let mut out = Vec::new();
     pb_len(&mut out, field, &tool_data);
@@ -1146,9 +1128,7 @@ fn diff_range(lines: u64) -> String {
 }
 
 fn append_diff_lines(out: &mut String, prefix: char, text: &str) {
-    if text.is_empty() {
-        return;
-    }
+    // `lines()` on empty text yields nothing, so nothing is appended.
     for line in text.lines() {
         out.push(prefix);
         out.push_str(line);
@@ -1238,7 +1218,8 @@ fn parse_user_content(obj: &Value) -> Vec<Block> {
     match obj.get("content") {
         Some(Value::String(s)) => text_blocks_from_str(s, true),
         Some(Value::Array(arr)) => arr.iter().filter_map(parse_user_block).collect(),
-        _ => Vec::new(),
+        // Missing content or any other JSON shape carries no blocks.
+        None | Some(_) => Vec::new(),
     }
 }
 
@@ -1250,18 +1231,21 @@ fn parse_user_block(v: &Value) -> Option<Block> {
             (!text.is_empty()).then_some(Block::Text { text })
         }
         "image" => parse_image(v),
+        // Unknown block types carry nothing representable.
         _ => None,
     }
 }
 
 fn parse_assistant_content(obj: &Value, session_id: &str, message_idx: usize) -> Vec<Block> {
-    let Some(Value::Array(arr)) = obj.get("content") else {
-        return Vec::new();
-    };
-    arr.iter()
-        .enumerate()
-        .filter_map(|(i, v)| parse_assistant_block(v, session_id, message_idx, i))
-        .collect()
+    match obj.get("content") {
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| parse_assistant_block(v, session_id, message_idx, i))
+            .collect(),
+        // Missing content or any non-array shape carries no blocks.
+        None | Some(_) => Vec::new(),
+    }
 }
 
 fn parse_assistant_block(
@@ -1303,37 +1287,39 @@ fn parse_assistant_block(
             })
         }
         "image" => parse_image(v),
+        // Unknown block types carry nothing representable.
         _ => None,
     }
 }
 
 fn parse_tool_content(obj: &Value) -> Vec<Block> {
-    let Some(Value::Array(arr)) = obj.get("content") else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|v| {
-            if v.get("type").and_then(Value::as_str)? != "tool-result" {
-                return None;
-            }
-            let tool_use_id = v.get("toolCallId")?.as_str()?.to_string();
-            let content = match v.get("result") {
-                Some(Value::String(s)) => ToolOutput::Text(s.clone()),
-                Some(other) => ToolOutput::Json(other.clone()),
-                None => ToolOutput::Text(String::new()),
-            };
-            let is_error = v
-                .get("isError")
-                .or_else(|| obj.get("isError"))
-                .and_then(Value::as_bool)
-                .unwrap_or_else(|| matches!(&content, ToolOutput::Text(s) if looks_error(s)));
-            Some(Block::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
+    match obj.get("content") {
+        Some(Value::Array(arr)) => arr
+            .iter()
+            // Only tool-result entries carry output.
+            .filter(|v| v.get("type").and_then(Value::as_str) == Some("tool-result"))
+            .filter_map(|v| {
+                let tool_use_id = v.get("toolCallId")?.as_str()?.to_string();
+                let content = match v.get("result") {
+                    Some(Value::String(s)) => ToolOutput::Text(s.clone()),
+                    Some(other) => ToolOutput::Json(other.clone()),
+                    None => ToolOutput::Text(String::new()),
+                };
+                let is_error = v
+                    .get("isError")
+                    .or_else(|| obj.get("isError"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or_else(|| matches!(&content, ToolOutput::Text(s) if looks_error(s)));
+                Some(Block::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                })
             })
-        })
-        .collect()
+            .collect(),
+        // Missing content or any non-array shape carries no blocks.
+        None | Some(_) => Vec::new(),
+    }
 }
 
 fn serialize_user_block(block: &Block) -> Value {
@@ -1384,6 +1370,7 @@ fn serialize_assistant_block(
             }))
         }
         Block::Image { source } => Some(serialize_image(source)),
+        // Cursor carries results in tool-role messages, not assistant blocks.
         Block::ToolResult { .. } => None,
     }
 }
@@ -1443,7 +1430,11 @@ fn meta_from_db(db: &CursorDb, db_path: Option<&Path>) -> Meta {
                 .and_then(Value::as_str)
                 .map(String::from)
         });
-    let mut cwd = None;
+    let mut cwd = db_meta
+        .as_ref()
+        .and_then(|v| v.get("workspacePath"))
+        .and_then(Value::as_str)
+        .map(String::from);
     let mut model = db_meta
         .as_ref()
         .and_then(|v| v.get("lastUsedModel"))
@@ -1451,18 +1442,12 @@ fn meta_from_db(db: &CursorDb, db_path: Option<&Path>) -> Meta {
         .map(String::from);
     let mut first_user_text = None;
 
-    if cwd.is_none() {
-        cwd = db_meta
-            .as_ref()
-            .and_then(|v| v.get("workspacePath"))
-            .and_then(Value::as_str)
-            .map(String::from);
-    }
-
-    for blob in &db.blobs {
-        let Ok(obj) = serde_json::from_slice::<Value>(&blob.data) else {
-            continue;
-        };
+    // Non-JSON blobs carry Cursor's internal graph state, not messages.
+    let json_blobs = db
+        .blobs
+        .iter()
+        .filter_map(|blob| serde_json::from_slice::<Value>(&blob.data).ok());
+    for obj in json_blobs {
         if cwd.is_none() {
             cwd = workspace_from_message(&obj);
         }
@@ -1477,7 +1462,12 @@ fn meta_from_db(db: &CursorDb, db_path: Option<&Path>) -> Meta {
                 .into_iter()
                 .find_map(|block| match block {
                     Block::Text { text } if !text.is_empty() => Some(text),
-                    _ => None,
+                    // Only non-empty text can seed a title.
+                    Block::Text { .. }
+                    | Block::Thinking { .. }
+                    | Block::ToolUse { .. }
+                    | Block::ToolResult { .. }
+                    | Block::Image { .. } => None,
                 });
         }
     }
@@ -1589,7 +1579,12 @@ fn write_session_files(session_dir: &Path, body: &CursorDb, meta: &Meta, _id: &s
         .flat_map(|message| message.content)
         .filter_map(|block| match block {
             Block::Text { text } if !text.is_empty() => Some(text),
-            _ => None,
+            // Only non-empty text blocks are prompts.
+            Block::Text { .. }
+            | Block::Thinking { .. }
+            | Block::ToolUse { .. }
+            | Block::ToolResult { .. }
+            | Block::Image { .. } => None,
         })
         .collect::<Vec<_>>();
     fs::write(
@@ -1601,11 +1596,10 @@ fn write_session_files(session_dir: &Path, body: &CursorDb, meta: &Meta, _id: &s
 
 fn cursor_meta_value(db: &CursorDb) -> Option<Value> {
     let raw = &db.meta.iter().find(|entry| entry.key == "0")?.value;
-    if let Ok(v) = serde_json::from_str::<Value>(raw) {
-        return Some(v);
-    }
-    let decoded = hex_decode(raw).ok()?;
-    serde_json::from_slice(&decoded).ok()
+    // The value is stored either as plain JSON or as hex-encoded JSON.
+    serde_json::from_str(raw)
+        .ok()
+        .or_else(|| serde_json::from_slice(&hex_decode(raw).ok()?).ok())
 }
 
 fn timestamp_from_obj(obj: &Value) -> Option<DateTime<Utc>> {
@@ -1644,20 +1638,20 @@ fn is_context_injection(obj: &Value) -> bool {
 }
 
 fn content_strings(content: Option<&Value>) -> impl Iterator<Item = &str> {
-    let mut strings = Vec::new();
-    match content {
-        Some(Value::String(s)) => strings.push(s.as_str()),
-        Some(Value::Array(arr)) => {
-            for block in arr {
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    strings.push(text);
-                } else if let Some(text) = block.get("result").and_then(Value::as_str) {
-                    strings.push(text);
-                }
-            }
-        }
-        _ => {}
-    }
+    let strings: Vec<&str> = match content {
+        Some(Value::String(s)) => vec![s.as_str()],
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|block| {
+                block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .or_else(|| block.get("result").and_then(Value::as_str))
+            })
+            .collect(),
+        // Missing content or any other JSON shape has no text to scan.
+        None | Some(_) => Vec::new(),
+    };
     strings.into_iter()
 }
 
@@ -1673,21 +1667,26 @@ fn cursor_tool(name: &str, args: Value) -> Tool {
 }
 
 fn normalize_cursor_args(tool: &str, args: Value) -> Value {
-    let Some(obj) = args.as_object() else {
-        return args;
-    };
-    let mut out = Map::new();
-    for (k, v) in obj {
-        let key = match (tool, k.as_str()) {
-            (_, "path" | "filePath") => "file_path",
-            ("Bash", "cwd") => "workdir",
-            ("Edit", "oldString") => "old_string",
-            ("Edit", "newString") => "new_string",
-            _ => k.as_str(),
-        };
-        out.insert(key.to_string(), v.clone());
+    match args {
+        Value::Object(obj) => Value::Object(
+            obj.into_iter()
+                .map(|(k, v)| {
+                    let key = match (tool, k.as_str()) {
+                        (_, "path" | "filePath") => "file_path",
+                        ("Bash", "cwd") => "workdir",
+                        ("Edit", "oldString") => "old_string",
+                        ("Edit", "newString") => "new_string",
+                        // Keys the formats agree on pass through unchanged.
+                        _ => k.as_str(),
+                    }
+                    .to_string();
+                    (key, v)
+                })
+                .collect(),
+        ),
+        // Non-object args have no keys to rename.
+        other => other,
     }
-    Value::Object(out)
 }
 
 fn denormalize_tool(tool: &Tool) -> (String, Value) {
@@ -1702,19 +1701,24 @@ fn denormalize_tool(tool: &Tool) -> (String, Value) {
 }
 
 fn denormalize_cursor_args(tool: &str, input: Value) -> Value {
-    let Some(obj) = input.as_object() else {
-        return input;
-    };
-    let mut out = Map::new();
-    for (k, v) in obj {
-        let key = match (tool, k.as_str()) {
-            (_, "file_path") => "path",
-            ("Bash", "workdir") => "cwd",
-            _ => k.as_str(),
-        };
-        out.insert(key.to_string(), v.clone());
+    match input {
+        Value::Object(obj) => Value::Object(
+            obj.into_iter()
+                .map(|(k, v)| {
+                    let key = match (tool, k.as_str()) {
+                        (_, "file_path") => "path",
+                        ("Bash", "workdir") => "cwd",
+                        // Keys the formats agree on pass through unchanged.
+                        _ => k.as_str(),
+                    }
+                    .to_string();
+                    (key, v)
+                })
+                .collect(),
+        ),
+        // Non-object args have no keys to rename.
+        other => other,
     }
-    Value::Object(out)
 }
 
 // -- text helpers --------------------------------------------------------
@@ -1798,15 +1802,18 @@ fn tool_use_id(session_id: &str, message_idx: usize, block_idx: usize, name: &st
 
 #[cfg(feature = "opencode")]
 fn file_fingerprint(path: &Path) -> String {
-    let Ok(meta) = fs::metadata(path) else {
-        return String::new();
-    };
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos());
-    format!("{mtime}:{}", meta.len())
+    // An unreadable file fingerprints as empty.
+    fs::metadata(path).map_or_else(
+        |_| String::new(),
+        |meta| {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            format!("{mtime}:{}", meta.len())
+        },
+    )
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -2052,16 +2059,14 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
     let bytes = s.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        return Err("hex string has odd length".to_string());
+    if bytes.len().is_multiple_of(2) {
+        bytes
+            .chunks_exact(2)
+            .map(|pair| Ok((hex_value(pair[0])? << 4) | hex_value(pair[1])?))
+            .collect()
+    } else {
+        Err("hex string has odd length".to_string())
     }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
-        let hi = hex_value(pair[0])?;
-        let lo = hex_value(pair[1])?;
-        out.push((hi << 4) | lo);
-    }
-    Ok(out)
 }
 
 fn hex_value(b: u8) -> std::result::Result<u8, String> {
