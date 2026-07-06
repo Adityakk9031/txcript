@@ -411,7 +411,8 @@ mod spin {
             }
         }
 
-        /// Stop the animation and clear the line, leaving nothing behind.
+        /// Stop the animation and clear the line, leaving nothing behind:
+        /// the spinner narrates progress, never results.
         pub fn finish(self) {
             self.running.store(false, Ordering::Relaxed);
             if let Some(h) = self.handle {
@@ -422,12 +423,6 @@ mod spin {
                 let _ = write!(err, "\r\x1b[2K");
                 let _ = err.flush();
             }
-        }
-
-        /// Stop the animation, clear the line, and print a one-line summary.
-        pub fn stop(self, summary: &str) {
-            self.finish();
-            eprintln!("{summary}");
         }
     }
 }
@@ -498,11 +493,9 @@ mod query {
                 sessions.insert((session.harness, session.meta.id.clone()), session);
             }
         }
-        spinner.stop(&format!(
-            "indexed {} session(s), {} lines",
-            index.len(),
-            index.lines()
-        ));
+        // No summary: the picker's own counter shows the total, and one-shot
+        // output follows immediately.
+        spinner.finish();
         (index, sessions)
     }
 
