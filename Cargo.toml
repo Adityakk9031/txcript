@@ -32,8 +32,9 @@ overflow-checks = true
 name = "txcript"
 version = "0.2.0"
 edition = "2024"
-# Measured floor: is_multiple_of (1.87) > edition 2024 / dep-graph max (1.85).
-rust-version = "1.87"
+# Policy: track the latest stable (kept in lockstep with the CI msrv job),
+# not a measured feature floor — bump both together on toolchain updates.
+rust-version = "1.96"
 description = "A typed intermediate representation for converting AI coding-agent session transcripts between harness formats (Claude Code, Codex, OpenCode, pi)."
 license = "Apache-2.0"
 repository = "https://github.com/skillsynchq/txcript"
