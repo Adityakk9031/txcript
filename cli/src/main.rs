@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! txcript list                          # all local sessions, every harness
+//!     [--from <harness>]                    #   only this harness's sessions
 //! txcript continue <id>                 # continue <id>, then launch the harness
 //!     [--with <harness>]                    #   ...continuing in <harness> instead
 //!     [--from <harness>]                    #   scope the id lookup to one harness
@@ -16,8 +17,10 @@
 //! ```
 //!
 //! By default `continue` hands the terminal to the harness (on Unix it `exec`s,
-//! replacing this process). The resume command is overridable per harness via
-//! `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template).
+//! replacing this process), launched from the session's own working directory
+//! when it still exists — the world the transcript assumes. The resume command
+//! is overridable per harness via `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}`
+//! template).
 //!
 //! All the actual work lives in [`txcript::local`] and [`txcript::search`];
 //! this crate is argument parsing (clap) and terminal presentation.
@@ -45,7 +48,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// List local sessions across every harness, newest first
-    List,
+    #[command(after_help = HARNESSES)]
+    List {
+        /// List only this harness's sessions
+        #[arg(long, value_name = "HARNESS", value_parser = harness)]
+        from: Option<HarnessId>,
+    },
     /// Continue a session, then launch its harness
     ///
     /// Same-harness continues resume the original in place; --with
@@ -94,8 +102,8 @@ fn harness(s: &str) -> Result<HarnessId, txcript::Error> {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::List => {
-            cmd_list();
+        Command::List { from } => {
+            cmd_list(from);
             Ok(ExitCode::SUCCESS)
         }
         Command::Continue {
@@ -117,24 +125,78 @@ fn main() -> ExitCode {
     })
 }
 
-fn cmd_list() {
+fn cmd_list(from: Option<HarnessId>) {
     let sessions = discover_with_spinner();
-    if sessions.is_empty() {
-        println!("no local sessions found");
+    let listed: Vec<_> = sessions
+        .iter()
+        .filter(|s| from.is_none_or(|h| s.harness == h))
+        .collect();
+    if listed.is_empty() {
+        match from {
+            Some(h) => println!("no local {h} sessions found"),
+            None => println!("no local sessions found"),
+        }
     } else {
-        println!("{:<12}  {:<38}  TITLE / FIRST MESSAGE", "HARNESS", "ID");
-        for s in &sessions {
+        let color = style::enabled();
+        let header = format!("{:<12}  {:<38}  TITLE / FIRST MESSAGE", "HARNESS", "ID");
+        println!("{}", style::dim(&header, color));
+        for s in listed {
             let label = s
                 .meta
                 .title
                 .clone()
                 .unwrap_or_else(|| s.meta.cwd.clone().unwrap_or_default());
             println!(
-                "{:<12}  {:<38}  {}",
-                s.harness.as_str(),
-                truncate(&s.meta.id, 38),
+                "{}  {}  {}",
+                style::harness(s.harness, 12, color),
+                style::dim(&format!("{:<38}", truncate(&s.meta.id, 38)), color),
                 truncate(&label, 60)
             );
+        }
+    }
+}
+
+/// ANSI styling for the printing commands: colors reach a terminal, plain
+/// text reaches a pipe or redirect (and everywhere when `NO_COLOR` is set).
+/// Padding happens before coloring — escape bytes would otherwise count
+/// against the column width.
+mod style {
+    use std::io::IsTerminal;
+
+    use txcript::HarnessId;
+
+    pub fn enabled() -> bool {
+        std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
+    }
+
+    pub fn dim(s: &str, on: bool) -> String {
+        if on {
+            format!("\x1b[2m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    /// The harness name padded to `pad`, in its color when `on`. Each harness
+    /// keeps a stable color so a mixed listing reads at a glance.
+    pub fn harness(h: HarnessId, pad: usize, on: bool) -> String {
+        let name = format!("{:<pad$}", h.as_str());
+        if on {
+            format!("{}{name}\x1b[0m", color(h))
+        } else {
+            name
+        }
+    }
+
+    const fn color(h: HarnessId) -> &'static str {
+        match h {
+            HarnessId::ClaudeCode => "\x1b[33m", // yellow
+            HarnessId::Codex => "\x1b[36m",      // cyan
+            HarnessId::OpenCode => "\x1b[32m",   // green
+            HarnessId::Pi => "\x1b[35m",         // magenta
+            HarnessId::Campfire => "\x1b[91m",   // bright red
+            HarnessId::Cursor => "\x1b[34m",     // blue
+            HarnessId::Grok => "\x1b[37m",       // white
         }
     }
 }
@@ -193,12 +255,37 @@ fn continue_session(
     let (bin, args) = local::resume_command(target, &resume_id);
     if resume {
         // Hand the terminal to the harness — replaces this process on Unix.
-        eprintln!("resuming: {} {}", bin, args.join(" "));
-        handoff(&bin, &args)
+        let workdir = resume_workdir(found.meta.cwd.as_deref());
+        let shown = std::iter::once(&bin)
+            .chain(&args)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+        match &workdir {
+            Some(dir) => eprintln!("resuming: {shown} (in {})", dir.display()),
+            None => eprintln!("resuming: {shown}"),
+        }
+        handoff(&bin, &args, workdir.as_deref())
     } else {
         println!("  resume with: {} {}", bin, args.join(" "));
         Ok(ExitCode::SUCCESS)
     }
+}
+
+/// The directory to resume in: the session's own cwd — the world its
+/// transcript assumes (CLAUDE.md, the git repo, every relative path) —
+/// or the current directory, with a warning, when the recorded one no
+/// longer exists.
+fn resume_workdir(cwd: Option<&str>) -> Option<PathBuf> {
+    cwd.filter(|c| !c.is_empty()).and_then(|c| {
+        let dir = PathBuf::from(c);
+        if dir.is_dir() {
+            Some(dir)
+        } else {
+            eprintln!("warning: session cwd `{c}` no longer exists; resuming from the current directory");
+            None
+        }
+    })
 }
 
 fn discover_with_spinner() -> Vec<local::Session> {
@@ -211,19 +298,29 @@ fn discover_with_spinner() -> Vec<local::Session> {
 }
 
 /// Replace this process with the harness so it owns the terminal (a true
-/// handoff). On non-Unix, spawn-and-wait, then report the child's code.
+/// handoff), from `workdir` when given. On non-Unix, spawn-and-wait, then
+/// report the child's code.
 #[cfg(unix)]
-fn handoff(bin: &str, args: &[String]) -> Result<ExitCode, String> {
+fn handoff(bin: &str, args: &[String], workdir: Option<&std::path::Path>) -> Result<ExitCode, String> {
     use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(args);
+    if let Some(dir) = workdir {
+        cmd.current_dir(dir);
+    }
     // `exec` only returns if it failed to launch.
-    let e = std::process::Command::new(bin).args(args).exec();
+    let e = cmd.exec();
     Err(format!("failed to launch `{bin}`: {e} (is it on PATH?)"))
 }
 
 #[cfg(not(unix))]
-fn handoff(bin: &str, args: &[String]) -> Result<ExitCode, String> {
-    let status = std::process::Command::new(bin)
-        .args(args)
+fn handoff(bin: &str, args: &[String], workdir: Option<&std::path::Path>) -> Result<ExitCode, String> {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(args);
+    if let Some(dir) = workdir {
+        cmd.current_dir(dir);
+    }
+    let status = cmd
         .status()
         .map_err(|e| format!("failed to launch `{bin}`: {e} (is it on PATH?)"))?;
     Ok(match status.code() {
@@ -319,7 +416,7 @@ mod spin {
 mod query {
     use std::collections::HashMap;
 
-    use txcript::search::{DocKey, DocMatch, Index, Query};
+    use txcript::search::{DocKey, DocMatch, Index, Origin, Query};
     use txcript::{HarnessId, local};
 
     type Sessions = HashMap<(HarnessId, String), local::Session>;
@@ -402,13 +499,26 @@ mod query {
             for m in &matches {
                 println!("{}", doc_line(m, color));
                 for hit in &m.hits {
-                    let origin = format!("{:?}", hit.origin).to_lowercase();
                     println!(
-                        "  [{origin:>11}] {}",
+                        "  [{:>11}] {}",
+                        origin_label(hit.origin),
                         highlight(&hit.line, &hit.spans, 120, color)
                     );
                 }
             }
+        }
+    }
+
+    /// What kind of content a hit came from, spelled out — matches the
+    /// [`Origin`] names one to one, wide enough to never abbreviate.
+    pub(super) fn origin_label(origin: Origin) -> &'static str {
+        match origin {
+            Origin::User => "user",
+            Origin::Assistant => "assistant",
+            Origin::Thinking => "thinking",
+            Origin::ToolUse => "tool_use",
+            Origin::ToolResult => "tool_result",
+            Origin::Meta => "meta",
         }
     }
 
@@ -420,14 +530,13 @@ mod query {
             .or_else(|| m.meta.cwd.as_deref().map(basename))
             .unwrap_or_default();
         let date = m.meta.timestamp.format("%Y-%m-%d %H:%M");
-        if color {
-            format!(
-                "\x1b[1m{}\x1b[0m  {}  \x1b[2m{date}\x1b[0m  {}",
-                m.key.harness, m.key.id, label
-            )
-        } else {
-            format!("{}  {}  {date}  {}", m.key.harness, m.key.id, label)
-        }
+        format!(
+            "{}  {}  {}  {}",
+            crate::style::harness(m.key.harness, 0, color),
+            crate::style::dim(&m.key.id, color),
+            crate::style::dim(&date.to_string(), color),
+            label
+        )
     }
 
     pub(super) fn basename(path: &str) -> String {
@@ -470,7 +579,7 @@ mod query {
         use std::io::{IsTerminal, Read, Write};
         use std::process::{Command, Stdio};
 
-        use txcript::search::{DocKey, Index, Origin, Query};
+        use txcript::search::{DocKey, Index, Query};
 
         /// Raw-mode + alternate-screen guard: constructing enters, dropping
         /// restores — including on error paths and cancels.
@@ -629,7 +738,13 @@ mod query {
             for (i, m) in matches.iter().take(rows.saturating_sub(2)).enumerate() {
                 let line = row(m, cols.saturating_sub(2));
                 if i == selected {
-                    let _ = write!(frame, "\r\n\x1b[7m▌{line}\x1b[0m");
+                    // The row's internal styling ends in resets that would
+                    // kill the selection underline mid-line: re-assert it
+                    // after each, and pad to the row edge so the underline
+                    // runs the full width.
+                    let pad = " ".repeat(cols.saturating_sub(2).saturating_sub(visible_width(&line)));
+                    let line = line.replace("\x1b[0m", "\x1b[0m\x1b[4m");
+                    let _ = write!(frame, "\r\n\x1b[4m▌{line}{pad}\x1b[0m");
                 } else {
                     let _ = write!(frame, "\r\n {line}");
                 }
@@ -639,7 +754,8 @@ mod query {
             let _ = out.flush();
         }
 
-        /// One list row: harness, date, label, then the best hit line.
+        /// One list row: harness, date, label, then the best hit line
+        /// prefixed by what kind of content it matched in.
         fn row(m: &txcript::search::DocMatch<'_>, cols: usize) -> String {
             let label = m
                 .meta
@@ -648,28 +764,43 @@ mod query {
                 .or_else(|| m.meta.cwd.as_deref().map(super::basename))
                 .unwrap_or_default();
             let head = format!(
-                "{:<11} \x1b[2m{}\x1b[0m {:<24} ",
-                m.key.harness.as_str(),
+                "{} \x1b[2m{}\x1b[0m {:<24} ",
+                crate::style::harness(m.key.harness, 11, true),
                 m.meta.timestamp.format("%m-%d %H:%M"),
                 truncate_chars(&label, 24),
             );
             // 11 + 1 + 11 + 1 + 24 + 1 visible chars so far.
             let room = cols.saturating_sub(49);
             let preview = m.hits.first().map_or_else(String::new, |hit| {
-                let origin = match hit.origin {
-                    Origin::User => "usr",
-                    Origin::Assistant => "ast",
-                    Origin::Thinking => "thk",
-                    Origin::ToolUse => "use",
-                    Origin::ToolResult => "res",
-                    Origin::Meta => "met",
-                };
                 format!(
-                    "\x1b[2m{origin}\x1b[0m {}",
-                    super::highlight(&hit.line, &hit.spans, room.saturating_sub(4), true)
+                    "\x1b[2m{:>11}\x1b[0m {}",
+                    super::origin_label(hit.origin),
+                    // 11 + 1 for the origin column.
+                    super::highlight(&hit.line, &hit.spans, room.saturating_sub(12), true)
                 )
             });
             format!("{head}{preview}")
+        }
+
+        /// Character width of `s` with its ANSI escape sequences stripped —
+        /// what the terminal will actually render.
+        fn visible_width(s: &str) -> usize {
+            let mut in_escape = false;
+            s.chars()
+                .filter(|&c| match (in_escape, c) {
+                    (false, '\x1b') => {
+                        in_escape = true;
+                        false
+                    }
+                    (false, _) => true,
+                    // `m` closes every sequence this UI emits (SGR only).
+                    (true, 'm') => {
+                        in_escape = false;
+                        false
+                    }
+                    (true, _) => false,
+                })
+                .count()
         }
 
         fn truncate_chars(s: &str, max: usize) -> String {
