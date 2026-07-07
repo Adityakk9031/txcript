@@ -13,6 +13,7 @@
 //! txcript query                         # fzf-style picker; Enter continues
 //!     [--from <harness>]                    #   search only <harness> (default: all)
 //!     [--with <harness>]                    #   continue the pick in <harness>
+//! txcript completion <shell>            # print a completion script
 //! ```
 //!
 //! By default `continue` launches the harness from the recorded working
@@ -25,7 +26,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use txcript::{HarnessId, local};
 
 const HARNESSES: &str = "harnesses: claude_code, codex, opencode, pi, campfire, cursor, grok";
@@ -45,25 +46,23 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// List local sessions across every harness, newest first
-    #[command(after_help = HARNESSES)]
     List {
         /// List only this harness's sessions
-        #[arg(long, value_name = "HARNESS", value_parser = harness)]
+        #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         from: Option<HarnessId>,
     },
     /// Continue a session, then launch its harness
     ///
     /// Same-harness continues resume the original in place; --with
     /// re-synthesizes into another harness's native, resumable format first.
-    #[command(after_help = HARNESSES)]
     Continue {
         /// Session id, or its exact title
         id: String,
         /// Continue in this harness instead of the session's own
-        #[arg(long, value_name = "HARNESS", value_parser = harness)]
+        #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         with: Option<HarnessId>,
         /// Only look for the session in this harness
-        #[arg(long, value_name = "HARNESS", value_parser = harness)]
+        #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         from: Option<HarnessId>,
         /// Write under this directory instead of the harness's live root
         /// (implies --no-resume: the harness wouldn't see the copy)
@@ -78,22 +77,55 @@ enum Command {
     /// A pattern prints ranked hits, labeled by what matched (user text,
     /// assistant text, thinking, tool use, session metadata). The picker
     /// filters per keystroke; Enter continues the selection, Esc cancels.
-    #[command(after_help = HARNESSES)]
     Query {
         /// fzf-style pattern ('exact, ^prefix, suffix$, !not); omit to pick
         /// interactively
         pattern: Option<String>,
         /// Continue the picked session in this harness
-        #[arg(long, value_name = "HARNESS", value_parser = harness)]
+        #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         with: Option<HarnessId>,
         /// Search only this harness
-        #[arg(long, value_name = "HARNESS", value_parser = harness)]
+        #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         from: Option<HarnessId>,
+    },
+    /// Print a completion script for a shell (add it to your shell config)
+    Completion {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
     },
 }
 
 fn harness(s: &str) -> Result<HarnessId, txcript::Error> {
     s.parse()
+}
+
+/// [`harness`] as a clap parser that also advertises the canonical names, so
+/// help and shell completion offer them. Parsing stays [`harness`]'s (its
+/// friendly aliases included): `possible_values` informs, it doesn't restrict.
+#[derive(Clone)]
+struct HarnessParser;
+
+impl clap::builder::TypedValueParser for HarnessParser {
+    type Value = HarnessId;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<HarnessId, clap::Error> {
+        (harness as fn(&str) -> Result<HarnessId, txcript::Error>).parse_ref(cmd, arg, value)
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        Some(Box::new(
+            HarnessId::ALL
+                .into_iter()
+                .map(|h| clap::builder::PossibleValue::new(h.as_str())),
+        ))
+    }
 }
 
 fn main() -> ExitCode {
@@ -115,6 +147,10 @@ fn main() -> ExitCode {
             with,
             from,
         } => query::cmd_query(pattern, with, from),
+        Command::Completion { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "txcript", &mut std::io::stdout());
+            Ok(ExitCode::SUCCESS)
+        }
     };
     result.unwrap_or_else(|e| {
         eprintln!("error: {e}");

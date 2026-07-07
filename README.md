@@ -152,6 +152,15 @@ its own harness (or `--with`), Esc to cancel. Every row shows which kind of
 content matched — user text, assistant text, thinking, tool use, tool output,
 or session metadata.
 
+Shell completions (bash, zsh, fish, elvish, powershell) come from the binary
+itself:
+
+```sh
+txcript completion zsh > ~/.zfunc/_txcript      # or wherever your fpath looks
+source <(txcript completion bash)               # bash, ad hoc
+txcript completion fish > ~/.config/fish/completions/txcript.fish
+```
+
 ## Use as a WASM module (Bun / Node)
 
 The pure codec compiles to WebAssembly; the JS host owns all I/O and calls in
