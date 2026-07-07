@@ -4,6 +4,7 @@
 //! ```text
 //! txcript list                          # all local sessions, every harness
 //!     [--from <harness>]                    #   only this harness's sessions
+//!     [--cwd <dir>]                         #   only sessions recorded in <dir>
 //! txcript continue <id>                 # continue <id>, then launch the harness
 //!     [--with <harness>]                    #   ...continuing in <harness> instead
 //!     [--from <harness>]                    #   scope the id lookup to one harness
@@ -13,6 +14,7 @@
 //! txcript query                         # fzf-style picker; Enter continues
 //!     [--from <harness>]                    #   search only <harness> (default: all)
 //!     [--with <harness>]                    #   continue the pick in <harness>
+//!     [--cwd <dir>]                         #   only sessions recorded in <dir>
 //! txcript completion <shell>            # print a completion script
 //! ```
 //!
@@ -50,6 +52,9 @@ enum Command {
         /// List only this harness's sessions
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         from: Option<HarnessId>,
+        /// Only sessions recorded in this working directory
+        #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
+        cwd: Option<PathBuf>,
     },
     /// Continue a session, then launch its harness
     ///
@@ -57,6 +62,8 @@ enum Command {
     /// re-synthesizes into another harness's native, resumable format first.
     Continue {
         /// Session id, or its exact title
+        // Other: without a hint, generated completions fall back to filenames.
+        #[arg(value_hint = clap::ValueHint::Other)]
         id: String,
         /// Continue in this harness instead of the session's own
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
@@ -66,7 +73,7 @@ enum Command {
         from: Option<HarnessId>,
         /// Write under this directory instead of the harness's live root
         /// (implies --no-resume: the harness wouldn't see the copy)
-        #[arg(long, value_name = "DIR")]
+        #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
         out: Option<PathBuf>,
         /// Write the session but don't launch the harness
         #[arg(long)]
@@ -80,6 +87,8 @@ enum Command {
     Query {
         /// fzf-style pattern ('exact, ^prefix, suffix$, !not); omit to pick
         /// interactively
+        // Other: without a hint, generated completions fall back to filenames.
+        #[arg(value_hint = clap::ValueHint::Other)]
         pattern: Option<String>,
         /// Continue the picked session in this harness
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
@@ -87,6 +96,9 @@ enum Command {
         /// Search only this harness
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         from: Option<HarnessId>,
+        /// Only sessions recorded in this working directory
+        #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
+        cwd: Option<PathBuf>,
     },
     /// Print a completion script for a shell (add it to your shell config)
     Completion {
@@ -131,8 +143,8 @@ impl clap::builder::TypedValueParser for HarnessParser {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::List { from } => {
-            cmd_list(from);
+        Command::List { from, cwd } => {
+            cmd_list(from, cwd.as_deref());
             Ok(ExitCode::SUCCESS)
         }
         Command::Continue {
@@ -146,7 +158,8 @@ fn main() -> ExitCode {
             pattern,
             with,
             from,
-        } => query::cmd_query(pattern, with, from),
+            cwd,
+        } => query::cmd_query(pattern, with, from, cwd.as_deref()),
         Command::Completion { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "txcript", &mut std::io::stdout());
             Ok(ExitCode::SUCCESS)
@@ -158,16 +171,34 @@ fn main() -> ExitCode {
     })
 }
 
-fn cmd_list(from: Option<HarnessId>) {
+/// True when a session's recorded `cwd` names `dir`. Both sides are
+/// canonicalized so different spellings of one directory still match (`/tmp`
+/// vs `/private/tmp`, `$PWD` through a symlink); a path that no longer exists
+/// keeps its raw spelling, so vanished directories compare as plain strings.
+fn same_dir(session_cwd: &str, dir: &std::path::Path) -> bool {
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    canon(std::path::Path::new(session_cwd)) == canon(dir)
+}
+
+/// The `--from`/`--cwd` session filters shared by `list` and `query`.
+/// A `--cwd` filter excludes sessions with no recorded cwd — they don't
+/// pertain to any folder.
+fn selected(session: &local::Session, from: Option<HarnessId>, cwd: Option<&std::path::Path>) -> bool {
+    from.is_none_or(|h| session.harness == h)
+        && cwd.is_none_or(|d| session.meta.cwd.as_deref().is_some_and(|c| same_dir(c, d)))
+}
+
+fn cmd_list(from: Option<HarnessId>, cwd: Option<&std::path::Path>) {
     let sessions = discover_with_spinner();
     let listed: Vec<_> = sessions
         .iter()
-        .filter(|s| from.is_none_or(|h| s.harness == h))
+        .filter(|s| selected(s, from, cwd))
         .collect();
     if listed.is_empty() {
+        let scope = cwd.map_or(String::new(), |d| format!(" for {}", d.display()));
         match from {
-            Some(h) => println!("no local {h} sessions found"),
-            None => println!("no local sessions found"),
+            Some(h) => println!("no local {h} sessions found{scope}"),
+            None => println!("no local sessions found{scope}"),
         }
     } else {
         let color = style::enabled();
@@ -479,8 +510,9 @@ mod query {
         pattern: Option<String>,
         with: Option<HarnessId>,
         from: Option<HarnessId>,
+        cwd: Option<&std::path::Path>,
     ) -> Result<std::process::ExitCode, String> {
-        let (index, sessions) = build_index(from);
+        let (index, sessions) = build_index(from, cwd);
         match pattern {
             Some(pattern) => {
                 if with.is_some() {
@@ -504,7 +536,7 @@ mod query {
     }
 
     /// Build the search index and session lookup.
-    fn build_index(from: Option<HarnessId>) -> (Index, Sessions) {
+    fn build_index(from: Option<HarnessId>, cwd: Option<&std::path::Path>) -> (Index, Sessions) {
         let found = super::discover_with_spinner();
         let spinner = super::spin::Spinner::start("indexing…");
         let mut index = Index::new();
@@ -513,7 +545,7 @@ mod query {
         let scoped = found
             .into_iter()
             .enumerate()
-            .filter(|(_, session)| from.is_none_or(|h| session.harness == h));
+            .filter(|(_, session)| super::selected(session, from, cwd));
         for (i, session) in scoped {
             if i % 32 == 0 {
                 spinner.set(format!("indexing… ({i}/{total})"));
@@ -811,13 +843,14 @@ mod query {
                 .or_else(|| m.meta.cwd.as_deref().map(super::basename))
                 .unwrap_or_default();
             let head = format!(
-                "{} \x1b[2m{}\x1b[0m {:<24} ",
+                "{} \x1b[2m{} {:<8}\x1b[0m {:<24} ",
                 crate::style::harness(m.key.harness, 11, true),
                 m.meta.timestamp.format("%m-%d %H:%M"),
+                truncate_chars(&m.key.id, 8),
                 truncate_chars(&label, 24),
             );
-            // 11 + 1 + 11 + 1 + 24 + 1 visible chars so far.
-            let room = cols.saturating_sub(49);
+            // 11 + 1 + 11 + 1 + 8 + 1 + 24 + 1 visible chars so far.
+            let room = cols.saturating_sub(58);
             let preview = m.hits.first().map_or_else(String::new, |hit| {
                 format!(
                     "\x1b[2m{:>11}\x1b[0m {}",
