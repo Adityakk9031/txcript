@@ -1,6 +1,6 @@
 [package]
 name = "txcript-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.96"
 description = "CLI for listing, searching, and continuing txcript sessions."
@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "wrap_help"] }
-txcript = { version = "0.2.0", path = "..", features = ["opencode", "search"] }
+txcript = { version = "0.3.0", path = "..", features = ["opencode", "search"] }
 
 [lints]
 workspace = true
