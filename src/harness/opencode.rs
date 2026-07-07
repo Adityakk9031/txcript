@@ -4,10 +4,9 @@
 //! The native [`Body`](OpenCode) is `OpenCode`'s own export shape —
 //! `{info, messages: [{info, parts}]}` — the format `opencode export` emits and
 //! `opencode import` consumes. [`OpenCodeStore`] reads the DB read-only and
-//! assembles that shape; `save` hands it to `opencode import` (`OpenCode` owns
-//! schema defaults and project resolution). The codec is pure JSON and needs no
-//! database, so it (and the native types) compile without the `opencode`
-//! feature; only the store pulls in `rusqlite`.
+//! assembles that shape; `save` hands it to `opencode import`. The codec and
+//! native types are pure JSON and compile without the `opencode` feature;
+//! only the store pulls in `rusqlite`.
 //!
 //! A `part` of type `tool` splits into a [`Block::ToolUse`] on an assistant
 //! message and a [`Block::ToolResult`] on the following user message, matching
@@ -968,10 +967,9 @@ mod store {
             }
         }
 
-        /// The database belongs to `OpenCode`, so "delete" is its own notion
-        /// of gone: archive the session in place. `discover` (here and in
-        /// `OpenCode`'s UI) filters archived sessions out; the rows stay,
-        /// reversible from `OpenCode` itself.
+        /// Archives the session in place — `OpenCode`'s own notion of
+        /// deletion. `discover` (here and in `OpenCode`'s UI) filters
+        /// archived sessions out; the rows stay, reversible from `OpenCode`.
         fn delete(&self, reference: &String) -> Result<()> {
             let conn = Connection::open(&self.db_path).map_err(sqlite_err)?;
             let now = chrono::Utc::now().timestamp_millis();

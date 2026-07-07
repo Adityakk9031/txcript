@@ -88,12 +88,11 @@ impl Harness for Common {
 
 /// Maps a harness's native representation to and from [`Common`].
 ///
-/// `to_common` may *canonicalize* representation (so the result is functional
-/// in another harness) but must not *discard* detail — anything a same-harness
-/// round-trip needs is preserved in [`Common`]'s typed fields. The lossless
-/// guarantee for `to_common`→`from_common` on the same harness is therefore
-/// semantic equality, not byte equality; byte-exactness lives at the native
-/// representation ↔ disk boundary in [`Store`].
+/// `to_common` may *canonicalize* representation but must not *discard*
+/// detail — anything a same-harness round trip needs is preserved in
+/// [`Common`]'s typed fields. The `to_common`→`from_common` guarantee is
+/// semantic equality, not byte equality; byte-exactness lives at the
+/// native ↔ disk boundary in [`Store`].
 pub trait Codec: Harness + Sized {
     /// # Errors
     /// When the native records are malformed beyond the raw-fallback layer.
@@ -128,11 +127,9 @@ where
     B::from_common(&A::to_common(transcript)?)
 }
 
-/// Parsing and rendering a harness's native session *text* — free of any
-/// filesystem or database. This is the format layer: [`Store`] is location
-/// built on top of it (read a file, then `from_text`; `to_text`, then write a
-/// file), and the WASM bindings use it directly so the browser/Bun side owns
-/// the I/O.
+/// Parsing and rendering a harness's native session *text*, free of any
+/// filesystem or database. [`Store`] layers location on top of it; the WASM
+/// bindings use it directly.
 pub trait TextCodec: Harness + Sized {
     /// Parse native session text into a transcript. `meta.id` may be empty when
     /// the text carries no internal id; a [`Store`] fills it from the filename.
@@ -150,8 +147,6 @@ pub trait TextCodec: Harness + Sized {
 
 /// Reading and writing native transcripts against a real backend (a session
 /// directory, a `SQLite` database, an `import` subprocess).
-///
-/// Separate from [`Codec`] because storage mechanisms vary by harness.
 pub trait Store {
     /// The harness this store reads and writes.
     type H: Harness;
@@ -178,8 +173,7 @@ pub trait Store {
 
     /// Remove one transcript from the backend so the harness no longer lists
     /// or resumes it. File-backed stores remove the session file or directory;
-    /// `OpenCode` archives the session in place (the shared database belongs
-    /// to the harness, and archived is its own notion of "gone").
+    /// `OpenCode` archives the session in place.
     ///
     /// # Errors
     /// When the reference doesn't exist or the backend rejects the removal.
@@ -211,9 +205,9 @@ pub struct Saved<R> {
     pub reference: R,
 }
 
-/// Runtime tag for the harnesses this crate implements. Distinct from the
-/// type-level [`Harness`] markers — this is for dispatch on a string the user
-/// typed (`--with codex`), not for selecting a `Body`.
+/// Runtime tag for the harnesses this crate implements — string-keyed
+/// dispatch, where the type-level [`Harness`] markers select a
+/// [`Body`](Harness::Body).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessId {

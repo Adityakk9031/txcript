@@ -1,26 +1,19 @@
 //! Fuzzy and substring search over transcripts (feature `search`).
 //!
-//! Two entry points:
+//! Two entry points, sharing [`Query`] and [`Hit`]:
 //!
-//! - [`search`] — one-shot: scan a single [`Transcript<Common>`] and return
-//!   the matching lines. No state; use it for find-in-transcript or a
-//!   load-search-drop CLI pass.
-//! - [`Index`] — feed transcripts in once with [`Index::insert`], then run
-//!   [`Index::query`] per keystroke. Text is extracted and pre-converted to
-//!   UTF-32 at insert, so queries scan without parsing or transcoding.
+//! - [`search`] — one-shot, stateless: the matching lines of a single
+//!   [`Transcript<Common>`].
+//! - [`Index`] — [`Index::insert`] transcripts once, then [`Index::query`]
+//!   per keystroke. Text is extracted and pre-converted to UTF-32 at insert;
+//!   queries scan without parsing or transcoding.
 //!
-//! Both share [`Query`] and [`Hit`]; one-shot search uses the same query path
-//! over one temporary document.
-//!
-//! Matching is [nucleo](https://github.com/helix-editor/nucleo) — helix's
-//! matcher. [`Mode::Fuzzy`] accepts the full fzf-style pattern language
-//! (`foo bar` all-of, `'exact`, `^prefix`, `suffix$`, `!not`);
-//! [`Mode::Substring`] treats the pattern as one literal needle. Smart case
-//! and Latin diacritic folding are handled by the matcher; nothing is folded
-//! ahead of time.
-//!
-//! Ranking adds a literal-occurrence tier above gapped fuzzy matches; nucleo
-//! scoring orders lines within each tier.
+//! Matching is [nucleo](https://github.com/helix-editor/nucleo), helix's
+//! matcher, with smart case and Latin diacritic folding. [`Mode::Fuzzy`]
+//! accepts the full fzf-style pattern language (`foo bar` all-of, `'exact`,
+//! `^prefix`, `suffix$`, `!not`); [`Mode::Substring`] treats the pattern as
+//! one literal needle. Ranking adds a literal-occurrence tier above gapped
+//! fuzzy matches; nucleo scoring orders lines within each tier.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -69,8 +62,7 @@ pub enum Origin {
     Thinking,
     /// Tool inputs: the Bash command, the file path, the written content.
     ToolUse,
-    /// Tool outputs. Bulky (whole file reads land here), so excluded from
-    /// [`Origin::DEFAULT`]; opt in via [`Origin::ALL`] or an explicit list.
+    /// Tool outputs. Excluded from [`Origin::DEFAULT`].
     ToolResult,
     /// Session metadata: title, cwd, git branch. [`Hit::message`]/[`Hit::block`]
     /// are `0` for these.
@@ -78,7 +70,7 @@ pub enum Origin {
 }
 
 impl Origin {
-    /// Every origin, including the noisy [`Origin::ToolResult`].
+    /// Every origin, [`Origin::ToolResult`] included.
     pub const ALL: [Origin; 6] = [
         Origin::User,
         Origin::Assistant,
@@ -123,10 +115,8 @@ pub struct Query {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
     /// Maximum [`Hit`]s materialized per document by [`Index::query`] — the
-    /// document's best-scoring lines, in transcript order. Defaults to `8`:
-    /// matching documents are cheap to *find* but each materialized hit
-    /// allocates its line text, and a loose pattern can match hundreds of
-    /// thousands of lines. `None` materializes every match.
+    /// document's best-scoring lines, in transcript order. `None`
+    /// materializes every match. Defaults to `8`.
     #[serde(
         default = "default_hits_per_doc",
         skip_serializing_if = "Option::is_none"
@@ -268,13 +258,10 @@ pub fn search(transcript: &Transcript<Common>, query: &Query) -> Vec<Hit> {
 
 /// An in-memory search index over many transcripts.
 ///
-/// Build once, query repeatedly — [`Index::query`] takes `&self` and does no
-/// I/O, so it is cheap enough to run per keystroke and can be sharded across
-/// threads by the caller (`Index` is `Send + Sync`).
-///
-/// The index never touches a [`Store`](crate::Store) or the filesystem: the
-/// caller decides what goes in and when it is refreshed. Re-inserting an
-/// existing [`DocKey`] replaces that document.
+/// [`Index::query`] takes `&self` and does no I/O; the index is
+/// `Send + Sync`. It never touches a [`Store`](crate::Store) or the
+/// filesystem — the caller decides what goes in and when it is refreshed.
+/// Re-inserting an existing [`DocKey`] replaces that document.
 #[derive(Default)]
 pub struct Index {
     docs: Vec<Doc>,
@@ -354,9 +341,8 @@ impl Index {
     /// Run a query, returning matching documents ranked by best-hit score
     /// (ties broken newest-first), each with its hits in transcript order.
     ///
-    /// An empty pattern matches every document with no hits — ranked
-    /// newest-first, so a picker can show the full list before the first
-    /// keystroke.
+    /// An empty pattern matches every document with no hits, ranked
+    /// newest-first.
     #[must_use]
     pub fn query(&self, query: &Query) -> Vec<DocMatch<'_>> {
         let pattern = query.compile();

@@ -26,9 +26,8 @@
 //!
 //! User images follow Grok's own split: the display log carries the bytes
 //! (an ACP `{"type": "image", data, mimeType}` chunk of the prompt), while
-//! the model log holds only text (natively a Grok-generated description,
-//! which we cannot synthesize — an image-only prompt gets an `[image]`
-//! placeholder there).
+//! the model log holds only text — natively a Grok-generated description;
+//! `from_common` writes an `[image]` placeholder there.
 //!
 //! `from_common` cannot preserve per-turn usage, non-turn stop reasons,
 //! reasoning signatures, structured tool-result JSON, reasoning record ids, or

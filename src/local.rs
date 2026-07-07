@@ -6,14 +6,14 @@
 //! |-----------|------|
 //! | list      | [`discover`] |
 //! | read      | [`Session::read`] |
-//! | write     | [`write`] |
+//! | write     | [`write()`] |
 //! | open      | [`resume_command`] (caller execs it) |
-//! | translate | [`Session::read`] + [`write`] |
-//! | continue  | [`Session::read`] + [`write`] + [`resume_command`] |
+//! | translate | [`Session::read`] + [`write()`] |
+//! | continue  | [`Session::read`] + [`write()`] + [`resume_command`] |
 //! | delete    | [`Session::delete`] |
 //!
 //! Everything here uses each harness's default on-disk location. For custom
-//! roots, use the per-harness `Store`s directly.
+//! roots, use the per-harness [`Store`]s directly.
 
 use std::path::{Path, PathBuf};
 
@@ -45,7 +45,7 @@ pub fn discover() -> Vec<Session> {
 }
 
 /// [`discover`], reporting progress: `on_store(harness, sessions_so_far)` is
-/// called before each store is scanned (for spinners).
+/// called before each store is scanned.
 #[must_use]
 pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session> {
     fn scan<S>(harness: HarnessId, store: Option<S>, out: &mut Vec<Session>)
@@ -190,7 +190,7 @@ impl Session {
     }
 }
 
-/// The outcome of [`write`]: the id the target harness resumes by, and a
+/// The outcome of [`write()`]: the id the target harness resumes by, and a
 /// human-readable location.
 pub struct Written {
     pub id: String,
