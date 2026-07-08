@@ -1750,10 +1750,12 @@ impl AntigravityStore {
             .map(|home| Self::new(home.join(".gemini").join("antigravity-cli")))
     }
 
+    #[cfg(feature = "opencode")]
     fn conversations_dir(&self) -> PathBuf {
         self.root.join("conversations")
     }
 
+    #[cfg(feature = "opencode")]
     fn brain_dir(&self, id: &str) -> PathBuf {
         self.root.join("brain").join(id)
     }
