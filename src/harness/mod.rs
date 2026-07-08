@@ -5,6 +5,8 @@
 //! [`Common`](crate::Common), and its [`Store`](crate::Store). The core
 //! compiles with none of them present.
 
+pub mod amp;
+pub mod antigravity;
 pub mod campfire;
 pub mod claude_code;
 pub mod codex;

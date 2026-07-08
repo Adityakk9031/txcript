@@ -5,7 +5,9 @@
 
 use chrono::{DateTime, Utc};
 use txcript::common;
-use txcript::harness::{campfire, claude_code, codex, cursor, grok, opencode, pi};
+use txcript::harness::{
+    amp, antigravity, campfire, claude_code, codex, cursor, grok, opencode, pi,
+};
 use txcript::{Codec, Common, Transcript, convert};
 
 fn ts(s: &str) -> DateTime<Utc> {
@@ -175,8 +177,22 @@ fn conversation_survives_every_hop() {
         "grok"
     );
 
+    let amp = convert::<grok::Grok, amp::Amp>(&grok).unwrap();
+    assert_eq!(
+        signature(&amp::Amp::to_common(&amp).unwrap()),
+        expected,
+        "amp"
+    );
+
+    let antigravity = convert::<amp::Amp, antigravity::Antigravity>(&amp).unwrap();
+    assert_eq!(
+        signature(&antigravity::Antigravity::to_common(&antigravity).unwrap()),
+        expected,
+        "antigravity"
+    );
+
     // And all the way back to Claude.
-    let round = convert::<grok::Grok, claude_code::ClaudeCode>(&grok).unwrap();
+    let round = convert::<antigravity::Antigravity, claude_code::ClaudeCode>(&antigravity).unwrap();
     assert_eq!(
         signature(&claude_code::ClaudeCode::to_common(&round).unwrap()),
         expected,

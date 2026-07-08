@@ -1,7 +1,7 @@
 # txcript
 
 Convert coding-agent session transcripts between Claude Code, Codex, OpenCode,
-pi, Campfire, Cursor, and Grok CLI.
+pi, Campfire, Cursor, Grok CLI, Amp, and Antigravity.
 
 <p align="center">
   <a href="https://claude.com/claude-code"><img src="https://github.com/anthropics.png?size=160" alt="Claude Code" height="48" width="48"></a>
@@ -29,6 +29,9 @@ Supported harnesses (string ids in parentheses, used by the CLI and WASM):
 - Campfire (`campfire`)
 - Cursor (`cursor`)
 - Grok CLI (`grok`)
+- Amp (`amp`) — convert *from* amp only: threads are server-side and the CLI
+  has no import, so sessions can't be continued into amp
+- Antigravity (`antigravity`)
 
 Available as a **Rust library**, **CLI**, and **WASM module** for Bun, Node, and
 browsers.
@@ -222,13 +225,16 @@ writeFileSync("session.jsonl", convert(input, "codex", "claude_code"));
 const common = JSON.parse(toCommon(input, "codex"));   // { meta, messages }
 const pi = fromCommon(JSON.stringify(common), "pi");
 
-harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor","grok"]
+harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor","grok","amp","antigravity"]
 ```
 
 Text-in / text-out: `input` is a harness's native session text (JSONL for
 claude_code/codex/pi/campfire, the `opencode export` JSON for opencode, a
-JSON export of Cursor's `store.db` for cursor, and a JSON bundle of the
-session directory's files for grok); the result is the target's native text.
+JSON export of Cursor's `store.db` for cursor, a JSON bundle of the
+session directory's files for grok, and the thread JSON document — the
+`amp threads export` shape — for amp, and a JSON dump of the conversation
+database — hex-encoded protobuf step blobs — for antigravity); the result is
+the target's native text.
 Invalid harness names or unparseable input throw a JS `Error`.
 
 ## Development

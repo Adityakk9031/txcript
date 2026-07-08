@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::common::Meta;
-use crate::harness::{campfire, claude_code, codex, cursor, grok, pi};
+use crate::harness::{amp, antigravity, campfire, claude_code, codex, cursor, grok, pi};
 use crate::{Codec, Common, Error, HarnessId, Result, Store, Transcript};
 
 #[cfg(feature = "opencode")]
@@ -90,6 +90,14 @@ pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session>
     );
     on_store(HarnessId::Grok, out.len());
     scan(HarnessId::Grok, grok::GrokStore::default_root(), &mut out);
+    on_store(HarnessId::Amp, out.len());
+    scan(HarnessId::Amp, amp::AmpStore::default_root(), &mut out);
+    on_store(HarnessId::Antigravity, out.len());
+    scan(
+        HarnessId::Antigravity,
+        antigravity::AntigravityStore::default_root(),
+        &mut out,
+    );
 
     #[cfg(feature = "opencode")]
     {
@@ -144,6 +152,10 @@ impl Session {
             }
             (HarnessId::Cursor, Locator::Path(p)) => go(cursor::CursorStore::default_root(), p),
             (HarnessId::Grok, Locator::Path(p)) => go(grok::GrokStore::default_root(), p),
+            (HarnessId::Amp, Locator::Path(p)) => go(amp::AmpStore::default_root(), p),
+            (HarnessId::Antigravity, Locator::Path(p)) => {
+                go(antigravity::AntigravityStore::default_root(), p)
+            }
             #[cfg(feature = "opencode")]
             (HarnessId::OpenCode, Locator::Id(id)) => opencode::OpenCode::to_common(
                 &required(opencode::OpenCodeStore::default_db())?.load(id)?,
@@ -175,6 +187,10 @@ impl Session {
             }
             (HarnessId::Cursor, Locator::Path(p)) => go(cursor::CursorStore::default_root(), p),
             (HarnessId::Grok, Locator::Path(p)) => go(grok::GrokStore::default_root(), p),
+            (HarnessId::Amp, Locator::Path(p)) => go(amp::AmpStore::default_root(), p),
+            (HarnessId::Antigravity, Locator::Path(p)) => {
+                go(antigravity::AntigravityStore::default_root(), p)
+            }
             #[cfg(feature = "opencode")]
             (HarnessId::OpenCode, Locator::Id(id)) => {
                 required(opencode::OpenCodeStore::default_db())?.delete(id)
@@ -275,6 +291,23 @@ pub fn write(
             common,
             |s| s.sessions_dir,
         ),
+        // Amp is server-authoritative: threads live on ampcode.com and the
+        // CLI has no import, so a locally written thread can never be
+        // resumed. Sessions convert *from* amp, never into it.
+        HarnessId::Amp => Err(Error::Unconvertible {
+            harness: "amp",
+            detail: "amp has no thread import (threads are server-side); \
+                     sessions cannot be continued into amp — convert from amp \
+                     instead"
+                .to_string(),
+        }),
+        HarnessId::Antigravity => go(
+            antigravity::AntigravityStore::default_root(),
+            antigravity::AntigravityStore::new,
+            root,
+            common,
+            |s| s.root,
+        ),
         HarnessId::OpenCode => write_opencode(common),
     }
 }
@@ -328,6 +361,8 @@ pub fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
             HarnessId::Campfire => ("campfire".into(), vec!["--session".into(), id]),
             HarnessId::Cursor => ("agent".into(), vec![format!("--resume={id}")]),
             HarnessId::Grok => ("grok".into(), vec!["--resume".into(), id]),
+            HarnessId::Amp => ("amp".into(), vec!["threads".into(), "continue".into(), id]),
+            HarnessId::Antigravity => ("agy".into(), vec![format!("--conversation={id}")]),
         }
     })
 }

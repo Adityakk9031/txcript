@@ -29,9 +29,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use txcript::{HarnessId, local};
+use txcript::harness::amp;
+use txcript::{Codec, Common, HarnessId, TextCodec, Transcript, local};
 
-const HARNESSES: &str = "harnesses: claude_code, codex, opencode, pi, campfire, cursor, grok";
+const HARNESSES: &str =
+    "harnesses: claude_code, codex, opencode, pi, campfire, cursor, grok, amp, antigravity";
 
 #[derive(Parser)]
 #[command(
@@ -161,7 +163,12 @@ fn main() -> ExitCode {
             cwd,
         } => query::cmd_query(pattern, with, from, cwd.as_deref()),
         Command::Completion { shell } => {
-            clap_complete::generate(shell, &mut Cli::command(), "txcript", &mut std::io::stdout());
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "txcript",
+                &mut std::io::stdout(),
+            );
             Ok(ExitCode::SUCCESS)
         }
     };
@@ -183,17 +190,18 @@ fn same_dir(session_cwd: &str, dir: &std::path::Path) -> bool {
 /// The `--from`/`--cwd` session filters shared by `list` and `query`.
 /// A `--cwd` filter excludes sessions with no recorded cwd — they don't
 /// pertain to any folder.
-fn selected(session: &local::Session, from: Option<HarnessId>, cwd: Option<&std::path::Path>) -> bool {
+fn selected(
+    session: &local::Session,
+    from: Option<HarnessId>,
+    cwd: Option<&std::path::Path>,
+) -> bool {
     from.is_none_or(|h| session.harness == h)
         && cwd.is_none_or(|d| session.meta.cwd.as_deref().is_some_and(|c| same_dir(c, d)))
 }
 
 fn cmd_list(from: Option<HarnessId>, cwd: Option<&std::path::Path>) {
     let sessions = discover_with_spinner();
-    let listed: Vec<_> = sessions
-        .iter()
-        .filter(|s| selected(s, from, cwd))
-        .collect();
+    let listed: Vec<_> = sessions.iter().filter(|s| selected(s, from, cwd)).collect();
     if listed.is_empty() {
         let scope = cwd.map_or(String::new(), |d| format!(" for {}", d.display()));
         match from {
@@ -259,13 +267,15 @@ mod style {
 
     const fn color(h: HarnessId) -> &'static str {
         match h {
-            HarnessId::ClaudeCode => "\x1b[33m", // yellow
-            HarnessId::Codex => "\x1b[36m",      // cyan
-            HarnessId::OpenCode => "\x1b[32m",   // green
-            HarnessId::Pi => "\x1b[35m",         // magenta
-            HarnessId::Campfire => "\x1b[91m",   // bright red
-            HarnessId::Cursor => "\x1b[34m",     // blue
-            HarnessId::Grok => "\x1b[37m",       // white
+            HarnessId::ClaudeCode => "\x1b[33m",  // yellow
+            HarnessId::Codex => "\x1b[36m",       // cyan
+            HarnessId::OpenCode => "\x1b[32m",    // green
+            HarnessId::Pi => "\x1b[35m",          // magenta
+            HarnessId::Campfire => "\x1b[91m",    // bright red
+            HarnessId::Cursor => "\x1b[34m",      // blue
+            HarnessId::Grok => "\x1b[37m",        // white
+            HarnessId::Amp => "\x1b[95m",         // bright magenta
+            HarnessId::Antigravity => "\x1b[94m", // bright blue
         }
     }
 }
@@ -279,21 +289,79 @@ fn cmd_continue(
 ) -> Result<ExitCode, String> {
     // Locate the session by exact id or title, optionally scoped to one harness.
     let sessions = discover_with_spinner();
-    let found = sessions
-        .iter()
-        .find(|s| {
-            from.is_none_or(|h| s.harness == h)
-                && (s.meta.id == id || s.meta.title.as_deref() == Some(id))
-        })
-        .ok_or_else(|| match from {
-            Some(h) => format!("no {h} session matches `{id}` (try `txcript list`)"),
-            None => format!("no local session matches `{id}` (try `txcript list`)"),
-        })?;
+    let found = sessions.iter().find(|s| {
+        from.is_none_or(|h| s.harness == h)
+            && (s.meta.id == id || s.meta.title.as_deref() == Some(id))
+    });
 
     // Resuming an `--out` copy can't work — the harness reads its live root, not
     // our redirect — so a redirect implies "write only".
     let resume = out.is_none() && !no_resume;
-    continue_session(found, with, out.map(PathBuf::as_path), resume)
+    match found {
+        Some(found) => continue_session(found, with, out.map(PathBuf::as_path), resume),
+        // Modern Amp CLIs are server-authoritative and write no local thread
+        // files; an Amp-shaped id that isn't on disk may still exist on
+        // ampcode.com, reachable through Amp's own exporter.
+        None if matches!(from, None | Some(HarnessId::Amp)) && is_amp_thread_id(id) => {
+            continue_amp_server_thread(id, with, out.map(PathBuf::as_path), resume)
+        }
+        None => Err(match from {
+            Some(h) => format!("no {h} session matches `{id}` (try `txcript list`)"),
+            None => format!("no local session matches `{id}` (try `txcript list`)"),
+        }),
+    }
+}
+
+/// The id shape Amp mints and validates: `T-` then 8+ `[A-Za-z0-9-]`.
+fn is_amp_thread_id(id: &str) -> bool {
+    id.strip_prefix("T-").is_some_and(|rest| {
+        rest.len() >= 8 && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
+}
+
+/// Fetch a server-side Amp thread via `amp threads export` and continue it:
+/// same-harness resumes by id (the thread already lives where Amp reads it);
+/// any other target gets the usual convert-and-write.
+fn continue_amp_server_thread(
+    id: &str,
+    with: Option<HarnessId>,
+    out: Option<&std::path::Path>,
+    resume: bool,
+) -> Result<ExitCode, String> {
+    eprintln!(
+        "not on disk; fetching: {}",
+        style::dim(&format!("amp threads export {id}"), style::enabled_err())
+    );
+    let output = std::process::Command::new("amp")
+        .args(["threads", "export", id])
+        .output()
+        .map_err(|e| format!("running `amp threads export {id}`: {e} (is amp on PATH?)"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`amp threads export {id}` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let native = amp::Amp::from_text(&text).map_err(|e| e.to_string())?;
+    let common: Transcript<Common> = amp::Amp::to_common(&native).map_err(|e| e.to_string())?;
+
+    let target = with.unwrap_or(HarnessId::Amp);
+    let resume_id = if target == HarnessId::Amp && out.is_none() {
+        // The thread already lives server-side, exactly where Amp resumes from.
+        id.to_string()
+    } else {
+        let written = local::write(target, &common, out).map_err(|e| e.to_string())?;
+        let on = style::enabled();
+        println!(
+            "{} → {}  {}",
+            style::harness(HarnessId::Amp, 0, on),
+            style::harness(target, 0, on),
+            style::dim(written.location.trim_matches('"'), on)
+        );
+        written.id
+    };
+    launch(target, &resume_id, common.meta.cwd.as_deref(), resume)
 }
 
 /// Continue `found` in `with` (default: its own harness): same-harness resumes
@@ -324,10 +392,20 @@ fn continue_session(
         written.id
     };
 
-    let (bin, args) = local::resume_command(target, &resume_id);
+    launch(target, &resume_id, found.meta.cwd.as_deref(), resume)
+}
+
+/// Exec (or print) the harness resume command for `resume_id`.
+fn launch(
+    target: HarnessId,
+    resume_id: &str,
+    cwd: Option<&str>,
+    resume: bool,
+) -> Result<ExitCode, String> {
+    let (bin, args) = local::resume_command(target, resume_id);
     if resume {
         // Hand the terminal to the harness — replaces this process on Unix.
-        let workdir = resume_workdir(found.meta.cwd.as_deref());
+        let workdir = resume_workdir(cwd);
         let shown = std::iter::once(&bin)
             .chain(&args)
             .map(String::as_str)

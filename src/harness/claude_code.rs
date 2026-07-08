@@ -464,8 +464,22 @@ fn parse_tool_output(content: Option<&Value>) -> ToolOutput {
 fn serialize_tool_output(out: &ToolOutput) -> Value {
     match out {
         ToolOutput::Text(s) => Value::String(s.clone()),
-        ToolOutput::Json(v) => v.clone(),
+        // The Anthropic wire accepts only a string or a content-block array
+        // in `tool_result.content`; a bare object fails the whole session
+        // load on resume. Keep block arrays (Claude's own native shape),
+        // flatten any other JSON to its compact text.
+        ToolOutput::Json(v) if is_block_array(v) => v.clone(),
+        ToolOutput::Json(v) => Value::String(v.to_string()),
     }
+}
+
+/// Whether a value is an Anthropic content-block array — the only non-string
+/// shape Claude Code itself writes into `tool_result.content`.
+fn is_block_array(v: &Value) -> bool {
+    v.as_array().is_some_and(|arr| {
+        arr.iter()
+            .all(|b| b.get("type").and_then(Value::as_str).is_some())
+    })
 }
 
 fn parse_usage(v: &Value) -> Option<Usage> {
