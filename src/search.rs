@@ -275,6 +275,28 @@ struct Doc {
     chars: usize,
 }
 
+/// One transcript's searchable content, extracted outside the index — the
+/// caller-parallelizable half of [`Index::insert`]. Extraction (line
+/// splitting, UTF-32 transcoding) is the expensive part of an insert; build
+/// `Extracted`s on worker threads and fold each into the index with
+/// [`Index::insert_extracted`].
+pub struct Extracted(Doc);
+
+impl Extracted {
+    /// Extract `transcript`'s searchable lines for `key`. Pure CPU, no
+    /// index involved — safe to run on any thread.
+    #[must_use]
+    pub fn new(key: DocKey, transcript: &Transcript<Common>) -> Extracted {
+        let lines = extract(&transcript.meta, &transcript.body);
+        Extracted(Doc {
+            key,
+            meta: transcript.meta.clone(),
+            chars: lines.iter().map(|l| l.text.len()).sum(),
+            lines,
+        })
+    }
+}
+
 impl Index {
     #[must_use]
     pub fn new() -> Index {
@@ -307,17 +329,18 @@ impl Index {
     /// Add a transcript under `key`, replacing any document already indexed
     /// under the same key.
     pub fn insert(&mut self, key: DocKey, transcript: &Transcript<Common>) {
-        let lines = extract(&transcript.meta, &transcript.body);
-        let doc = Doc {
-            key: key.clone(),
-            meta: transcript.meta.clone(),
-            chars: lines.iter().map(|l| l.text.len()).sum(),
-            lines,
-        };
-        if let Some(&i) = self.by_key.get(&key) {
+        self.insert_extracted(Extracted::new(key, transcript));
+    }
+
+    /// Fold a pre-extracted document into the index, replacing any document
+    /// already indexed under its key. Cheap — the expensive half already
+    /// happened in [`Extracted::new`], possibly on another thread.
+    pub fn insert_extracted(&mut self, extracted: Extracted) {
+        let Extracted(doc) = extracted;
+        if let Some(&i) = self.by_key.get(&doc.key) {
             self.docs[i] = doc;
         } else {
-            self.by_key.insert(key, self.docs.len());
+            self.by_key.insert(doc.key.clone(), self.docs.len());
             self.docs.push(doc);
         }
     }

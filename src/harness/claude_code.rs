@@ -232,7 +232,14 @@ impl Codec for ClaudeCode {
 
 impl TextCodec for ClaudeCode {
     fn from_text(text: &str) -> Result<Transcript<Self>> {
-        let records: Vec<Record> = jsonl::parse(text);
+        // Not jsonl::parse: that would route every line through Record's
+        // Deserialize and its intermediate `Value` tree. Typed lines here
+        // parse straight into their structs.
+        let records: Vec<Record> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(record_from_line)
+            .collect();
         let meta = meta_from_records(&records);
         Ok(Transcript::new(meta, records))
     }
@@ -685,11 +692,33 @@ impl From<MetaEntryLine> for EntryLine {
     }
 }
 
-/// The `type` tag alone — the cheapest classification of a line.
-#[derive(Deserialize)]
-struct TypeProbe {
-    #[serde(rename = "type", default)]
-    kind: Option<String>,
+/// Parse one line straight into its typed record — no intermediate [`Value`]
+/// tree. Only lines outside the typed set pay a second parse into the
+/// preserved [`Record::Other`] `Value`: an unknown or non-string tag, or the
+/// rare known-tag line whose body fails its typed schema. Invalid JSON
+/// parses to `None` and is skipped, exactly as under [`jsonl::parse`].
+fn record_from_line(line: &str) -> Option<Record> {
+    let other = || serde_json::from_str::<Value>(line).ok().map(Record::Other);
+    match serde_json::from_str::<jsonl::TypeProbe>(line) {
+        // A failed probe isn't necessarily junk: a non-string `type` also
+        // fails it. The fallback keeps such lines whole and skips the rest.
+        Err(_) => other(),
+        Ok(probe) => match probe.kind.as_deref() {
+            Some("summary") => serde_json::from_str(line)
+                .ok()
+                .map(Record::Summary)
+                .or_else(other),
+            Some("user") => serde_json::from_str(line)
+                .ok()
+                .map(Record::User)
+                .or_else(other),
+            Some("assistant") => serde_json::from_str(line)
+                .ok()
+                .map(Record::Assistant)
+                .or_else(other),
+            Some(_) | None => other(),
+        },
+    }
 }
 
 /// Parse one line only as far as discovery needs: user/assistant lines
@@ -698,7 +727,7 @@ struct TypeProbe {
 /// lands in [`Record::Other`] under the full parse and contributes no
 /// metadata there, so here it parses to `None`.
 fn scan_line(line: &str) -> Option<Record> {
-    let probe: TypeProbe = serde_json::from_str(line).ok()?;
+    let probe: jsonl::TypeProbe = serde_json::from_str(line).ok()?;
     match probe.kind.as_deref() {
         Some("user") => serde_json::from_str::<MetaEntryLine>(line)
             .ok()

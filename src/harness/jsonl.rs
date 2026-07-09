@@ -1,11 +1,21 @@
 //! Shared JSONL parse/render for line-based harnesses.
 
+use std::borrow::Cow;
 use std::path::Path;
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+
+/// The `type` tag alone — the cheapest classification of a line. Borrowed,
+/// so probing tokenizes the line but allocates nothing; `Cow` still admits
+/// an escaped tag.
+#[derive(Deserialize)]
+pub(crate) struct TypeProbe<'a> {
+    #[serde(rename = "type", default, borrow)]
+    pub kind: Option<Cow<'a, str>>,
+}
 
 /// Parse JSONL records, skipping blank and invalid lines.
 pub(crate) fn parse<R: DeserializeOwned>(text: &str) -> Vec<R> {

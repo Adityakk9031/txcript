@@ -193,15 +193,16 @@ fn assistant_message(m: &Value, last_ts: &mut DateTime<Utc>) -> Option<Message> 
     (!message.content.is_empty()).then_some(message)
 }
 
-/// A message's `content` as a block list; a bare string becomes one
-/// synthetic text block value.
-fn content_values(m: &Value) -> Vec<Value> {
+/// A message's `content` as a block list — borrowed straight from the
+/// message in the common array case; a bare string becomes one synthetic
+/// text block value.
+fn content_values(m: &Value) -> std::borrow::Cow<'_, [Value]> {
     match m.get("content") {
-        Some(Value::Array(arr)) => arr.clone(),
-        Some(Value::String(s)) => vec![json!({"type": "text", "text": s})],
+        Some(Value::Array(arr)) => std::borrow::Cow::Borrowed(arr.as_slice()),
+        Some(Value::String(s)) => std::borrow::Cow::Owned(vec![json!({"type": "text", "text": s})]),
         // Content is an array (or, defensively, a string) on the wire; any
         // other shape carries no blocks.
-        _ => Vec::new(),
+        _ => std::borrow::Cow::Borrowed(&[]),
     }
 }
 

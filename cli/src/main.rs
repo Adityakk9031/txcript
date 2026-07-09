@@ -579,7 +579,7 @@ mod spin {
 mod query {
     use std::collections::HashMap;
 
-    use txcript::search::{DocKey, DocMatch, Index, Origin, Query};
+    use txcript::search::{DocKey, DocMatch, Extracted, Index, Origin, Query};
     use txcript::{HarnessId, local};
 
     type Sessions = HashMap<(HarnessId, String), local::Session>;
@@ -613,33 +613,78 @@ mod query {
         }
     }
 
-    /// Build the search index and session lookup.
+    /// Build the search index and session lookup. Sessions parse and extract
+    /// on every core: workers pull the next undrained session, parse it,
+    /// extract its searchable lines, and send the result back over a bounded
+    /// channel; this thread folds arrivals into the index as they land, so
+    /// at most a few extracted documents are ever in flight.
     fn build_index(from: Option<HarnessId>, cwd: Option<&std::path::Path>) -> (Index, Sessions) {
         let found = super::discover_with_spinner();
         let spinner = super::spin::Spinner::start("indexing…");
-        let mut index = Index::new();
-        let mut sessions: Sessions = HashMap::new();
-        let total = found.len();
-        let scoped = found
+        let scoped: Vec<local::Session> = found
             .into_iter()
-            .enumerate()
-            .filter(|(_, session)| super::selected(session, from, cwd));
-        for (i, session) in scoped {
-            if i % 32 == 0 {
-                spinner.set(format!("indexing… ({i}/{total})"));
+            .filter(|session| super::selected(session, from, cwd))
+            .collect();
+        let total = scoped.len();
+        let workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let mut index = Index::new();
+        // Which sessions parsed cleanly, by position in `scoped`; the lookup
+        // map is built from these after the workers release their borrow.
+        let mut indexed = vec![false; total];
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let (tx, rx) = std::sync::mpsc::sync_channel(workers * 2);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                let tx = tx.clone();
+                let (next, scoped) = (&next, &scoped);
+                scope.spawn(move || {
+                    std::iter::from_fn(|| {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        (i < scoped.len()).then_some(i)
+                    })
+                    // Unreadable sessions are skipped, matching discover.
+                    .filter_map(|i| {
+                        scoped[i].read().ok().map(|common| {
+                            let key = DocKey {
+                                harness: scoped[i].harness,
+                                id: scoped[i].meta.id.clone(),
+                            };
+                            (i, Extracted::new(key, &common))
+                        })
+                    })
+                    .for_each(|extracted| {
+                        // A send only fails when the receiver is gone, and
+                        // this thread's scope outlives it.
+                        let _ = tx.send(extracted);
+                    });
+                });
             }
-            // Unreadable sessions are skipped, matching discover.
-            if let Ok(common) = session.read() {
-                index.insert(
-                    DocKey {
-                        harness: session.harness,
-                        id: session.meta.id.clone(),
-                    },
-                    &common,
-                );
-                sessions.insert((session.harness, session.meta.id.clone()), session);
+            // Workers hold the remaining clones; the receive loop below ends
+            // when the last of them finishes.
+            drop(tx);
+            let mut arrived = Vec::with_capacity(total);
+            for (i, extracted) in rx {
+                if arrived.len() % 32 == 0 {
+                    spinner.set(format!("indexing… ({}/{total})", arrived.len()));
+                }
+                arrived.push((i, extracted));
+                indexed[i] = true;
             }
-        }
+            // Insert in discovery order, not arrival order: document order
+            // breaks full score-and-timestamp ties in query results, and it
+            // should not vary run to run.
+            arrived.sort_unstable_by_key(|&(i, _)| i);
+            for (_, extracted) in arrived {
+                index.insert_extracted(extracted);
+            }
+        });
+        let sessions: Sessions = scoped
+            .into_iter()
+            .zip(&indexed)
+            .filter_map(|(session, &ok)| {
+                ok.then(|| ((session.harness, session.meta.id.clone()), session))
+            })
+            .collect();
         spinner.finish();
         (index, sessions)
     }

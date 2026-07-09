@@ -155,7 +155,7 @@ impl Codec for Pi {
 
 impl TextCodec for Pi {
     fn from_text(text: &str) -> Result<Transcript<Self>> {
-        let records: Vec<Record> = jsonl::parse(text);
+        let records = records_from_text(text);
         Ok(Transcript::new(meta_from_records(&records), records))
     }
 
@@ -470,11 +470,42 @@ pub(crate) fn discover_format(sessions_dir: &Path) -> Vec<Discovered<PathBuf>> {
         .collect()
 }
 
-/// The `type` tag alone — the cheapest classification of a line.
-#[derive(Deserialize)]
-struct TypeProbe {
-    #[serde(rename = "type", default)]
-    kind: Option<String>,
+/// Parse one line straight into its typed record — no intermediate [`Value`]
+/// tree. Only lines outside the typed set pay a second parse into the
+/// preserved [`Record::Other`] `Value`: an unknown or non-string tag, or the
+/// rare known-tag line whose body fails its typed schema. Invalid JSON
+/// parses to `None` and is skipped, exactly as under [`jsonl::parse`].
+fn record_from_line(line: &str) -> Option<Record> {
+    let other = || serde_json::from_str::<Value>(line).ok().map(Record::Other);
+    match serde_json::from_str::<jsonl::TypeProbe>(line) {
+        // A failed probe isn't necessarily junk: a non-string `type` also
+        // fails it. The fallback keeps such lines whole and skips the rest.
+        Err(_) => other(),
+        Ok(probe) => match probe.kind.as_deref() {
+            Some("session") => serde_json::from_str(line)
+                .ok()
+                .map(Record::Session)
+                .or_else(other),
+            Some("message") => serde_json::from_str(line)
+                .ok()
+                .map(Record::Message)
+                .or_else(other),
+            Some("custom_message") => serde_json::from_str(line)
+                .ok()
+                .map(Record::Custom)
+                .or_else(other),
+            Some(_) | None => other(),
+        },
+    }
+}
+
+/// Every record in a session's text, typed one-pass per line. Shared with
+/// Campfire, whose files are pi-shaped.
+pub(crate) fn records_from_text(text: &str) -> Vec<Record> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(record_from_line)
+        .collect()
 }
 
 /// Shallow scan for discovery: the first record decides whether this is a pi
@@ -504,7 +535,7 @@ fn meta_scan(text: &str) -> Option<Vec<Record>> {
 /// Parse one line only if its type can carry session metadata; conversational
 /// lines (the bulk of a session) are never parsed past the type tag.
 fn meta_line(line: &str) -> Option<Record> {
-    let probe: TypeProbe = serde_json::from_str(line).ok()?;
+    let probe: jsonl::TypeProbe = serde_json::from_str(line).ok()?;
     match probe.kind.as_deref() {
         Some("session" | "model_change" | "session_info") => {
             serde_json::from_str::<Record>(line).ok()

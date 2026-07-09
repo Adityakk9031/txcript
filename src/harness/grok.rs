@@ -162,33 +162,43 @@ pub struct ToolResultLine {
 
 impl From<Value> for ChatRecord {
     fn from(v: Value) -> Self {
+        // Deserializing from `&v` copies each retained field once — no
+        // whole-tree clone — and leaves `v` intact for the fallback. The
+        // `type` tag lives outside the typed structs, so the flatten sweeps
+        // it into `extra`; it is dropped there to keep it from duplicating.
         fn typed<T: for<'de> Deserialize<'de>>(
             v: &Value,
+            extra: impl Fn(&mut T) -> &mut Map<String, Value>,
             f: impl Fn(T) -> ChatRecord,
         ) -> Option<ChatRecord> {
-            serde_json::from_value(strip_type(v)).ok().map(f)
+            T::deserialize(v).ok().map(|mut line| {
+                extra(&mut line).remove("type");
+                f(line)
+            })
         }
         let record = match v.get("type").and_then(Value::as_str) {
-            Some("system") => typed(&v, ChatRecord::System),
-            Some("user") => typed(&v, ChatRecord::User),
-            Some("assistant") => typed(&v, ChatRecord::Assistant),
-            Some("reasoning") => typed(&v, ChatRecord::Reasoning),
-            Some("tool_result") => typed(&v, ChatRecord::ToolResult),
+            Some("system") => typed(&v, |l: &mut SystemLine| &mut l.extra, ChatRecord::System),
+            Some("user") => typed(&v, |l: &mut UserLine| &mut l.extra, ChatRecord::User),
+            Some("assistant") => typed(
+                &v,
+                |l: &mut AssistantLine| &mut l.extra,
+                ChatRecord::Assistant,
+            ),
+            Some("reasoning") => typed(
+                &v,
+                |l: &mut ReasoningLine| &mut l.extra,
+                ChatRecord::Reasoning,
+            ),
+            Some("tool_result") => typed(
+                &v,
+                |l: &mut ToolResultLine| &mut l.extra,
+                ChatRecord::ToolResult,
+            ),
             // Unknown or untagged kinds stay whole in `Other` below.
             _ => None,
         };
         record.unwrap_or(ChatRecord::Other(v))
     }
-}
-
-/// The `type` tag lives outside the typed structs; drop it before
-/// deserializing so it doesn't duplicate into `extra`.
-fn strip_type(v: &Value) -> Value {
-    let mut v = v.clone();
-    if let Value::Object(obj) = &mut v {
-        obj.remove("type");
-    }
-    v
 }
 
 impl From<ChatRecord> for Value {

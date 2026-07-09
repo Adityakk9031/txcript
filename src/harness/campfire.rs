@@ -38,7 +38,7 @@ impl Codec for Campfire {
 impl TextCodec for Campfire {
     fn from_text(text: &str) -> Result<Transcript<Self>> {
         // Identical format to pi — reuse its parser and metadata extraction.
-        let records: Vec<Record> = jsonl::parse(text);
+        let records = pi::records_from_text(text);
         Ok(Transcript::new(pi::meta_from_records(&records), records))
     }
 
