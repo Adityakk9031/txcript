@@ -779,10 +779,12 @@ mod query {
 
     #[cfg(unix)]
     mod tui {
+        use std::collections::VecDeque;
         use std::io::{IsTerminal, Read, Write};
         use std::process::{Command, Stdio};
 
-        use txcript::search::{DocKey, Index, Query};
+        use terminal_size::{Height, Width};
+        use txcript::search::{DocKey, DocMatch, Hit, Index, Query};
 
         /// RAII guard for raw mode and the alternate screen.
         struct Term {
@@ -802,14 +804,9 @@ mod query {
         }
 
         fn term_size() -> (usize, usize) {
-            let parse = |s: &str| -> Option<(usize, usize)> {
-                let mut it = s.split_whitespace();
-                Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
-            };
-            stty(&["size"])
-                .ok()
-                .and_then(|out| parse(&out))
-                .unwrap_or((24, 80))
+            terminal_size::terminal_size().map_or((24, 80), |(Width(cols), Height(rows))| {
+                (usize::from(rows), usize::from(cols))
+            })
         }
 
         impl Drop for Term {
@@ -837,6 +834,7 @@ mod query {
             }
         }
 
+        #[derive(Clone, Copy)]
         enum Key {
             Char(char),
             Backspace,
@@ -858,55 +856,60 @@ mod query {
                 let term = Term::enter()?;
                 let mut input = String::new();
                 let mut selected = 0usize;
-                let mut stdin = std::io::stdin().lock();
+                let mut stdin = Input::new(std::io::stdin().lock());
+                let (mut rows, mut cols) = term_size();
+                let mut results = query(index, &input, rows);
+                let mut pending = None;
+                render(&input, &results, selected, index.len(), rows, cols);
 
                 let picked = 'ui: loop {
-                    let (rows, cols) = term_size();
-                    let visible = rows.saturating_sub(2).max(1);
-                    let mut q = Query::fuzzy(&input);
-                    q.limit = Some(visible);
-                    q.hits_per_doc = Some(1);
-                    let matches = index.query(&q);
-                    selected = selected.min(matches.len().saturating_sub(1));
-                    render(&input, &matches, selected, index.len(), rows, cols);
-
-                    // Poll until input changes state or selects/cancels.
-                    loop {
-                        match read_key(&mut stdin)? {
-                            // A poll timeout: nothing pressed, keep waiting.
-                            Key::None => {}
-                            Key::Char(c) => {
-                                input.push(c);
-                                selected = 0;
-                                break;
-                            }
-                            Key::Backspace => {
-                                input.pop();
-                                selected = 0;
-                                break;
-                            }
-                            Key::Clear => {
-                                input.clear();
-                                selected = 0;
-                                break;
-                            }
-                            Key::Up => {
-                                selected = selected.saturating_sub(1);
-                                break;
-                            }
-                            Key::Down => {
-                                selected += 1;
-                                break;
-                            }
-                            // Enter with no match under the cursor: keep
-                            // waiting.
-                            Key::Enter => {
-                                if let Some(m) = matches.get(selected) {
-                                    break 'ui Some(m.key.clone());
-                                }
-                            }
-                            Key::Cancel => break 'ui None,
+                    let key = pending.take().map_or_else(|| read_key(&mut stdin), Ok)?;
+                    match key {
+                        // A poll timeout: nothing pressed, keep waiting.
+                        Key::None => {}
+                        Key::Char(c) => {
+                            input.push(c);
+                            selected = 0;
+                            (rows, cols) = term_size();
+                            results = query(index, &input, rows);
+                            render(&input, &results, selected, index.len(), rows, cols);
                         }
+                        Key::Backspace => {
+                            input.pop();
+                            selected = 0;
+                            (rows, cols) = term_size();
+                            results = query(index, &input, rows);
+                            render(&input, &results, selected, index.len(), rows, cols);
+                        }
+                        Key::Clear => {
+                            input.clear();
+                            selected = 0;
+                            (rows, cols) = term_size();
+                            results = query(index, &input, rows);
+                            render(&input, &results, selected, index.len(), rows, cols);
+                        }
+                        Key::Up | Key::Down => {
+                            move_selection(&mut selected, key, results.len());
+                            // A held arrow can put several complete key
+                            // sequences in one terminal read. Apply all of
+                            // them, then render the final row once.
+                            pending = drain_navigation(&mut stdin, &mut selected, results.len())?;
+
+                            let (new_rows, new_cols) = term_size();
+                            if new_rows != rows {
+                                results = query(index, &input, new_rows);
+                                selected = selected.min(results.len().saturating_sub(1));
+                            }
+                            (rows, cols) = (new_rows, new_cols);
+                            render(&input, &results, selected, index.len(), rows, cols);
+                        }
+                        // Enter with no match under the cursor: keep waiting.
+                        Key::Enter => {
+                            if let Some(key) = results.key(selected) {
+                                break 'ui Some(key.clone());
+                            }
+                        }
+                        Key::Cancel => break 'ui None,
                     }
                 };
                 drop(term);
@@ -914,9 +917,114 @@ mod query {
             }
         }
 
+        struct Results<'a> {
+            docs: Vec<DocMatch<'a>>,
+            rows: Vec<ResultRow>,
+            searching: bool,
+        }
+
+        #[derive(Clone, Copy)]
+        struct ResultRow {
+            doc: usize,
+            hit: Option<usize>,
+        }
+
+        impl<'a> Results<'a> {
+            fn len(&self) -> usize {
+                self.rows.len()
+            }
+
+            fn key(&self, row: usize) -> Option<&DocKey> {
+                self.rows
+                    .get(row)
+                    .and_then(|row| self.docs.get(row.doc))
+                    .map(|doc| doc.key)
+            }
+
+            fn get(&self, row: usize) -> Option<(&DocMatch<'a>, Option<&Hit>)> {
+                let row = self.rows.get(row)?;
+                let doc = self.docs.get(row.doc)?;
+                Some((doc, row.hit.and_then(|hit| doc.hits.get(hit))))
+            }
+        }
+
+        fn query<'a>(index: &'a Index, input: &str, rows: usize) -> Results<'a> {
+            let visible = rows.saturating_sub(2).max(1);
+            let searching = !input.trim().is_empty();
+            let mut q = Query::fuzzy(input);
+            q.limit = Some(visible);
+            q.hits_per_doc = searching.then_some(visible);
+            let docs = index.query(&q);
+
+            let mut result_rows = if searching {
+                docs.iter()
+                    .enumerate()
+                    .flat_map(|(doc, result)| {
+                        (0..result.hits.len()).map(move |hit| ResultRow {
+                            doc,
+                            hit: Some(hit),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                (0..docs.len())
+                    .map(|doc| ResultRow { doc, hit: None })
+                    .collect()
+            };
+
+            if searching {
+                // Search rows are occurrences, ranked independently. A
+                // session can therefore occupy several rows when it contains
+                // several strong matches.
+                result_rows.sort_by(|a, b| {
+                    let a_score = a.hit.map_or(0, |hit| docs[a.doc].hits[hit].score);
+                    let b_score = b.hit.map_or(0, |hit| docs[b.doc].hits[hit].score);
+                    b_score
+                        .cmp(&a_score)
+                        .then_with(|| a.doc.cmp(&b.doc))
+                        .then_with(|| a.hit.cmp(&b.hit))
+                });
+                result_rows.truncate(visible);
+            }
+
+            Results {
+                docs,
+                rows: result_rows,
+                searching,
+            }
+        }
+
+        fn move_selection(selected: &mut usize, key: Key, len: usize) {
+            match key {
+                Key::Up => *selected = selected.saturating_sub(1),
+                Key::Down => {
+                    *selected = selected.saturating_add(1).min(len.saturating_sub(1));
+                }
+                _ => {}
+            }
+        }
+
+        /// Apply navigation keys already captured by the current terminal
+        /// read. The first non-navigation key is preserved for the next loop.
+        fn drain_navigation(
+            stdin: &mut Input<impl Read>,
+            selected: &mut usize,
+            len: usize,
+        ) -> Result<Option<Key>, String> {
+            while stdin.has_buffered() {
+                let key = read_key(stdin)?;
+                match key {
+                    Key::Up | Key::Down => move_selection(selected, key, len),
+                    Key::None => {}
+                    other => return Ok(Some(other)),
+                }
+            }
+            Ok(None)
+        }
+
         fn render(
             input: &str,
-            matches: &[txcript::search::DocMatch<'_>],
+            results: &Results<'_>,
             selected: usize,
             total: usize,
             rows: usize,
@@ -924,20 +1032,28 @@ mod query {
         ) {
             use std::fmt::Write as _;
             // The match count is post-limit: a full page means "at least".
-            let count = if matches.len() >= rows.saturating_sub(2) {
-                format!("{}+", matches.len())
+            let count = if results.len() >= rows.saturating_sub(2) {
+                format!("{}+", results.len())
             } else {
-                matches.len().to_string()
+                results.len().to_string()
+            };
+            let summary = if results.searching {
+                format!("{count} matches")
+            } else {
+                format!("{count}/{total}")
             };
             let mut frame = String::from("\x1b[H\x1b[2J");
             let _ = write!(
                 frame,
-                "\x1b[1m>\x1b[0m {input}\x1b[7m \x1b[0m\r\n\x1b[2m  {count}/{total}\x1b[0m"
+                "\x1b[1m>\x1b[0m {input}\x1b[7m \x1b[0m\r\n\x1b[2m  {summary}\x1b[0m"
             );
             // Lines are *prefixed* with \r\n: a trailing newline on the last
             // row would scroll the prompt off the top of the screen.
-            for (i, m) in matches.iter().take(rows.saturating_sub(2)).enumerate() {
-                let line = row(m, cols.saturating_sub(2));
+            for i in 0..results.len().min(rows.saturating_sub(2)) {
+                let Some((doc, hit)) = results.get(i) else {
+                    continue;
+                };
+                let line = row(doc, hit, cols.saturating_sub(2));
                 if i == selected {
                     // The row's internal styling ends in resets that would
                     // kill the selection underline mid-line: re-assert it
@@ -956,9 +1072,10 @@ mod query {
             let _ = out.flush();
         }
 
-        /// One list row: harness, date, label, then the best hit line
-        /// prefixed by what kind of content it matched in.
-        fn row(m: &txcript::search::DocMatch<'_>, cols: usize) -> String {
+        /// One list row: harness, date, label, then this row's hit line
+        /// prefixed by what kind of content it matched in. Empty-query rows
+        /// have no hit and represent the session itself.
+        fn row(m: &DocMatch<'_>, hit: Option<&Hit>, cols: usize) -> String {
             let label = m
                 .meta
                 .title
@@ -974,7 +1091,7 @@ mod query {
             );
             // 11 + 1 + 11 + 1 + 8 + 1 + 24 + 1 visible chars so far.
             let room = cols.saturating_sub(58);
-            let preview = m.hits.first().map_or_else(String::new, |hit| {
+            let preview = hit.map_or_else(String::new, |hit| {
                 format!(
                     "\x1b[2m{:>11}\x1b[0m {}",
                     super::origin_label(hit.origin),
@@ -1020,8 +1137,8 @@ mod query {
         /// `min 0 time 1`, a read can legitimately return nothing.
         // Separate arms distinguish timeout from ignored input.
         #[allow(clippy::match_same_arms)]
-        fn read_key(stdin: &mut impl Read) -> Result<Key, String> {
-            let key = match read_byte(stdin)? {
+        fn read_key(stdin: &mut Input<impl Read>) -> Result<Key, String> {
+            let key = match stdin.read_byte()? {
                 // A poll timeout: nothing was pressed.
                 None => Key::None,
                 Some(0x03) => Key::Cancel, // ctrl-c
@@ -1030,8 +1147,8 @@ mod query {
                 Some(0x15) => Key::Clear, // ctrl-u
                 Some(0x0e) => Key::Down,  // ctrl-n
                 Some(0x10) => Key::Up,    // ctrl-p
-                Some(0x1b) => match read_byte(stdin)? {
-                    Some(b'[') => match read_byte(stdin)? {
+                Some(0x1b) => match stdin.read_byte()? {
+                    Some(b'[') => match stdin.read_byte()? {
                         Some(b'A') => Key::Up,
                         Some(b'B') => Key::Down,
                         // Any other (or truncated) CSI sequence: not a
@@ -1051,7 +1168,7 @@ mod query {
         }
 
         /// Finish a UTF-8 multibyte sequence whose lead byte was `lead`.
-        fn utf8_tail(stdin: &mut impl Read, lead: u8) -> Result<Key, String> {
+        fn utf8_tail(stdin: &mut Input<impl Read>, lead: u8) -> Result<Key, String> {
             let len = match lead {
                 0xc2..=0xdf => 2,
                 0xe0..=0xef => 3,
@@ -1060,7 +1177,7 @@ mod query {
             // `None` folds the whole tail to `None`: a poll timeout
             // mid-sequence means a truncated character, not a key.
             let tail: Option<Vec<u8>> = (1..len)
-                .map(|_| read_byte(stdin))
+                .map(|_| stdin.read_byte())
                 .collect::<Result<_, _>>()?;
             Ok(tail
                 .map(|rest| std::iter::once(lead).chain(rest).collect())
@@ -1069,12 +1186,73 @@ mod query {
                 .map_or(Key::None, Key::Char))
         }
 
-        fn read_byte(stdin: &mut impl Read) -> Result<Option<u8>, String> {
-            let mut b = [0u8; 1];
-            match stdin.read(&mut b) {
-                Ok(0) => Ok(None),
-                Ok(_) => Ok(Some(b[0])),
-                Err(e) => Err(format!("reading stdin: {e}")),
+        /// Buffered terminal input. Reading a chunk instead of one byte at a
+        /// time exposes already-queued repeat events so navigation can batch
+        /// them without a nonblocking syscall or another thread.
+        struct Input<R> {
+            inner: R,
+            buffered: VecDeque<u8>,
+        }
+
+        impl<R: Read> Input<R> {
+            fn new(inner: R) -> Self {
+                Self {
+                    inner,
+                    buffered: VecDeque::new(),
+                }
+            }
+
+            fn has_buffered(&self) -> bool {
+                !self.buffered.is_empty()
+            }
+
+            fn read_byte(&mut self) -> Result<Option<u8>, String> {
+                if let Some(byte) = self.buffered.pop_front() {
+                    return Ok(Some(byte));
+                }
+
+                let mut chunk = [0u8; 4096];
+                match self.inner.read(&mut chunk) {
+                    Ok(0) => Ok(None),
+                    Ok(read) => {
+                        self.buffered.extend(&chunk[1..read]);
+                        Ok(Some(chunk[0]))
+                    }
+                    Err(e) => Err(format!("reading stdin: {e}")),
+                }
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::{Input, Key, drain_navigation, move_selection, read_key};
+
+            #[test]
+            fn queued_navigation_is_applied_before_one_render() {
+                let bytes = b"\x1b[B\x1b[B\x1b[B\x1b[B\x1b[Bx";
+                let mut input = Input::new(&bytes[..]);
+                let first = read_key(&mut input).unwrap();
+                let mut selected = 0;
+                move_selection(&mut selected, first, 20);
+
+                let pending = drain_navigation(&mut input, &mut selected, 20).unwrap();
+
+                assert_eq!(selected, 5);
+                assert!(matches!(pending, Some(Key::Char('x'))));
+            }
+
+            #[test]
+            fn batched_navigation_preserves_boundary_order() {
+                let bytes = b"\x1b[A\x1b[B";
+                let mut input = Input::new(&bytes[..]);
+                let first = read_key(&mut input).unwrap();
+                let mut selected = 0;
+                move_selection(&mut selected, first, 20);
+
+                let pending = drain_navigation(&mut input, &mut selected, 20).unwrap();
+
+                assert_eq!(selected, 1);
+                assert!(pending.is_none());
             }
         }
     }

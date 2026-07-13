@@ -18,6 +18,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.6.1", features = ["derive", "wrap_help"] }
 clap_complete = "4.6.7"
+terminal_size = "0.4.3"
 txcript = { version = "0.3.0", path = "..", features = ["opencode", "search"] }
 
 [lints]

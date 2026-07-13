@@ -633,6 +633,7 @@ version = "0.3.0"
 dependencies = [
  "clap",
  "clap_complete",
+ "terminal_size",
  "txcript",
 ]
 
