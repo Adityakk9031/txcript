@@ -62,6 +62,12 @@ tempfile = "3.27.0"
 name = "txcript"
 crate-type = ["cdylib", "rlib"]
 
+# The bench imports txcript::search; without this, --no-default-features
+# builds fail on the example.
+[[example]]
+name = "search_bench"
+required-features = ["search"]
+
 [features]
 default = ["opencode", "search"]
 # The OpenCode harness store reads OpenCode's SQLite database. The OpenCode
