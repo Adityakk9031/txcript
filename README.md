@@ -164,6 +164,28 @@ source <(txcript completion bash)               # bash, ad hoc
 txcript completion fish > ~/.config/fish/completions/txcript.fish
 ```
 
+Start the MCP server over the standard stdin/stdout transport:
+
+```sh
+txcript mcp
+```
+
+It exposes exactly three read-only tools. Their optional filters match the CLI:
+
+- `list_sessions(from?, cwd?)`
+- `search_sessions(pattern, from?, cwd?)`
+- `read_session(id, from?)`
+
+Omitting `from` includes every harness. Omitting `cwd` applies no directory
+filter, including sessions without a recorded working directory; when `cwd` is
+present, those sessions do not match.
+
+The library also exposes `txcript::text::to_text(&common)`, a one-way,
+token-conscious projection of `Transcript<Common>` for use as LLM context. It
+keeps messages, reasoning text, and compact tool calls/results while omitting
+replay-only payloads such as encrypted reasoning, usage accounting, and inline
+image bytes.
+
 ## Use as a WASM module (Bun / Node)
 
 The pure codec compiles to WebAssembly; the JS host owns all I/O and calls in

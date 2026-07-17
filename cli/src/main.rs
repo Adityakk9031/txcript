@@ -15,6 +15,7 @@
 //!     [--from <harness>]                    #   search only <harness> (default: all)
 //!     [--with <harness>]                    #   continue the pick in <harness>
 //!     [--cwd <dir>]                         #   only sessions recorded in <dir>
+//! txcript mcp                           # serve MCP over stdio
 //! txcript completion <shell>            # print a completion script
 //! ```
 //!
@@ -31,6 +32,8 @@ use std::process::ExitCode;
 use clap::{CommandFactory, Parser, Subcommand};
 use txcript::harness::amp;
 use txcript::{Codec, Common, HarnessId, TextCodec, Transcript, local};
+
+mod mcp;
 
 const HARNESSES: &str =
     "harnesses: claude_code, codex, opencode, pi, campfire, cursor, grok, amp, antigravity";
@@ -102,6 +105,8 @@ enum Command {
         #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
         cwd: Option<PathBuf>,
     },
+    /// Serve the Model Context Protocol over stdin/stdout
+    Mcp,
     /// Print a completion script for a shell (add it to your shell config)
     Completion {
         #[arg(value_enum)]
@@ -142,7 +147,8 @@ impl clap::builder::TypedValueParser for HarnessParser {
     }
 }
 
-fn main() -> ExitCode {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::List { from, cwd } => {
@@ -162,6 +168,7 @@ fn main() -> ExitCode {
             from,
             cwd,
         } => query::cmd_query(pattern, with, from, cwd.as_deref()),
+        Command::Mcp => mcp::serve().await,
         Command::Completion { shell } => {
             clap_complete::generate(
                 shell,
@@ -195,8 +202,56 @@ fn selected(
     from: Option<HarnessId>,
     cwd: Option<&std::path::Path>,
 ) -> bool {
-    from.is_none_or(|h| session.harness == h)
-        && cwd.is_none_or(|d| session.meta.cwd.as_deref().is_some_and(|c| same_dir(c, d)))
+    matches_filters(session.harness, session.meta.cwd.as_deref(), from, cwd)
+}
+
+fn matches_filters(
+    session_harness: HarnessId,
+    session_cwd: Option<&str>,
+    from: Option<HarnessId>,
+    cwd: Option<&std::path::Path>,
+) -> bool {
+    from.is_none_or(|harness| session_harness == harness)
+        && cwd.is_none_or(|dir| session_cwd.is_some_and(|recorded| same_dir(recorded, dir)))
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    #[test]
+    fn omitted_filters_include_every_harness_and_missing_cwd() {
+        assert!(matches_filters(HarnessId::Codex, None, None, None));
+        assert!(matches_filters(
+            HarnessId::ClaudeCode,
+            Some("/some/project"),
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn supplied_filters_require_matching_harness_and_recorded_cwd() {
+        let cwd = std::path::Path::new("/some/project");
+        assert!(matches_filters(
+            HarnessId::Codex,
+            Some("/some/project"),
+            Some(HarnessId::Codex),
+            Some(cwd)
+        ));
+        assert!(!matches_filters(
+            HarnessId::ClaudeCode,
+            Some("/some/project"),
+            Some(HarnessId::Codex),
+            Some(cwd)
+        ));
+        assert!(!matches_filters(
+            HarnessId::Codex,
+            None,
+            Some(HarnessId::Codex),
+            Some(cwd)
+        ));
+    }
 }
 
 fn cmd_list(from: Option<HarnessId>, cwd: Option<&std::path::Path>) {
@@ -583,6 +638,11 @@ mod query {
     use txcript::{HarnessId, local};
 
     type Sessions = HashMap<(HarnessId, String), local::Session>;
+
+    /// Build the same filtered index used by the CLI for the MCP search tool.
+    pub(super) fn index_for(from: Option<HarnessId>, cwd: Option<&std::path::Path>) -> Index {
+        build_index(from, cwd).0
+    }
 
     pub(super) fn cmd_query(
         pattern: Option<String>,

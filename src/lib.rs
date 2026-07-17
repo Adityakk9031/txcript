@@ -25,6 +25,7 @@ pub mod harness;
 pub mod local;
 #[cfg(feature = "search")]
 pub mod search;
+pub mod text;
 mod transcript;
 
 #[cfg(feature = "wasm")]
