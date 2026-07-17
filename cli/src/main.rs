@@ -766,7 +766,7 @@ mod query {
                     println!(
                         "  [{:>11}] {}",
                         origin_label(hit.origin),
-                        highlight(&hit.line, &hit.spans, 120, color)
+                        highlight(&hit.line, &hit.highlights, 120, color)
                     );
                 }
             }
@@ -1156,7 +1156,7 @@ mod query {
                     "\x1b[2m{:>11}\x1b[0m {}",
                     super::origin_label(hit.origin),
                     // 11 + 1 for the origin column.
-                    super::highlight(&hit.line, &hit.spans, room.saturating_sub(12), true)
+                    super::highlight(&hit.line, &hit.highlights, room.saturating_sub(12), true)
                 )
             });
             format!("{head}{preview}")

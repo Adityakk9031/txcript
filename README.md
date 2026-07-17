@@ -94,7 +94,8 @@ use txcript::search::{Query, search};
 let hits = search(&common, &Query::fuzzy("relay bug"));   // fzf syntax: 'exact ^prefix !not
 for hit in hits {
     // hit.origin: User | Assistant | Thinking | ToolUse | ToolResult | Meta
-    // hit.message / hit.block locate it; hit.spans are char ranges for highlighting
+    // hit.span addresses the message; hit.highlights are char ranges into hit.line
+    let messages = common.fragment(&hit.span);            // zero-copy: Option<&[Message]>
 }
 ```
 

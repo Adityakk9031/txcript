@@ -102,7 +102,9 @@ impl SearchMatch {
 
 #[derive(Debug, Serialize, JsonSchema)]
 struct SearchHit {
-    message: usize,
+    /// Half-open message range the hit resolves to; empty for meta hits,
+    /// which match the session header rather than a message.
+    span: std::ops::Range<usize>,
     block: usize,
     origin: &'static str,
     line: String,
@@ -112,7 +114,7 @@ struct SearchHit {
 impl From<&Hit> for SearchHit {
     fn from(hit: &Hit) -> Self {
         Self {
-            message: hit.message,
+            span: hit.span.0.clone(),
             block: hit.block,
             origin: origin_name(hit.origin),
             line: hit.line.clone(),

@@ -24,7 +24,7 @@ use nucleo_matcher::{Config, Matcher, Utf32Str, Utf32String};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{Block, Message, Meta, Role, Tool, ToolOutput};
-use crate::{Common, HarnessId, Transcript};
+use crate::{Common, HarnessId, Span, Transcript};
 
 // ── query ──────────────────────────────────────────────────────────────
 
@@ -64,8 +64,8 @@ pub enum Origin {
     ToolUse,
     /// Tool outputs. Excluded from [`Origin::DEFAULT`].
     ToolResult,
-    /// Session metadata: title, cwd, git branch. [`Hit::message`]/[`Hit::block`]
-    /// are `0` for these.
+    /// Session metadata: title, cwd, git branch. [`Hit::span`] is empty and
+    /// [`Hit::block`] is `0` for these.
     Meta,
 }
 
@@ -188,19 +188,21 @@ impl Query {
 
 // ── results ────────────────────────────────────────────────────────────
 
-/// One matching line. `spans` are character-index ranges into `line`, ready
-/// for highlighting.
+/// One matching line. `highlights` are character-index ranges into `line`,
+/// ready for highlighting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hit {
-    /// Index into the transcript's messages (`0` for [`Origin::Meta`]).
-    pub message: usize,
-    /// Index into that message's content blocks (`0` for [`Origin::Meta`]).
+    /// The message the line came from, as a one-message [`Span`] ready for
+    /// [`Transcript::fragment`]. Empty for [`Origin::Meta`] lines, which come
+    /// from the session header rather than a message.
+    pub span: Span,
+    /// Index into the message's content blocks (`0` for [`Origin::Meta`]).
     pub block: usize,
     pub origin: Origin,
     /// The matched line's text.
     pub line: String,
     /// Match positions within `line`, in characters, merged and sorted.
-    pub spans: Vec<Range<u32>>,
+    pub highlights: Vec<Range<u32>>,
     pub score: u32,
 }
 
@@ -784,11 +786,15 @@ impl Line {
         indices.sort_unstable();
         indices.dedup();
         Some(Hit {
-            message: self.message as usize,
+            span: match self.origin {
+                // Meta lines come from the session header, not a message.
+                Origin::Meta => Span(0..0),
+                _ => Span(self.message as usize..self.message as usize + 1),
+            },
             block: self.block as usize,
             origin: self.origin,
             line: self.text.to_string(),
-            spans: merge_spans(indices),
+            highlights: merge_spans(indices),
             score,
         })
     }

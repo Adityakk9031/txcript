@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::ops::Range;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -84,6 +85,26 @@ pub struct Common;
 impl Harness for Common {
     const NAME: &'static str = "common";
     type Body = Vec<Message>;
+}
+
+/// A half-open range of message indices: the primitive for pointing at part
+/// of a session. Owned and serializable, so it crosses process and wire
+/// boundaries (search results, CLI arguments, MCP responses); resolution
+/// against a loaded transcript is [`Transcript::fragment`].
+///
+/// Indices are positions in the parsed snapshot the span was minted against.
+/// They stay valid as a live session appends; they are not stable across
+/// cross-harness conversion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Span(pub Range<usize>);
+
+impl Transcript<Common> {
+    /// Resolve a [`Span`] to its messages, borrowing from this transcript.
+    /// `None` when the span reaches past the end of the session.
+    #[must_use]
+    pub fn fragment(&self, span: &Span) -> Option<&[Message]> {
+        self.body.get(span.0.clone())
+    }
 }
 
 /// Maps a harness's native representation to and from [`Common`].

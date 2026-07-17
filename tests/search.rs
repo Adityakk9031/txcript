@@ -6,7 +6,7 @@
 use chrono::{TimeZone, Utc};
 use txcript::common::{Block, Message, Meta, Role, Tool, ToolOutput};
 use txcript::search::{DocKey, Hit, Index, Origin, Query, search};
-use txcript::{Common, HarnessId, Transcript};
+use txcript::{Common, HarnessId, Span, Transcript};
 
 fn meta(id: &str, secs: i64) -> Meta {
     Meta {
@@ -150,7 +150,8 @@ fn meta_fields_are_searchable() {
     let hits = search(&t, &Query::substring("relay-protocol-v6"));
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].origin, Origin::Meta);
-    assert_eq!((hits[0].message, hits[0].block), (0, 0));
+    // Meta lines come from the session header, not a message: an empty span.
+    assert_eq!((hits[0].span.clone(), hits[0].block), (Span(0..0), 0));
 }
 
 #[test]
@@ -162,7 +163,7 @@ fn spans_cover_the_substring_in_characters() {
     let hits = search(&t, &Query::substring("needle"));
     assert_eq!(hits.len(), 1);
     // "naïve " is 6 characters; the span is char-indexed, not byte-indexed.
-    assert_eq!(hits[0].spans, vec![6..12]);
+    assert_eq!(hits[0].highlights, vec![6..12]);
     let chars: Vec<char> = hits[0].line.chars().collect();
     let matched: String = chars[6..12].iter().collect();
     assert_eq!(matched, "needle");
@@ -313,7 +314,7 @@ fn exact_occurrence_outranks_gappy_fuzzy() {
     assert_eq!(matches[0].key.id, "exact");
     assert!(matches[0].score > matches[1].score);
     assert_eq!(
-        matches[0].hits[0].spans,
+        matches[0].hits[0].highlights,
         vec![4..15],
         "highlight covers the literal occurrence"
     );
@@ -363,4 +364,34 @@ fn hit_serializes_for_the_wire() {
     let json = serde_json::to_string(&hits).unwrap_or_default();
     let back: Vec<Hit> = serde_json::from_str(&json).unwrap_or_default();
     assert_eq!(back, hits);
+}
+
+#[test]
+fn hit_span_resolves_to_the_matched_message() {
+    let t = rich_transcript("a", 0);
+    let hits = search(&t, &Query::substring("flaky"));
+    assert_eq!(hits.len(), 1);
+    let fragment = t.fragment(&hits[0].span).expect("span is in bounds");
+    assert_eq!(fragment.len(), 1);
+    // The fragment borrows the message whose block produced the matched line.
+    match &fragment[0].content[hits[0].block] {
+        Block::Text { text } => assert!(text.contains(&hits[0].line)),
+        other => panic!("expected the matched text block, got {other:?}"),
+    }
+}
+
+#[test]
+fn meta_hit_resolves_to_an_empty_fragment() {
+    let t = rich_transcript("a", 0);
+    let hits = search(&t, &Query::substring("relay-protocol-v6"));
+    let fragment = t.fragment(&hits[0].span).expect("empty span is in bounds");
+    assert!(fragment.is_empty());
+}
+
+#[test]
+fn fragment_covers_ranges_and_rejects_out_of_bounds() {
+    let t = rich_transcript("a", 0);
+    let all = t.fragment(&Span(0..t.body.len())).expect("whole session");
+    assert_eq!(all, t.body.as_slice());
+    assert_eq!(t.fragment(&Span(0..t.body.len() + 1)), None);
 }

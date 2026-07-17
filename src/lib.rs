@@ -37,5 +37,6 @@ mod wasm;
 // rather than flattened at the root.
 pub use error::{Error, Result};
 pub use transcript::{
-    Codec, Common, Discovered, Harness, HarnessId, Saved, Store, TextCodec, Transcript, convert,
+    Codec, Common, Discovered, Harness, HarnessId, Saved, Span, Store, TextCodec, Transcript,
+    convert,
 };
