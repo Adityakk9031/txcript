@@ -26,5 +26,8 @@ terminal_size = "0.4.3"
 tokio = { version = "1.48.0", features = ["io-std", "macros", "rt"] }
 txcript = { version = "0.4.0", path = "..", features = ["opencode", "search"] }
 
+[dev-dependencies]
+chrono = "0.4.45"
+
 [lints]
 workspace = true

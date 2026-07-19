@@ -128,11 +128,13 @@ of replay's `continue --local`:
 
 ```sh
 txcript list                             # local sessions across every harness
-txcript continue <id>                    # continue <id>, then launch its harness
+txcript continue <id>[#range]            # continue <id>, then launch its harness
     [--with <harness>]                    #   ...continuing in <harness> instead
     [--from <harness>]                    #   scope the id lookup to one harness
     [--out <dir>]                         #   write under <dir>; implies --no-resume
     [--no-resume]                         #   write the session but don't launch
+txcript view <id>[#range]                # print a session as compact text
+    [--from <harness>]                    #   scope the id lookup to one harness
 ```
 
 `continue` hands the terminal to the harness when done (on Unix it `exec`s).
@@ -140,6 +142,15 @@ Same-harness continues resume the original in place; `--with` re-synthesizes
 into another harness's native format first. Override the launch command per
 harness with `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template), e.g.
 `TRANSCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
+
+`view` prints the same token-conscious text projection the MCP server serves,
+with a `── #N ──` rule numbering each message. `#range` names a 1-based,
+inclusive message range — `abc#7` is message 7, `abc#5-12`, `abc#5-` (from 5
+on), `abc#-10` (through 10) — and the printed ordinals are the ones ranges
+use, so what you see is what you reference. `continue` accepts the same
+suffix and continues just those messages as a new session; ranges that cut a
+tool call away from its result are refused, with the nearest valid range
+suggested.
 
 Search across every session on the machine:
 
@@ -185,7 +196,9 @@ The library also exposes `txcript::text::to_text(&common)`, a one-way,
 token-conscious projection of `Transcript<Common>` for use as LLM context. It
 keeps messages, reasoning text, and compact tool calls/results while omitting
 replay-only payloads such as encrypted reasoning, usage accounting, and inline
-image bytes.
+image bytes. `to_text_fragment(&common, &span)` renders a `Span` of the body
+in the same format with `── #N ──` rules carrying each message's 1-based
+ordinal in the full session — the numbering `txcript view` prints.
 
 ## Use as a WASM module (Bun / Node)
 

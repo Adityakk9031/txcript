@@ -4,12 +4,17 @@
 //! preserves conversational content and compact tool data while discarding
 //! replay-only data: message timestamps, usage, stop reasons, reasoning
 //! signatures/encrypted payloads, and inline image bytes.
+//!
+//! [`to_text_fragment`] renders a [`Span`] of the body in the same format,
+//! with a `── #N ──` rule numbering each message by its 1-based position in
+//! the full session — the same ordinals fragment refs (`<id>#5-12`) use, so
+//! what a reader sees is what they can reference.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use crate::common::{Block, Role, ToolOutput};
-use crate::{Common, Transcript};
+use crate::common::{Block, Message, Meta, Role, ToolOutput};
+use crate::{Common, Span, Transcript};
 
 /// Render a canonical transcript as compact, LLM-oriented text.
 ///
@@ -19,69 +24,109 @@ use crate::{Common, Transcript};
 #[must_use]
 pub fn to_text(transcript: &Transcript<Common>) -> String {
     let mut out = String::new();
-    let meta = &transcript.meta;
-
-    out.push_str("[session]\n");
-    field(&mut out, "id", &meta.id);
-    field(&mut out, "started", &meta.timestamp.to_rfc3339());
-    optional_field(&mut out, "title", meta.title.as_deref());
-    optional_field(&mut out, "cwd", meta.cwd.as_deref());
-    optional_field(&mut out, "branch", meta.git_branch.as_deref());
-    optional_field(&mut out, "model", meta.model.as_deref());
+    header(&mut out, &transcript.meta);
 
     let mut tool_ids = HashMap::<&str, usize>::new();
     let mut next_tool_id = 1;
-
     for message in &transcript.body {
-        for block in &message.content {
-            match block {
-                Block::Text { text } => {
-                    let label = match message.role {
-                        Role::User => "user",
-                        Role::Assistant => "assistant",
-                    };
-                    section(&mut out, label, text);
-                }
-                Block::Thinking { text, .. } => section(&mut out, "thinking", text),
-                Block::ToolUse { id, tool } => {
-                    let short_id = short_tool_id(&mut tool_ids, &mut next_tool_id, id);
-                    let (name, input) = tool.to_canonical();
-                    section(
-                        &mut out,
-                        &format!("tool {short_id} {}", one_line(&name)),
-                        &input.to_string(),
-                    );
-                }
-                Block::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                } => {
-                    let short_id = short_tool_id(&mut tool_ids, &mut next_tool_id, tool_use_id);
-                    let error = if *is_error { " error" } else { "" };
-                    let text = match content {
-                        ToolOutput::Text(text) => text.as_str(),
-                        ToolOutput::Json(value) => {
-                            section(
-                                &mut out,
-                                &format!("result {short_id}{error}"),
-                                &value.to_string(),
-                            );
-                            continue;
-                        }
-                    };
-                    section(&mut out, &format!("result {short_id}{error}"), text);
-                }
-                Block::Image { source } => section(
-                    &mut out,
-                    &format!("image {} omitted", one_line(&source.media_type)),
-                    "",
-                ),
-            }
-        }
+        blocks(&mut out, &mut tool_ids, &mut next_tool_id, message);
     }
 
     out
+}
+
+/// Render `span` of the transcript in [`to_text`]'s format, a `── #N ──`
+/// rule before each message carrying its 1-based ordinal in the full body.
+/// Partial spans add `fragment=`/`of=` header fields naming the slice.
+/// `None` when `span` is out of bounds, mirroring [`Transcript::fragment`].
+#[must_use]
+pub fn to_text_fragment(transcript: &Transcript<Common>, span: &Span) -> Option<String> {
+    transcript.fragment(span).map(|messages| {
+        let mut out = String::new();
+        header(&mut out, &transcript.meta);
+        let total = transcript.body.len();
+        if span.0 != (0..total) {
+            field(&mut out, "fragment", &format_span(span));
+            field(&mut out, "of", &total.to_string());
+        }
+
+        let mut tool_ids = HashMap::<&str, usize>::new();
+        let mut next_tool_id = 1;
+        for (offset, message) in messages.iter().enumerate() {
+            // No trailing newline: `section` supplies the separator, keeping
+            // the rule flush against the first label under it.
+            let _ = write!(out, "\n── #{} ──", span.0.start + offset + 1);
+            blocks(&mut out, &mut tool_ids, &mut next_tool_id, message);
+        }
+        out
+    })
+}
+
+/// Human-facing `#a-b` (`#a` for a single message) for a resolved span.
+fn format_span(span: &Span) -> String {
+    match span.0.len() {
+        1 => format!("#{}", span.0.start + 1),
+        _ => format!("#{}-{}", span.0.start + 1, span.0.end),
+    }
+}
+
+fn header(out: &mut String, meta: &Meta) {
+    out.push_str("[session]\n");
+    field(out, "id", &meta.id);
+    field(out, "started", &meta.timestamp.to_rfc3339());
+    optional_field(out, "title", meta.title.as_deref());
+    optional_field(out, "cwd", meta.cwd.as_deref());
+    optional_field(out, "branch", meta.git_branch.as_deref());
+    optional_field(out, "model", meta.model.as_deref());
+}
+
+/// Render one message's blocks. The tool-id map is threaded across calls so
+/// `[tool N …]`/`[result N]` stay paired over the whole render.
+fn blocks<'a>(
+    out: &mut String,
+    tool_ids: &mut HashMap<&'a str, usize>,
+    next_tool_id: &mut usize,
+    message: &'a Message,
+) {
+    for block in &message.content {
+        match block {
+            Block::Text { text } => {
+                let label = match message.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                };
+                section(out, label, text);
+            }
+            Block::Thinking { text, .. } => section(out, "thinking", text),
+            Block::ToolUse { id, tool } => {
+                let short_id = short_tool_id(tool_ids, next_tool_id, id);
+                let (name, input) = tool.to_canonical();
+                section(
+                    out,
+                    &format!("tool {short_id} {}", one_line(&name)),
+                    &input.to_string(),
+                );
+            }
+            Block::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let short_id = short_tool_id(tool_ids, next_tool_id, tool_use_id);
+                let error = if *is_error { " error" } else { "" };
+                let label = format!("result {short_id}{error}");
+                match content {
+                    ToolOutput::Text(text) => section(out, &label, text),
+                    ToolOutput::Json(value) => section(out, &label, &value.to_string()),
+                }
+            }
+            Block::Image { source } => section(
+                out,
+                &format!("image {} omitted", one_line(&source.media_type)),
+                "",
+            ),
+        }
+    }
 }
 
 fn field(out: &mut String, name: &str, value: &str) {
@@ -251,5 +296,79 @@ mod tests {
 
         assert!(rendered.contains("[result 1 error]\nfailed"));
         assert!(rendered.contains("[result 1]\nagain"));
+    }
+
+    fn three_messages() -> Transcript<Common> {
+        transcript(vec![
+            message(
+                Role::User,
+                vec![Block::Text {
+                    text: "first".into(),
+                }],
+            ),
+            message(
+                Role::Assistant,
+                vec![Block::Text {
+                    text: "second".into(),
+                }],
+            ),
+            message(
+                Role::User,
+                vec![Block::Text {
+                    text: "third".into(),
+                }],
+            ),
+        ])
+    }
+
+    #[test]
+    fn fragment_numbers_messages_with_full_session_ordinals() {
+        let full = to_text_fragment(&three_messages(), &Span(0..3)).unwrap();
+        assert!(full.contains("── #1 ──\n[user]\nfirst"));
+        assert!(full.contains("── #3 ──\n[user]\nthird"));
+        assert!(!full.contains("fragment="));
+
+        let partial = to_text_fragment(&three_messages(), &Span(1..3)).unwrap();
+        assert!(partial.contains("fragment=#2-3"));
+        assert!(partial.contains("of=3"));
+        assert!(partial.contains("── #2 ──\n[assistant]\nsecond"));
+        assert!(!partial.contains("first"));
+
+        let single = to_text_fragment(&three_messages(), &Span(1..2)).unwrap();
+        assert!(single.contains("fragment=#2\n"));
+
+        assert!(to_text_fragment(&three_messages(), &Span(1..4)).is_none());
+    }
+
+    #[test]
+    fn fragment_tool_ids_stay_paired_across_messages() {
+        let rendered = to_text_fragment(
+            &transcript(vec![
+                message(
+                    Role::Assistant,
+                    vec![Block::ToolUse {
+                        id: "provider-a".into(),
+                        tool: Tool::Raw {
+                            tool_name: "Bash".into(),
+                            input: json!({"command": "ls"}),
+                        },
+                    }],
+                ),
+                message(
+                    Role::User,
+                    vec![Block::ToolResult {
+                        tool_use_id: "provider-a".into(),
+                        content: ToolOutput::Text("ok".into()),
+                        is_error: false,
+                    }],
+                ),
+            ]),
+            &Span(0..2),
+        )
+        .unwrap();
+
+        assert!(rendered.contains("[tool 1 Bash]"));
+        assert!(rendered.contains("[result 1]\nok"));
+        assert!(!rendered.contains("provider-a"));
     }
 }

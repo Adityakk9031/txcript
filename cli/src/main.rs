@@ -5,11 +5,13 @@
 //! txcript list                          # all local sessions, every harness
 //!     [--from <harness>]                    #   only this harness's sessions
 //!     [--cwd <dir>]                         #   only sessions recorded in <dir>
-//! txcript continue <id>                 # continue <id>, then launch the harness
+//! txcript continue <id>[#range]         # continue <id>, then launch the harness
 //!     [--with <harness>]                    #   ...continuing in <harness> instead
 //!     [--from <harness>]                    #   scope the id lookup to one harness
 //!     [--out <dir>]                         #   write under <dir>; implies --no-resume
 //!     [--no-resume]                         #   write the session but don't launch
+//! txcript view <id>[#range]             # print a session as compact text
+//!     [--from <harness>]                    #   scope the id lookup to one harness
 //! txcript query '<pattern>'             # one-shot search, print ranked hits
 //! txcript query                         # fzf-style picker; Enter continues
 //!     [--from <harness>]                    #   search only <harness> (default: all)
@@ -23,6 +25,10 @@
 //! directory when it still exists. Resume commands are overridable per harness
 //! via `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template).
 //!
+//! `#range` is a 1-based, inclusive message range (`#7`, `#5-12`, `#5-`,
+//! `#-10`); `view` prints the matching ordinals, so what you see is what you
+//! reference. See `fragment.rs`.
+//!
 //! Session discovery/conversion lives in [`txcript::local`]; ranking lives in
 //! [`txcript::search`].
 
@@ -33,7 +39,9 @@ use clap::{CommandFactory, Parser, Subcommand};
 use txcript::harness::amp;
 use txcript::{Codec, Common, HarnessId, TextCodec, Transcript, local};
 
+mod fragment;
 mod mcp;
+mod view;
 
 const HARNESSES: &str =
     "harnesses: claude_code, codex, opencode, pi, campfire, cursor, grok, amp, antigravity";
@@ -65,8 +73,11 @@ enum Command {
     ///
     /// Same-harness continues resume the original in place; --with
     /// re-synthesizes into another harness's native, resumable format first.
+    /// A `#range` suffix continues just those messages (as a new session);
+    /// ranges that cut a tool call away from its result are refused.
     Continue {
-        /// Session id, or its exact title
+        /// Session id or its exact title, with an optional `#range` of
+        /// 1-based inclusive message numbers (`abc#5-12`, `#7`, `#5-`, `#-10`)
         // Other: without a hint, generated completions fall back to filenames.
         #[arg(value_hint = clap::ValueHint::Other)]
         id: String,
@@ -83,6 +94,22 @@ enum Command {
         /// Write the session but don't launch the harness
         #[arg(long)]
         no_resume: bool,
+    },
+    /// Print a session as compact text
+    ///
+    /// Prints the same token-conscious projection the MCP server serves,
+    /// numbered `── #N ──` per message, so a printed ordinal can be fed
+    /// straight back as a `#range`. Output is colorless and pager-free —
+    /// it pipes cleanly into pbcopy or an LLM prompt.
+    View {
+        /// Session id or its exact title, with an optional `#range` of
+        /// 1-based inclusive message numbers (`abc#5-12`, `#7`, `#5-`, `#-10`)
+        // Other: without a hint, generated completions fall back to filenames.
+        #[arg(value_hint = clap::ValueHint::Other)]
+        source: String,
+        /// Only look for the session in this harness
+        #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
+        from: Option<HarnessId>,
     },
     /// Search session content; without a pattern, open an fzf-style picker
     ///
@@ -162,6 +189,7 @@ async fn main() -> ExitCode {
             out,
             no_resume,
         } => cmd_continue(&id, with, from, out.as_ref(), no_resume),
+        Command::View { source, from } => view::cmd_view(&source, from),
         Command::Query {
             pattern,
             with,
@@ -344,25 +372,46 @@ fn cmd_continue(
 ) -> Result<ExitCode, String> {
     // Locate the session by exact id or title, optionally scoped to one harness.
     let sessions = discover_with_spinner();
-    let found = sessions.iter().find(|s| {
-        from.is_none_or(|h| s.harness == h)
-            && (s.meta.id == id || s.meta.title.as_deref() == Some(id))
-    });
+    let find = |needle: &str| {
+        sessions.iter().find(|s| {
+            from.is_none_or(|h| s.harness == h)
+                && (s.meta.id == needle || s.meta.title.as_deref() == Some(needle))
+        })
+    };
+    // A whole-input match (a title that itself contains `#12`) beats the
+    // fragment interpretation.
+    let (src, request) = match fragment::parse_ref(id) {
+        (_, Some(_)) if find(id).is_some() => (id, None),
+        parsed => parsed,
+    };
+    let found = find(src);
 
     // Resuming an `--out` copy can't work — the harness reads its live root, not
     // our redirect — so a redirect implies "write only".
     let resume = out.is_none() && !no_resume;
     match found {
-        Some(found) => continue_session(found, with, out.map(PathBuf::as_path), resume),
+        Some(found) => continue_session(
+            found,
+            with,
+            request.as_ref(),
+            out.map(PathBuf::as_path),
+            resume,
+        ),
         // Modern Amp CLIs are server-authoritative and write no local thread
         // files; an Amp-shaped id that isn't on disk may still exist on
         // ampcode.com, reachable through Amp's own exporter.
-        None if matches!(from, None | Some(HarnessId::Amp)) && is_amp_thread_id(id) => {
-            continue_amp_server_thread(id, with, out.map(PathBuf::as_path), resume)
+        None if matches!(from, None | Some(HarnessId::Amp)) && is_amp_thread_id(src) => {
+            continue_amp_server_thread(
+                src,
+                with,
+                request.as_ref(),
+                out.map(PathBuf::as_path),
+                resume,
+            )
         }
         None => Err(match from {
-            Some(h) => format!("no {h} session matches `{id}` (try `txcript list`)"),
-            None => format!("no local session matches `{id}` (try `txcript list`)"),
+            Some(h) => format!("no {h} session matches `{src}` (try `txcript list`)"),
+            None => format!("no local session matches `{src}` (try `txcript list`)"),
         }),
     }
 }
@@ -380,6 +429,7 @@ fn is_amp_thread_id(id: &str) -> bool {
 fn continue_amp_server_thread(
     id: &str,
     with: Option<HarnessId>,
+    span_req: Option<&fragment::SpanReq>,
     out: Option<&std::path::Path>,
     resume: bool,
 ) -> Result<ExitCode, String> {
@@ -402,52 +452,67 @@ fn continue_amp_server_thread(
     let common: Transcript<Common> = amp::Amp::to_common(&native).map_err(|e| e.to_string())?;
 
     let target = with.unwrap_or(HarnessId::Amp);
-    let resume_id = if target == HarnessId::Amp && out.is_none() {
+    let resume_id = match (span_req, target == HarnessId::Amp && out.is_none()) {
         // The thread already lives server-side, exactly where Amp resumes from.
-        id.to_string()
-    } else {
-        let written = local::write(target, &common, out).map_err(|e| e.to_string())?;
-        let on = style::enabled();
-        println!(
-            "{} → {}  {}",
-            style::harness(HarnessId::Amp, 0, on),
-            style::harness(target, 0, on),
-            style::dim(written.location.trim_matches('"'), on)
-        );
-        written.id
+        (None, true) => id.to_string(),
+        (None, false) => write_and_report(HarnessId::Amp, target, &common, out)?,
+        // A sliced continue always rewrites — the server thread can't resume
+        // a subset of itself in place.
+        (Some(req), _) => {
+            write_and_report(HarnessId::Amp, target, &fragment::sliced(&common, req)?, out)?
+        }
     };
     launch(target, &resume_id, common.meta.cwd.as_deref(), resume)
 }
 
 /// Continue `found` in `with` (default: its own harness): same-harness resumes
 /// in place, cross-harness re-synthesizes; then exec the harness if `resume`.
+/// A `span_req` restricts the continue to that message range (always as a
+/// rewritten copy — the original can't resume a subset of itself in place).
 fn continue_session(
     found: &local::Session,
     with: Option<HarnessId>,
+    span_req: Option<&fragment::SpanReq>,
     out: Option<&std::path::Path>,
     resume: bool,
 ) -> Result<ExitCode, String> {
     let target = with.unwrap_or(found.harness);
 
-    let resume_id = if target == found.harness && out.is_none() {
+    let resume_id = match (span_req, target == found.harness && out.is_none()) {
         // Same-harness live sessions can resume by id without rewriting.
-        found.meta.id.clone()
-    } else {
-        let common = found.read().map_err(|e| e.to_string())?;
-        let written = local::write(target, &common, out).map_err(|e| e.to_string())?;
-        let on = style::enabled();
-        println!(
-            "{} → {}  {}",
-            style::harness(found.harness, 0, on),
-            style::harness(target, 0, on),
-            // `location` is Debug-rendered by the lib (its Ref is generic);
-            // shed the quotes it puts around paths.
-            style::dim(written.location.trim_matches('"'), on)
-        );
-        written.id
+        (None, true) => found.meta.id.clone(),
+        (None, false) => {
+            let common = found.read().map_err(|e| e.to_string())?;
+            write_and_report(found.harness, target, &common, out)?
+        }
+        (Some(req), _) => {
+            let common = found.read().map_err(|e| e.to_string())?;
+            write_and_report(found.harness, target, &fragment::sliced(&common, req)?, out)?
+        }
     };
 
     launch(target, &resume_id, found.meta.cwd.as_deref(), resume)
+}
+
+/// Write `common` as `target`'s native format, print the conversion line,
+/// and return the id to resume with.
+fn write_and_report(
+    source: HarnessId,
+    target: HarnessId,
+    common: &Transcript<Common>,
+    out: Option<&std::path::Path>,
+) -> Result<String, String> {
+    let written = local::write(target, common, out).map_err(|e| e.to_string())?;
+    let on = style::enabled();
+    println!(
+        "{} → {}  {}",
+        style::harness(source, 0, on),
+        style::harness(target, 0, on),
+        // `location` is Debug-rendered by the lib (its Ref is generic);
+        // shed the quotes it puts around paths.
+        style::dim(written.location.trim_matches('"'), on)
+    );
+    Ok(written.id)
 }
 
 /// Exec (or print) the harness resume command for `resume_id`.
@@ -667,7 +732,7 @@ mod query {
                         .get(&(key.harness, key.id.clone()))
                         .ok_or("internal error: picked session not found")?;
                     drop(index);
-                    super::continue_session(session, with, None, true)
+                    super::continue_session(session, with, None, None, true)
                 }
             },
         }
