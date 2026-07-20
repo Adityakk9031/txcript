@@ -458,9 +458,12 @@ fn continue_amp_server_thread(
         (None, false) => write_and_report(HarnessId::Amp, target, &common, out)?,
         // A sliced continue always rewrites — the server thread can't resume
         // a subset of itself in place.
-        (Some(req), _) => {
-            write_and_report(HarnessId::Amp, target, &fragment::sliced(&common, req)?, out)?
-        }
+        (Some(req), _) => write_and_report(
+            HarnessId::Amp,
+            target,
+            &fragment::sliced(&common, req)?,
+            out,
+        )?,
     };
     launch(target, &resume_id, common.meta.cwd.as_deref(), resume)
 }
