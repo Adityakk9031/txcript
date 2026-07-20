@@ -478,7 +478,11 @@ fn messages_to_lines(meta: &Meta, messages: &[Message]) -> Vec<Line> {
     let mut lines = Vec::new();
 
     // session_meta — codex requires model_provider/base_instructions present
-    // (even null) or resume silently falls through to a fresh session.
+    // or resume silently falls through to a fresh session. base_instructions
+    // may be null (codex substitutes its defaults), but model_provider must
+    // name a real provider: current codex resolves null to the empty provider
+    // name and fails resume with "Model provider `` not found". Native
+    // rollouts always carry "openai".
     let mut payload = json!({
         "id": meta.id,
         "timestamp": meta.timestamp.to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -486,7 +490,7 @@ fn messages_to_lines(meta: &Meta, messages: &[Message]) -> Vec<Line> {
         "originator": "codex_cli_rs",
         "cli_version": meta.cli_version.clone().unwrap_or_default(),
         "source": "cli",
-        "model_provider": Value::Null,
+        "model_provider": "openai",
         "base_instructions": Value::Null,
     });
     if let Some(branch) = meta.git_branch.as_deref()
