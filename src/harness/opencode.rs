@@ -322,10 +322,15 @@ fn parse_tool(part: &Value) -> Option<(Block, Option<Block>)> {
 // ── codec: from_common ─────────────────────────────────────────────────
 
 fn build_export(meta: &Meta, messages: &[Message]) -> Export {
+    // `opencode import` rejects ids that don't start with "ses"; sessions
+    // converted from other harnesses carry plain UUIDs. Re-shape those
+    // deterministically so re-importing the same session keeps its id.
     let session_id = if meta.id.is_empty() {
         format!("ses_{}", Uuid::new_v4().simple())
-    } else {
+    } else if meta.id.starts_with("ses") {
         meta.id.clone()
+    } else {
+        format!("ses_{}", meta.id.replace('-', ""))
     };
     let now = meta.timestamp.timestamp_millis();
 
