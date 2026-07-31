@@ -1,12 +1,10 @@
 name: publish-npm
 
-# Publishes the WASM package to npm on a version tag, e.g.
-# `git tag v0.2.0 && git push origin v0.2.0`.
+# Publishes the WASM package to npm. Manual-only for now — automatic
+# publish on version tags is disabled until the npm pipeline is fixed.
 # Guards that the tag matches package.json before publishing.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
