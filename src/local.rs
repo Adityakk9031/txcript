@@ -17,6 +17,8 @@
 
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
+
 use crate::common::Meta;
 use crate::harness::{amp, antigravity, campfire, claude_code, codex, cursor, grok, pi};
 use crate::{Codec, Common, Error, HarnessId, Result, Store, Transcript};
@@ -28,6 +30,11 @@ use crate::harness::opencode;
 pub struct Session {
     pub harness: HarnessId,
     pub meta: Meta,
+    /// When the session's backing store last changed — the file mtime for
+    /// file-backed sessions. Unlike [`Meta::timestamp`] (when the session
+    /// *started*), this moves as the session grows. `None` when the backend
+    /// doesn't expose it.
+    pub updated_at: Option<DateTime<Utc>>,
     locator: Locator,
 }
 
@@ -57,6 +64,7 @@ pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session>
         out.extend(discovered.into_iter().map(|d| Session {
             harness,
             meta: d.meta,
+            updated_at: file_mtime(&d.reference),
             locator: Locator::Path(d.reference),
         }));
     }
@@ -107,6 +115,8 @@ pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session>
                 out.push(Session {
                     harness: HarnessId::OpenCode,
                     meta: d.meta,
+                    // The database doesn't surface a per-session mtime.
+                    updated_at: None,
                     locator: Locator::Id(d.reference),
                 });
             }
@@ -115,6 +125,11 @@ pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session>
 
     out.sort_by_key(|s| std::cmp::Reverse(s.meta.timestamp));
     out
+}
+
+fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(DateTime::<Utc>::from(modified))
 }
 
 impl Session {
