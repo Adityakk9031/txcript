@@ -903,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "txcript"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "memchr",
@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "txcript-cli"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "clap",
