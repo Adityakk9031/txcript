@@ -140,6 +140,7 @@ txcript continue <id>[#range]            # continue <id>, then launch its harnes
     [--from <harness>]                    #   scope the id lookup to one harness
     [--out <dir>]                         #   write under <dir>; implies --no-resume
     [--no-resume]                         #   write the session but don't launch
+    [--move]                              #   EXPERIMENTAL: delete the source after writing
 txcript view <id>[#range]                # print a session as compact text
     [--from <harness>]                    #   scope the id lookup to one harness
 ```
@@ -149,6 +150,16 @@ Same-harness continues resume the original in place; `--with` re-synthesizes
 into another harness's native format first. Override the launch command per
 harness with `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template), e.g.
 `TRANSCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
+
+A cross-harness continue leaves the original session where it was — the
+default is a copy. `--move` (off by default, experimental) deletes the source
+once the copy is written, turning that copy into a move. Conversion between
+harnesses is lossy and the removal has no undo, so it's opt-in per invocation
+and prints a warning first. It's refused where the delete would lose data the
+copy doesn't carry: same-harness continues (nothing is written — the original
+resumes in place), `#range` continues (the copy holds only the range), and
+server-side amp threads (not on this disk). If the copy is written but the
+removal fails, you're left with the ordinary copy and a warning.
 
 `view` prints the same token-conscious text projection the MCP server serves,
 with a `── #N ──` rule numbering each message. `#range` names a 1-based,

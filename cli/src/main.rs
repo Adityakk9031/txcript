@@ -10,6 +10,7 @@
 //!     [--from <harness>]                    #   scope the id lookup to one harness
 //!     [--out <dir>]                         #   write under <dir>; implies --no-resume
 //!     [--no-resume]                         #   write the session but don't launch
+//!     [--move]                              #   EXPERIMENTAL: delete the source after writing
 //! txcript view <id>[#range]             # print a session as compact text
 //!     [--from <harness>]                    #   scope the id lookup to one harness
 //! txcript query '<pattern>'             # one-shot search, print ranked hits
@@ -75,6 +76,10 @@ enum Command {
     /// re-synthesizes into another harness's native, resumable format first.
     /// A `#range` suffix continues just those messages (as a new session);
     /// ranges that cut a tool call away from its result are refused.
+    ///
+    /// Anything that writes a copy writes a *new* session, with its own id and
+    /// today's timestamp — the source is never modified. The printed resume
+    /// command carries the new id.
     Continue {
         /// Session id or its exact title, with an optional `#range` of
         /// 1-based inclusive message numbers (`abc#5-12`, `#7`, `#5-`, `#-10`)
@@ -88,12 +93,23 @@ enum Command {
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         from: Option<HarnessId>,
         /// Write under this directory instead of the harness's live root
-        /// (implies --no-resume: the harness wouldn't see the copy)
+        /// (implies --no-resume: the harness wouldn't see the copy). Exports
+        /// keep the source's id and timestamp; copies into a live store get
+        /// their own.
         #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
         out: Option<PathBuf>,
         /// Write the session but don't launch the harness
         #[arg(long)]
         no_resume: bool,
+        /// EXPERIMENTAL — delete the source session once the copy is written
+        ///
+        /// Turns the usual copy into a move. Cross-harness conversion is
+        /// lossy and the removal is not undoable, so leave this off unless
+        /// you specifically want the original gone. Only valid when a copy
+        /// is actually written (--with or --out); refused for `#range`
+        /// continues, which would discard the messages outside the range.
+        #[arg(long = "move")]
+        move_source: bool,
     },
     /// Print a session as compact text
     ///
@@ -188,7 +204,8 @@ async fn main() -> ExitCode {
             from,
             out,
             no_resume,
-        } => cmd_continue(&id, with, from, out.as_ref(), no_resume),
+            move_source,
+        } => cmd_continue(&id, with, from, out.as_ref(), no_resume, move_source),
         Command::View { source, from } => view::cmd_view(&source, from),
         Command::Query {
             pattern,
@@ -282,6 +299,80 @@ mod filter_tests {
     }
 }
 
+#[cfg(test)]
+mod move_tests {
+    use super::move_refusal;
+
+    #[test]
+    fn move_applies_only_to_a_whole_session_rewrite() {
+        // Cross-harness (or --out) continue of the whole session: the copy
+        // carries everything the source had.
+        assert!(move_refusal(false, false).is_none());
+    }
+
+    #[test]
+    fn move_is_refused_when_the_source_outlives_the_copy() {
+        // Nothing is written, so there'd be no copy to move to.
+        assert!(move_refusal(false, true).is_some());
+        // The copy holds only the range; deleting the source drops the rest.
+        assert!(move_refusal(true, false).is_some());
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::{Common, HarnessId, Transcript, fresh_identity};
+    use txcript::common::Meta;
+
+    fn transcript() -> Transcript<Common> {
+        Transcript::new(
+            Meta {
+                id: "bb3c5476-0d25-46d0-803a-0ed9de155e6b".into(),
+                timestamp: "2026-07-30T20:33:48Z".parse().unwrap_or_default(),
+                cwd: Some("/work/aristotle".into()),
+                git_branch: None,
+                title: None,
+                cli_version: None,
+                model: None,
+            },
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn a_copy_into_a_live_store_becomes_its_own_session() {
+        let mut copy = transcript();
+        let (id, ts) = (copy.meta.id.clone(), copy.meta.timestamp);
+        fresh_identity(&mut copy, HarnessId::ClaudeCode, None);
+        // Writing under the source id would land on the source's own file.
+        assert_ne!(copy.meta.id, id);
+        assert!(copy.meta.timestamp > ts, "the copy is filed under today");
+        // v4 for everything but codex: version nibble, then the variant bits.
+        assert_eq!(&copy.meta.id[14..15], "4");
+        assert!(matches!(&copy.meta.id[19..20], "8" | "9" | "a" | "b"));
+    }
+
+    #[test]
+    fn codex_copies_get_the_v7_shape_codex_mints_itself() {
+        let mut copy = transcript();
+        fresh_identity(&mut copy, HarnessId::Codex, None);
+        assert_eq!(&copy.meta.id[14..15], "7");
+    }
+
+    #[test]
+    fn an_out_export_keeps_the_source_identity() {
+        let mut copy = transcript();
+        let (id, ts) = (copy.meta.id.clone(), copy.meta.timestamp);
+        fresh_identity(
+            &mut copy,
+            HarnessId::Codex,
+            Some(std::path::Path::new("/tmp/x")),
+        );
+        assert_eq!(copy.meta.id, id);
+        assert_eq!(copy.meta.timestamp, ts);
+    }
+}
+
 fn cmd_list(from: Option<HarnessId>, cwd: Option<&std::path::Path>) {
     let sessions = discover_with_spinner();
     let listed: Vec<_> = sessions.iter().filter(|s| selected(s, from, cwd)).collect();
@@ -369,6 +460,7 @@ fn cmd_continue(
     from: Option<HarnessId>,
     out: Option<&PathBuf>,
     no_resume: bool,
+    move_source: bool,
 ) -> Result<ExitCode, String> {
     // Locate the session by exact id or title, optionally scoped to one harness.
     let sessions = discover_with_spinner();
@@ -396,11 +488,19 @@ fn cmd_continue(
             request.as_ref(),
             out.map(PathBuf::as_path),
             resume,
+            move_source,
         ),
         // Modern Amp CLIs are server-authoritative and write no local thread
         // files; an Amp-shaped id that isn't on disk may still exist on
         // ampcode.com, reachable through Amp's own exporter.
         None if matches!(from, None | Some(HarnessId::Amp)) && is_amp_thread_id(src) => {
+            if move_source {
+                // The thread lives on ampcode.com, not on this machine.
+                return Err(format!(
+                    "--move can't apply to `{src}`: it isn't on disk, it's a \
+                     server-side amp thread — delete it in amp if you want it gone"
+                ));
+            }
             continue_amp_server_thread(
                 src,
                 with,
@@ -455,15 +555,18 @@ fn continue_amp_server_thread(
     let resume_id = match (span_req, target == HarnessId::Amp && out.is_none()) {
         // The thread already lives server-side, exactly where Amp resumes from.
         (None, true) => id.to_string(),
-        (None, false) => write_and_report(HarnessId::Amp, target, &common, out)?,
+        (None, false) => {
+            let mut copy = common.clone();
+            fresh_identity(&mut copy, target, out);
+            write_and_report(HarnessId::Amp, target, &copy, out)?
+        }
         // A sliced continue always rewrites — the server thread can't resume
         // a subset of itself in place.
-        (Some(req), _) => write_and_report(
-            HarnessId::Amp,
-            target,
-            &fragment::sliced(&common, req)?,
-            out,
-        )?,
+        (Some(req), _) => {
+            let mut copy = fragment::sliced(&common, req)?;
+            fresh_identity(&mut copy, target, out);
+            write_and_report(HarnessId::Amp, target, &copy, out)?
+        }
     };
     launch(target, &resume_id, common.meta.cwd.as_deref(), resume)
 }
@@ -472,29 +575,131 @@ fn continue_amp_server_thread(
 /// in place, cross-harness re-synthesizes; then exec the harness if `resume`.
 /// A `span_req` restricts the continue to that message range (always as a
 /// rewritten copy — the original can't resume a subset of itself in place).
+/// With `move_source`, the original is deleted once the copy is written.
 fn continue_session(
     found: &local::Session,
     with: Option<HarnessId>,
     span_req: Option<&fragment::SpanReq>,
     out: Option<&std::path::Path>,
     resume: bool,
+    move_source: bool,
 ) -> Result<ExitCode, String> {
     let target = with.unwrap_or(found.harness);
+    let in_place = span_req.is_none() && target == found.harness && out.is_none();
 
-    let resume_id = match (span_req, target == found.harness && out.is_none()) {
+    if move_source {
+        check_movable(found, span_req, in_place)?;
+    }
+
+    let resume_id = match (span_req, in_place) {
         // Same-harness live sessions can resume by id without rewriting.
         (None, true) => found.meta.id.clone(),
         (None, false) => {
-            let common = found.read().map_err(|e| e.to_string())?;
+            let mut common = found.read().map_err(|e| e.to_string())?;
+            fresh_identity(&mut common, target, out);
             write_and_report(found.harness, target, &common, out)?
         }
         (Some(req), _) => {
             let common = found.read().map_err(|e| e.to_string())?;
-            write_and_report(found.harness, target, &fragment::sliced(&common, req)?, out)?
+            let mut copy = fragment::sliced(&common, req)?;
+            fresh_identity(&mut copy, target, out);
+            write_and_report(found.harness, target, &copy, out)?
         }
     };
 
+    // Only after the copy is safely written: a failed write leaves the source
+    // untouched, and a failed delete leaves a plain copy — the default
+    // behaviour — rather than losing the session.
+    if move_source {
+        let on = style::enabled_err();
+        match found.delete() {
+            Ok(()) => eprintln!(
+                "moved: removed source {}",
+                style::dim(&found.location(), on)
+            ),
+            Err(e) => eprintln!(
+                "warning: copy written, but removing the source failed: {e} \
+                 (the original is still at {})",
+                found.location()
+            ),
+        }
+    }
+
     launch(target, &resume_id, found.meta.cwd.as_deref(), resume)
+}
+
+/// Why `--move` can't apply to this continue, if it can't: the cases where
+/// deleting the source would destroy data the copy doesn't carry.
+fn move_refusal(sliced: bool, in_place: bool) -> Option<&'static str> {
+    if in_place {
+        return Some(
+            "--move needs a copy to move to: a same-harness continue resumes the \
+             original in place and writes nothing. Add --with <harness> or --out <dir>.",
+        );
+    }
+    if sliced {
+        return Some(
+            "--move refuses a `#range` continue: the copy holds only the requested \
+             messages, so deleting the source would discard the rest. Continue the \
+             whole session, or drop --move.",
+        );
+    }
+    None
+}
+
+/// Gate `--move`: refuse what [`move_refusal`] names, and warn loudly about
+/// the rest.
+fn check_movable(
+    found: &local::Session,
+    span_req: Option<&fragment::SpanReq>,
+    in_place: bool,
+) -> Result<(), String> {
+    if let Some(why) = move_refusal(span_req.is_some(), in_place) {
+        return Err(why.to_string());
+    }
+    let on = style::enabled_err();
+    eprintln!(
+        "warning: --move is experimental. The {} session {} will be deleted once the \
+         copy is written; conversion between harnesses is lossy and there is no undo.",
+        found.harness,
+        style::dim(&found.location(), on),
+    );
+    // Brief pause so an interactive user can ctrl-c before anything is
+    // written or removed.
+    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+    }
+    Ok(())
+}
+
+/// Give a to-be-written copy its own identity.
+///
+/// The stores key their files by `meta.id` and date-shard by `meta.timestamp`,
+/// so a copy written under the source's identity lands exactly where the
+/// source lives: a `#range` continue would overwrite the very session it
+/// sliced, silently discarding every message outside the range, and a
+/// cross-harness copy would be filed under the original's date instead of
+/// today's.
+///
+/// `--out` is exempt: it redirects to a scratch root rather than a live store,
+/// where preserving the source identity makes the write a faithful export.
+fn fresh_identity(
+    common: &mut Transcript<Common>,
+    target: HarnessId,
+    out: Option<&std::path::Path>,
+) {
+    if out.is_some() {
+        return;
+    }
+    // Codex stamps its rollouts with v7 UUIDs; matching the shape keeps the
+    // copy out of any version-aware code path. v4 everywhere else. Harnesses
+    // that need a different spelling (opencode's `ses_` prefix) re-shape this
+    // themselves in `from_common`.
+    common.meta.id = match target {
+        HarnessId::Codex => uuid::Uuid::now_v7().to_string(),
+        _ => uuid::Uuid::new_v4().to_string(),
+    };
+    common.meta.timestamp = chrono::Utc::now();
 }
 
 /// Write `common` as `target`'s native format, print the conversion line,
@@ -746,7 +951,8 @@ mod query {
                         .get(&(key.harness, key.id.clone()))
                         .ok_or("internal error: picked session not found")?;
                     drop(index);
-                    super::continue_session(session, with, None, None, true)
+                    // The picker never moves: it offers no way to opt in.
+                    super::continue_session(session, with, None, None, true, false)
                 }
             },
         }
