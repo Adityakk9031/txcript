@@ -359,8 +359,10 @@ fn envelope_jsonl() -> String {
 }
 
 fn envelope_common() -> Transcript<Common> {
-    claude_code::ClaudeCode::to_common(&claude_code::ClaudeCode::from_text(&envelope_jsonl()).unwrap())
-        .unwrap()
+    claude_code::ClaudeCode::to_common(
+        &claude_code::ClaudeCode::from_text(&envelope_jsonl()).unwrap(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -373,9 +375,12 @@ fn slash_commands_become_command_calls_whatever_shape_they_arrive_in() {
     assert_eq!(msgs.len(), 6);
 
     let command = |m: &common::Message| match &m.content[..] {
-        [common::Block::ToolUse { id, tool: common::Tool::Command { command, args } }] => {
-            (id.clone(), command.clone(), args.clone())
-        }
+        [
+            common::Block::ToolUse {
+                id,
+                tool: common::Tool::Command { command, args },
+            },
+        ] => (id.clone(), command.clone(), args.clone()),
         other => panic!("expected a command call, got {other:?}"),
     };
 

@@ -426,7 +426,10 @@ impl Store for ClaudeStore {
 /// One recognized envelope: a slash command the user ran, the output it
 /// printed, or the boilerplate caveat that precedes local-command output.
 enum Envelope {
-    Command { command: String, args: Option<String> },
+    Command {
+        command: String,
+        args: Option<String>,
+    },
     Stdout(String),
     /// Fixed generated text carrying no session content — Claude Code emits
     /// it again on its own, so it does not survive into the canonical model.
@@ -492,18 +495,15 @@ fn envelope_body(content: &Value) -> Option<&str> {
 /// merely quotes these tags carries prose around them and stays plain text.
 fn parse_envelope(text: &str) -> Option<Envelope> {
     let tags = envelope_tags(text)?;
-    let tag = |name: &str| {
-        tags.iter()
-            .find(|(t, _)| *t == name)
-            .map(|(_, body)| *body)
-    };
+    let tag = |name: &str| tags.iter().find(|(t, _)| *t == name).map(|(_, body)| *body);
 
     if let Some(name) = tag("command-name") {
         // `<command-args>` is absent on plenty of versions, and
         // `<command-message>` only repeats the name without its slash.
-        if !tags.iter().all(|(t, _)| {
-            matches!(*t, "command-name" | "command-message" | "command-args")
-        }) {
+        if !tags
+            .iter()
+            .all(|(t, _)| matches!(*t, "command-name" | "command-message" | "command-args"))
+        {
             return None;
         }
         let name = name.trim();
@@ -542,11 +542,7 @@ fn envelope_tags(text: &str) -> Option<Vec<(&str, &str)>> {
     while !rest.is_empty() {
         let open_end = rest.strip_prefix('<')?.find('>')? + 1;
         let name = &rest[1..open_end];
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b == b'-')
-        {
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_lowercase() || b == b'-') {
             return None;
         }
         let body_start = open_end + 1;
@@ -660,7 +656,9 @@ fn local_command_record<'a>(
             put("subtype", Value::String("local_command".into()));
             put(
                 "content",
-                Value::String(format!("<local-command-stdout>{text}</local-command-stdout>")),
+                Value::String(format!(
+                    "<local-command-stdout>{text}</local-command-stdout>"
+                )),
             );
             put("level", Value::String("info".into()));
             put("isMeta", Value::Bool(false));
