@@ -147,20 +147,41 @@ impl<'de> Deserialize<'de> for Record {
 impl Codec for ClaudeCode {
     fn to_common(transcript: &Transcript<Self>) -> Result<Transcript<Common>> {
         let fallback_ts = transcript.meta.timestamp;
-        let messages = transcript
-            .body
-            .iter()
-            .filter_map(|record| match record {
-                Record::User(e) => Some((Role::User, e)),
-                Record::Assistant(e) => Some((Role::Assistant, e)),
+        let mut messages = Vec::with_capacity(transcript.body.len());
+        // The uuid of the slash command still awaiting its output, so the
+        // `local_command` line that follows pairs to the right call.
+        let mut open_command: Option<&str> = None;
+
+        for record in &transcript.body {
+            let (role, entry) = match record {
+                Record::User(e) => (Role::User, e),
+                Record::Assistant(e) => (Role::Assistant, e),
+                // Newer CLI versions write the same command envelopes on
+                // `system` lines, which have no message wrapper at all.
+                Record::Other(value) => {
+                    messages.extend(system_line_message(value, fallback_ts, &mut open_command));
+                    continue;
+                }
                 // Summaries, titles, snapshots carry no conversational turn.
-                Record::Summary(_) | Record::Other(_) => None,
-            })
-            .filter_map(|(role, entry)| {
-                let content = parse_blocks(&entry.message.content);
-                // An entry whose blocks parse to nothing carries no turn
-                // either.
-                (!content.is_empty()).then(|| Message {
+                Record::Summary(_) => continue,
+            };
+
+            // Older CLI versions write them as the whole body of a `user`
+            // line; either way they are the user driving the harness, not
+            // conversation, so they become a command call rather than text.
+            let content = match envelope_body(&entry.message.content).and_then(parse_envelope) {
+                Some(envelope) => envelope.into_blocks(
+                    &entry.uuid,
+                    entry.parent_uuid.as_deref(),
+                    &mut open_command,
+                ),
+                None => parse_blocks(&entry.message.content),
+            };
+
+            // An entry whose blocks parse to nothing carries no turn either —
+            // a dropped caveat and an empty body are alike here.
+            if !content.is_empty() {
+                messages.push(Message {
                     role,
                     content,
                     timestamp: entry
@@ -171,9 +192,10 @@ impl Codec for ClaudeCode {
                     model: entry.message.model.clone(),
                     stop_reason: entry.message.stop_reason.as_deref().map(parse_stop_reason),
                     usage: entry.message.usage.as_ref().and_then(parse_usage),
-                })
-            })
-            .collect();
+                });
+            }
+        }
+
         Ok(Transcript::new(transcript.meta.clone(), messages))
     }
 
@@ -197,9 +219,45 @@ impl Codec for ClaudeCode {
             }));
         }
 
+        // Ids of the commands written so far, so their output lands on a
+        // `local_command` line instead of a stray `tool_result`.
+        let mut command_ids = std::collections::HashSet::new();
+        // Every call the transcript makes. A lone result naming none of them
+        // cannot replay as a `tool_result` — the API rejects an id it never
+        // issued — so it takes the `local_command` line too, which preserves
+        // the text and still loads.
+        let called: std::collections::HashSet<&str> = transcript
+            .body
+            .iter()
+            .flat_map(|msg| &msg.content)
+            .filter_map(|block| match block {
+                Block::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
         let mut parent_uuid: Option<String> = None;
         for (i, msg) in transcript.body.iter().enumerate() {
             let uuid = entry_uuid(&session_id, i);
+
+            // Local-command turns go back as the native envelopes, not as
+            // message blocks: `tool_use` on a user turn is not a shape the
+            // Anthropic API accepts, so a resumed session would fail to load.
+            if msg.role == Role::User
+                && let Some(record) = local_command_record(
+                    msg,
+                    &mut command_ids,
+                    &called,
+                    &uuid,
+                    parent_uuid.as_deref(),
+                    &session_id,
+                    meta,
+                )
+            {
+                records.push(record);
+                parent_uuid = Some(uuid);
+                continue;
+            }
+
             let api = ApiMessage {
                 role: Some(role_str(msg.role).to_string()),
                 content: serialize_blocks(&msg.content),
@@ -355,6 +413,312 @@ impl Store for ClaudeStore {
         }
         Ok(out)
     }
+}
+
+// ── local command envelopes ────────────────────────────────────────────
+//
+// Claude Code records the user driving the *harness* — not the model — as
+// XML-ish tags filling a message body. Which line type carries them has
+// changed across CLI versions (a `user` line on older ones, a `system` line
+// with `subtype: "local_command"` on newer), which is why the same event
+// used to arrive as either verbatim markup or nothing at all.
+
+/// One recognized envelope: a slash command the user ran, the output it
+/// printed, or the boilerplate caveat that precedes local-command output.
+enum Envelope {
+    Command { command: String, args: Option<String> },
+    Stdout(String),
+    /// Fixed generated text carrying no session content — Claude Code emits
+    /// it again on its own, so it does not survive into the canonical model.
+    Caveat,
+}
+
+impl Envelope {
+    /// The canonical blocks for this envelope, advancing the command/output
+    /// pairing cursor. `uuid` identifies the record, `parent` is its
+    /// `parentUuid` — the link Claude Code itself draws from output back to
+    /// the command that produced it.
+    fn into_blocks<'a>(
+        self,
+        uuid: &'a str,
+        parent: Option<&str>,
+        open_command: &mut Option<&'a str>,
+    ) -> Vec<Block> {
+        match self {
+            Envelope::Command { command, args } => {
+                *open_command = Some(uuid);
+                vec![Block::ToolUse {
+                    id: uuid.to_string(),
+                    tool: Tool::Command { command, args },
+                }]
+            }
+            Envelope::Stdout(text) => {
+                // Output whose parent isn't the open command (a `!`-run, or a
+                // command whose own line was never written) stands alone
+                // under its own id rather than attaching to the wrong call.
+                let paired = parent.filter(|p| Some(*p) == *open_command);
+                *open_command = None;
+                vec![Block::ToolResult {
+                    tool_use_id: paired.unwrap_or(uuid).to_string(),
+                    content: ToolOutput::Text(text),
+                    is_error: false,
+                }]
+            }
+            Envelope::Caveat => Vec::new(),
+        }
+    }
+}
+
+/// The text of a body that could be an envelope: a bare string, or a lone
+/// text block. Claude Code has written these lines both ways. Anything else —
+/// notably a `tool_result` whose payload merely quotes the markup — is not a
+/// candidate.
+fn envelope_body(content: &Value) -> Option<&str> {
+    match content {
+        Value::String(text) => Some(text),
+        Value::Array(blocks) => match blocks.as_slice() {
+            [block] if block.get("type").and_then(Value::as_str) == Some("text") => {
+                block.get("text")?.as_str()
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Recognize a message body that is *entirely* local-command markup.
+///
+/// The whole-body requirement is what keeps the parse honest: a message that
+/// merely quotes these tags carries prose around them and stays plain text.
+fn parse_envelope(text: &str) -> Option<Envelope> {
+    let tags = envelope_tags(text)?;
+    let tag = |name: &str| {
+        tags.iter()
+            .find(|(t, _)| *t == name)
+            .map(|(_, body)| *body)
+    };
+
+    if let Some(name) = tag("command-name") {
+        // `<command-args>` is absent on plenty of versions, and
+        // `<command-message>` only repeats the name without its slash.
+        if !tags.iter().all(|(t, _)| {
+            matches!(*t, "command-name" | "command-message" | "command-args")
+        }) {
+            return None;
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        return Some(Envelope::Command {
+            // Canonical form keeps the leading slash whether or not the
+            // recorded name had one.
+            command: if name.starts_with('/') {
+                name.to_string()
+            } else {
+                format!("/{name}")
+            },
+            args: tag("command-args")
+                .map(str::trim)
+                .filter(|args| !args.is_empty())
+                .map(String::from),
+        });
+    }
+
+    match tags.as_slice() {
+        [("local-command-stdout", body)] => Some(Envelope::Stdout(strip_ansi(body))),
+        [("local-command-caveat", _)] => Some(Envelope::Caveat),
+        // Any other markup is content, not an envelope.
+        _ => None,
+    }
+}
+
+/// Split a body into its `<tag>…</tag>` sections, or `None` if anything but
+/// whitespace sits outside them. Tag order and indentation vary by CLI
+/// version, so the split is order-free.
+fn envelope_tags(text: &str) -> Option<Vec<(&str, &str)>> {
+    let mut tags = Vec::new();
+    let mut rest = text.trim();
+    while !rest.is_empty() {
+        let open_end = rest.strip_prefix('<')?.find('>')? + 1;
+        let name = &rest[1..open_end];
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'-')
+        {
+            return None;
+        }
+        let body_start = open_end + 1;
+        let close = format!("</{name}>");
+        let body_len = rest[body_start..].find(&close)?;
+        tags.push((name, &rest[body_start..body_start + body_len]));
+        rest = rest[body_start + body_len + close.len()..].trim_start();
+    }
+    (!tags.is_empty()).then_some(tags)
+}
+
+/// A `system` line's contribution to the conversation: the local-command
+/// envelopes and nothing else. Every other `system` subtype (turn timings,
+/// away summaries, hook notices) is bookkeeping.
+fn system_line_message<'a>(
+    value: &'a Value,
+    fallback_ts: DateTime<Utc>,
+    open_command: &mut Option<&'a str>,
+) -> Option<Message> {
+    if value.get("type").and_then(Value::as_str) != Some("system") {
+        return None;
+    }
+    let uuid = value.get("uuid").and_then(Value::as_str)?;
+    let envelope = parse_envelope(value.get("content")?.as_str()?)?;
+    let parent = value.get("parentUuid").and_then(Value::as_str);
+    let content = envelope.into_blocks(uuid, parent, open_command);
+    (!content.is_empty()).then(|| Message {
+        role: Role::User,
+        content,
+        timestamp: value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_ts)
+            .unwrap_or(fallback_ts),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    })
+}
+
+/// The native record for a user turn that is exactly one local-command
+/// block, or `None` when the turn is ordinary conversation.
+fn local_command_record<'a>(
+    msg: &'a Message,
+    command_ids: &mut std::collections::HashSet<&'a str>,
+    called: &std::collections::HashSet<&str>,
+    uuid: &str,
+    parent_uuid: Option<&str>,
+    session_id: &str,
+    meta: &Meta,
+) -> Option<Record> {
+    let timestamp = msg.timestamp.to_rfc3339_opts(SecondsFormat::Millis, true);
+    match msg.content.as_slice() {
+        [
+            Block::ToolUse {
+                id,
+                tool: Tool::Command { command, args },
+            },
+        ] => {
+            command_ids.insert(id.as_str());
+            let body = match args {
+                Some(args) => format!(
+                    "<command-name>{command}</command-name>\n\
+                     <command-message>{message}</command-message>\n\
+                     <command-args>{args}</command-args>",
+                    message = command.trim_start_matches('/'),
+                ),
+                None => format!(
+                    "<command-name>{command}</command-name>\n\
+                     <command-message>{message}</command-message>",
+                    message = command.trim_start_matches('/'),
+                ),
+            };
+            Some(Record::User(EntryLine {
+                parent_uuid: parent_uuid.map(String::from),
+                uuid: uuid.to_string(),
+                timestamp: Some(timestamp),
+                session_id: Some(session_id.to_string()),
+                cwd: meta.cwd.clone(),
+                git_branch: meta.git_branch.clone(),
+                version: meta.cli_version.clone(),
+                message: ApiMessage {
+                    role: Some("user".to_string()),
+                    content: Value::String(body),
+                    model: None,
+                    stop_reason: None,
+                    usage: None,
+                    extra: Map::new(),
+                },
+                extra: Map::new(),
+            }))
+        }
+        [
+            Block::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            },
+        ] if command_ids.contains(tool_use_id.as_str())
+            || !called.contains(tool_use_id.as_str()) =>
+        {
+            let text = match content {
+                ToolOutput::Text(text) => text.clone(),
+                ToolOutput::Json(value) => value.to_string(),
+            };
+            let mut line = Map::new();
+            let mut put = |key: &str, value: Value| {
+                line.insert(key.to_string(), value);
+            };
+            put("type", Value::String("system".into()));
+            put("subtype", Value::String("local_command".into()));
+            put(
+                "content",
+                Value::String(format!("<local-command-stdout>{text}</local-command-stdout>")),
+            );
+            put("level", Value::String("info".into()));
+            put("isMeta", Value::Bool(false));
+            put("uuid", Value::String(uuid.to_string()));
+            put("timestamp", Value::String(timestamp));
+            put("sessionId", Value::String(session_id.to_string()));
+            for (key, value) in [
+                ("parentUuid", parent_uuid.map(String::from)),
+                ("cwd", meta.cwd.clone()),
+                ("gitBranch", meta.git_branch.clone()),
+                ("version", meta.cli_version.clone()),
+            ] {
+                if let Some(value) = value {
+                    put(key, Value::String(value));
+                }
+            }
+            Some(Record::Other(Value::Object(line)))
+        }
+        // Anything else is an ordinary turn.
+        _ => None,
+    }
+}
+
+/// Strip ANSI escapes from local command output: `/context` and friends draw
+/// in colour, which is noise both in the text projection and in the search
+/// index.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameter and intermediate bytes, then a final byte.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if matches!(c, '\u{40}'..='\u{7e}') {
+                        break;
+                    }
+                }
+            }
+            // OSC: runs to BEL or to the string terminator `ESC \`.
+            Some(']') => {
+                let mut escaped = false;
+                for c in chars.by_ref() {
+                    if c == '\u{7}' || (escaped && c == '\\') {
+                        break;
+                    }
+                    escaped = c == '\u{1b}';
+                }
+            }
+            // Two-character escapes drop both; a trailing ESC drops itself.
+            Some(_) | None => {}
+        }
+    }
+    out
 }
 
 // ── block <-> value ────────────────────────────────────────────────────

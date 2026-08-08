@@ -101,11 +101,14 @@ fn blocks<'a>(
             Block::ToolUse { id, tool } => {
                 let short_id = short_tool_id(tool_ids, next_tool_id, id);
                 let (name, input) = tool.to_canonical();
-                section(
-                    out,
-                    &format!("tool {short_id} {}", one_line(&name)),
-                    &input.to_string(),
-                );
+                // A tool invoked with no arguments — a bare slash command,
+                // say — renders as its label alone rather than a stray `{}`.
+                let body = match &input {
+                    serde_json::Value::Null => String::new(),
+                    serde_json::Value::Object(map) if map.is_empty() => String::new(),
+                    input => input.to_string(),
+                };
+                section(out, &format!("tool {short_id} {}", one_line(&name)), &body);
             }
             Block::ToolResult {
                 tool_use_id,

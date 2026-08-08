@@ -83,6 +83,13 @@ The canonical model is `Transcript<Common>` — `Meta` + `Vec<Message>`, where a
 `Message` holds typed `Block`s (`Text`, `Thinking`, `ToolUse`, `ToolResult`,
 `Image`) and a typed `Tool` enum.
 
+A slash command the user ran at the harness is a `Tool::Command` on a user
+turn, with whatever the harness printed back as the paired `ToolResult` — so
+`/release patch` reads as a call rather than as the markup the harness happens
+to record it in. The leading `/` is what marks it canonically: no model-facing
+tool name has one. Boilerplate the harness regenerates on its own (Claude
+Code's local-command caveat) does not survive into the model.
+
 ### Search (feature `search`, on by default)
 
 `txcript::search` supports fuzzy and substring search over transcripts via

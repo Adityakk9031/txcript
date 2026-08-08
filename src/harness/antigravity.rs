@@ -917,8 +917,9 @@ fn denormalize_tool(tool: &Tool) -> (String, Value) {
             }
             ("replace_file_content".to_string(), args)
         }
-        // MultiEdit and Raw ride the generic carrier under canonical names.
-        Tool::MultiEdit { .. } | Tool::Raw { .. } => tool.to_canonical(),
+        // MultiEdit, Raw and user commands ride the generic carrier under
+        // canonical names.
+        Tool::MultiEdit { .. } | Tool::Raw { .. } | Tool::Command { .. } => tool.to_canonical(),
     }
 }
 
@@ -1528,7 +1529,9 @@ fn tool_step_payload(tool: &Tool, result: Option<&PendingResult>) -> (i64, u32, 
             };
             (STEP_CODE_ACTION, 10, body, status)
         }
-        Tool::MultiEdit { .. } | Tool::Raw { .. } => generic_step_payload(result),
+        Tool::MultiEdit { .. } | Tool::Raw { .. } | Tool::Command { .. } => {
+            generic_step_payload(result)
+        }
     }
 }
 

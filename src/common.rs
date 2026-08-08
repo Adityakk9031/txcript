@@ -160,6 +160,22 @@ pub enum ToolOutput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "name")]
 pub enum Tool {
+    /// A command the *user* ran at the harness itself — a slash command, not
+    /// a model tool call. It rides on a [`Role::User`] turn, and whatever the
+    /// harness printed back arrives as the paired [`Block::ToolResult`].
+    ///
+    /// The leading `/` in `name` is what distinguishes it canonically: no
+    /// model-facing tool name may start with one, so every codec and renderer
+    /// round-trips it through [`Tool::from_canonical`] without a special case.
+    /// (`command` rather than `name`: the enum is tagged by `name`, so a
+    /// field of that name would collide with the tag on the wire.)
+    Command {
+        /// Canonical name including the leading slash, e.g. `"/release"`.
+        command: String,
+        /// Everything the user typed after the command name, when any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<String>,
+    },
     Read {
         file_path: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -219,6 +235,18 @@ impl Tool {
             A::deserialize(input).ok()
         }
         match name {
+            // No model-facing tool name starts with a slash, so the prefix
+            // alone identifies a user command — no name registry to keep in
+            // sync as harnesses add commands.
+            _ if name.starts_with('/') => typed::<CommandArgs>(&input)
+                .map(|a| Tool::Command {
+                    command: name.to_string(),
+                    args: a.args,
+                })
+                .unwrap_or(Tool::Raw {
+                    tool_name: name.to_string(),
+                    input,
+                }),
             "Read" => typed::<ReadArgs>(&input)
                 .map(|a| Tool::Read {
                     file_path: a.file_path,
@@ -284,6 +312,12 @@ impl Tool {
     pub fn to_canonical(&self) -> (String, Value) {
         let value = |v: serde_json::Result<Value>| v.unwrap_or(Value::Null);
         match self {
+            Tool::Command { command, args } => (
+                command.clone(),
+                value(serde_json::to_value(CommandArgs {
+                    args: args.as_deref(),
+                })),
+            ),
             Tool::Read {
                 file_path,
                 offset,
@@ -352,6 +386,13 @@ impl Tool {
 // Generic over the string type so both directions use one schema:
 // `from_canonical` deserializes owned strings; `to_canonical` serializes
 // borrowed strings.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandArgs<S = String> {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    args: Option<S>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReadArgs<S = String> {

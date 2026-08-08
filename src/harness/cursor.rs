@@ -805,8 +805,8 @@ fn cursor_tool_call_proto(meta: &Meta, call: &CursorStateToolCall) -> Option<Vec
                 cursor_edit_tool_call_proto(file_path, &payload, call.result.as_ref()),
             ))
         }
-        // Raw tools have no Cursor-native proto shape.
-        Tool::Raw { .. } => None,
+        // Raw tools and user commands have no Cursor-native proto shape.
+        Tool::Raw { .. } | Tool::Command { .. } => None,
     }?;
 
     let mut out = Vec::new();

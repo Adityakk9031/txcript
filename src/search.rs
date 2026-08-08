@@ -870,6 +870,12 @@ fn extract(meta: &Meta, messages: &[Message]) -> Vec<Line> {
 /// Searchable strings from a tool invocation.
 fn extract_tool(tool: &Tool, mut push: impl FnMut(&str)) {
     match tool {
+        Tool::Command { command, args } => {
+            push(command);
+            if let Some(args) = args {
+                push(args);
+            }
+        }
         Tool::Read { file_path, .. } => push(file_path),
         Tool::Write { file_path, content } => {
             push(file_path);
