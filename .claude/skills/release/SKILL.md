@@ -25,18 +25,26 @@ irreversible decision.
 2. `cargo test --workspace` — bare `cargo test` skips the CLI member.
 3. `cargo clippy --workspace --all-targets` — pedantic baseline,
    `unwrap/expect/panic` denied in `src/`.
-4. `cargo test --no-default-features` — the featureless build is a supported
+4. `cargo fmt --all --check` — CI gates on this and the other preflight
+   commands do not, so unformatted code passes every check here and fails the
+   run you're waiting on before tagging (cost a round trip at v0.5.0).
+5. `cargo test --no-default-features` — the featureless build is a supported
    surface and has broken independently of the default build before.
-5. `cargo publish --dry-run --locked -p txcript` — catches packaging errors
+6. `cargo publish --dry-run --locked -p txcript` — catches packaging errors
    (missing metadata, dirty files) that the workflow would only surface after
    the tag is pushed.
 
 ## Bump and tag
 
-1. Set the new version in **both** `Cargo.toml` (root `txcript`) and
-   `cli/Cargo.toml` (`txcript-cli`) — the CLI is `publish = false` but its
-   version tracks the library. `cargo check` once so `Cargo.lock` picks up the
-   bump; commit the lockfile with the manifests.
+1. Set the new version in **all four** places: `Cargo.toml` (root `txcript`),
+   `cli/Cargo.toml` (`txcript-cli` — `publish = false`, but its version tracks
+   the library), the `txcript = { version = … }` pin inside `cli/Cargo.toml`,
+   and `package.json` (the npm/WASM package). The pin only *has* to move on a
+   minor bump — `^0.4.0` admits 0.4.3 but not 0.5.0 — which is exactly when
+   it's easiest to forget. `package.json` had drifted three releases behind by
+   v0.5.0; the npm workflow guards tag-vs-`package.json`, so drift there is a
+   dispatch-time failure, not a tag-time one. `cargo check` once so
+   `Cargo.lock` picks up the bump; commit the lockfile with the manifests.
 2. Commit the bump, push, and confirm CI is green on that commit before
    tagging.
 3. Annotated tag matching the manifest exactly:
@@ -51,11 +59,12 @@ irreversible decision.
    the library ships.
 2. Verify the version is live: `cargo search txcript` or fetch
    `https://crates.io/api/v1/crates/txcript` and check `max_version`.
-3. **Known failure**: the `publish-npm` workflow also fires on every `v*` tag
-   and the npm path is unresolved (`package.json` is stale — it was still
-   0.2.0 at v0.3.0). Expect that run to fail or publish nothing; report its
-   status to the user and ask whether to resolve, retrigger, or keep ignoring
-   it. Do not silently swallow it.
+3. `publish-npm` no longer fires on tags — it is `workflow_dispatch` only,
+   so a `v*` tag triggers `publish-crates` and nothing else. (It *did* fire on
+   tags through v0.4.0 and failed every time; that trigger has since been
+   removed. Don't go hunting for a failed npm run.) Publishing to npm is a
+   deliberate manual dispatch, and its first step guards the tag against
+   `package.json`, so keep that version in step with the bump.
 
 ## Report
 
