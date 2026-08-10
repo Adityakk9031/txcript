@@ -1,15 +1,16 @@
 ---
 name: release
-description: Cut a txcript release — preflight the workspace, bump versions, tag, watch the publish-crates workflow, and verify on crates.io. Use when asked to release, publish, or ship a new version of txcript.
+description: Cut a txcript release — preflight the workspace, bump versions, tag, watch the publish-crates and publish-npm workflows, and verify on crates.io and npm. Use when asked to release, publish, or ship a new version of txcript.
 argument-hint: [version]
 ---
 
 # Release txcript
 
-Publishes the `txcript` library to crates.io via the tag-triggered
-`publish-crates` workflow. Three releases (v0.1.0–v0.3.0) established this
-procedure; follow it in order. A crates.io version is **permanent** — it can be
-yanked but never deleted or reused — so every gate runs before the tag exists.
+Publishes the `txcript` library to crates.io and the WASM package to npm via
+the tag-triggered `publish-crates` and `publish-npm` workflows. Three releases
+(v0.1.0–v0.3.0) established this procedure; follow it in order. A crates.io
+version is **permanent** — it can be yanked but never deleted or reused — so
+every gate runs before the tag exists.
 
 ## Inputs
 
@@ -54,19 +55,20 @@ irreversible decision.
 
 ## Watch and verify
 
-1. Watch the `publish-crates` run for the tag (`gh run watch` in the
-   background). It publishes with `cargo publish --locked -p txcript` — only
-   the library ships.
-2. Verify the version is live: `cargo search txcript` or fetch
+1. The tag push fires **two** workflows: `publish-crates` (cargo, with
+   `cargo publish --locked -p txcript` — only the library ships) and
+   `publish-npm` (builds the WASM bundle and publishes via OIDC trusted
+   publishing — no token, npm trusts this repo + workflow filename as of
+   v0.5.0). Watch both runs (`gh run watch` in the background).
+2. Verify crates.io: `cargo search txcript` or fetch
    `https://crates.io/api/v1/crates/txcript` and check `max_version`.
-3. `publish-npm` no longer fires on tags — it is `workflow_dispatch` only,
-   so a `v*` tag triggers `publish-crates` and nothing else. (It *did* fire on
-   tags through v0.4.0 and failed every time; that trigger has since been
-   removed. Don't go hunting for a failed npm run.) Publishing to npm is a
-   deliberate manual dispatch, and its first step guards the tag against
-   `package.json`, so keep that version in step with the bump.
+3. Verify npm: `npm view txcript version`. If the npm run failed on its
+   version guard, `package.json` missed the bump (step 1 of Bump and tag);
+   fix the manifest, then re-dispatch on the tag is not possible — the tag
+   must carry the right `package.json`, so a failed guard means cutting a
+   patch release with the manifest fixed.
 
 ## Report
 
-State the published version, the workflow run URL, the crates.io
-verification result, and the npm workflow outcome.
+State the published version, both workflow run URLs, and the crates.io and
+npm verification results.
