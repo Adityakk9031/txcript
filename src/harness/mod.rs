@@ -17,6 +17,32 @@ pub mod pi;
 
 pub(crate) mod jsonl;
 
+/// Guard a transcript-supplied session id before it becomes a path segment.
+///
+/// Ids are copied verbatim out of session files, so a store must treat them
+/// as untrusted: joined into a path, `../x` escapes the store root and an
+/// absolute id replaces it entirely. Only a single, plain component is
+/// accepted — no separators, no `.`/`..`, no drive-style `:`, no control
+/// characters, not empty.
+pub(crate) fn checked_id_component(harness: &'static str, id: &str) -> crate::Result<()> {
+    let ok = !id.is_empty()
+        && id != "."
+        && id != ".."
+        && !id.contains(['/', '\\', ':'])
+        && !id.chars().any(char::is_control);
+    if ok {
+        Ok(())
+    } else {
+        Err(crate::Error::Malformed {
+            harness,
+            detail: format!(
+                "session id `{}` is not usable as a file name",
+                id.escape_debug()
+            ),
+        })
+    }
+}
+
 /// The user's home directory, resolved the way the harness CLIs themselves
 /// resolve it: `$HOME` on Unix; on Windows `%USERPROFILE%` first (Node's
 /// `os.homedir()` and Rust's home crates ignore `$HOME` there), with `$HOME`

@@ -347,7 +347,10 @@ impl ClaudeStore {
         // An unreadable directory lists nothing.
         for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // `file_type` doesn't follow symlinks: a link pointing back at an
+            // ancestor would otherwise recurse forever. Symlinked directories
+            // are skipped; symlinked session files still list.
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
                 // Subagent and tool-result side-files aren't top-level sessions.
@@ -401,10 +404,11 @@ impl Store for ClaudeStore {
     }
 
     fn save(&self, transcript: &Transcript<ClaudeCode>) -> Result<Saved<PathBuf>> {
+        let id = transcript.meta.id.clone();
+        super::checked_id_component(ClaudeCode::NAME, &id)?;
         let cwd = transcript.meta.cwd.as_deref().unwrap_or_default();
         let dir = self.root.join(encode_project_dir(cwd));
         fs::create_dir_all(&dir)?;
-        let id = transcript.meta.id.clone();
         let path = dir.join(format!("{id}.jsonl"));
         fs::write(&path, ClaudeCode::to_text(transcript)?)?;
         Ok(Saved {
@@ -517,7 +521,7 @@ fn parse_envelope(text: &str) -> Option<Envelope> {
         {
             return None;
         }
-        let name = name.trim();
+        let name = unescape_envelope(name.trim());
         if name.is_empty() {
             return None;
         }
@@ -525,23 +529,84 @@ fn parse_envelope(text: &str) -> Option<Envelope> {
             // Canonical form keeps the leading slash whether or not the
             // recorded name had one.
             command: if name.starts_with('/') {
-                name.to_string()
+                name
             } else {
                 format!("/{name}")
             },
             args: tag("command-args")
                 .map(str::trim)
                 .filter(|args| !args.is_empty())
-                .map(String::from),
+                .map(unescape_envelope),
         });
     }
 
     match tags.as_slice() {
-        [("local-command-stdout", body)] => Some(Envelope::Stdout(strip_ansi(body))),
+        [("local-command-stdout", body)] => {
+            Some(Envelope::Stdout(strip_ansi(&unescape_envelope(body))))
+        }
         [("local-command-caveat", _)] => Some(Envelope::Caveat),
         // Any other markup is content, not an envelope.
         _ => None,
     }
+}
+
+/// Every tag name [`parse_envelope`] recognizes — the close tags whose
+/// literal appearance inside a payload would end its section early.
+const ENVELOPE_TAGS: &[&str] = &[
+    "command-name",
+    "command-message",
+    "command-args",
+    "local-command-stdout",
+    "local-command-caveat",
+];
+
+/// The envelope markup has no quoting of its own: payload text containing a
+/// close tag would truncate its section on re-read, dropping output or
+/// letting content forge a different envelope. Writing therefore adds one
+/// backslash to every `<`…`/tag>` run (`</tag>` → `<\/tag>`, an existing
+/// `<\/tag>` → `<\\/tag>`) and parsing removes one — a bijective pair, so
+/// payloads round-trip losslessly whatever they contain.
+fn escape_envelope(text: &str) -> String {
+    shift_envelope_escapes(text, true)
+}
+
+/// Inverse of [`escape_envelope`]; see there.
+fn unescape_envelope(text: &str) -> String {
+    shift_envelope_escapes(text, false)
+}
+
+fn shift_envelope_escapes(text: &str, add: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find('<') {
+        out.push_str(&rest[..=pos]);
+        rest = &rest[pos + 1..];
+        let backslashes = rest.len() - rest.trim_start_matches('\\').len();
+        let after = &rest[backslashes..];
+        let close_len = ENVELOPE_TAGS.iter().find_map(|tag| {
+            after
+                .strip_prefix('/')
+                .and_then(|r| r.strip_prefix(*tag))
+                .and_then(|r| r.strip_prefix('>'))
+                .map(|_| tag.len() + 2)
+        });
+        if let Some(close_len) = close_len {
+            let shifted = if add {
+                backslashes + 1
+            } else {
+                backslashes.saturating_sub(1)
+            };
+            for _ in 0..shifted {
+                out.push('\\');
+            }
+            out.push_str(&after[..close_len]);
+            rest = &after[close_len..];
+        }
+        // Otherwise nothing is consumed past the `<`: the run (backslashes
+        // included) flows into `out` with the next chunk.
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Split a body into its `<tag>…</tag>` sections, or `None` if anything but
@@ -614,17 +679,18 @@ fn local_command_record<'a>(
             },
         ] => {
             command_ids.insert(id.as_str());
+            let name = escape_envelope(command);
+            let message = escape_envelope(command.trim_start_matches('/'));
             let body = match args {
                 Some(args) => format!(
-                    "<command-name>{command}</command-name>\n\
+                    "<command-name>{name}</command-name>\n\
                      <command-message>{message}</command-message>\n\
                      <command-args>{args}</command-args>",
-                    message = command.trim_start_matches('/'),
+                    args = escape_envelope(args),
                 ),
                 None => format!(
-                    "<command-name>{command}</command-name>\n\
-                     <command-message>{message}</command-message>",
-                    message = command.trim_start_matches('/'),
+                    "<command-name>{name}</command-name>\n\
+                     <command-message>{message}</command-message>"
                 ),
             };
             Some(Record::User(EntryLine {
@@ -668,7 +734,8 @@ fn local_command_record<'a>(
             put(
                 "content",
                 Value::String(format!(
-                    "<local-command-stdout>{text}</local-command-stdout>"
+                    "<local-command-stdout>{}</local-command-stdout>",
+                    escape_envelope(&text)
                 )),
             );
             put("level", Value::String("info".into()));

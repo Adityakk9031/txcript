@@ -10,7 +10,6 @@
 //!     [--from <harness>]                    #   scope the id lookup to one harness
 //!     [--out <dir>]                         #   write under <dir>; implies --no-resume
 //!     [--no-resume]                         #   write the session but don't launch
-//!     [--move]                              #   EXPERIMENTAL: delete the source after writing
 //! txcript view <id>[#range]             # print a session as compact text
 //!     [--from <harness>]                    #   scope the id lookup to one harness
 //! txcript query '<pattern>'             # one-shot search, print ranked hits
@@ -101,15 +100,6 @@ enum Command {
         /// Write the session but don't launch the harness
         #[arg(long)]
         no_resume: bool,
-        /// EXPERIMENTAL — delete the source session once the copy is written
-        ///
-        /// Turns the usual copy into a move. Cross-harness conversion is
-        /// lossy and the removal is not undoable, so leave this off unless
-        /// you specifically want the original gone. Only valid when a copy
-        /// is actually written (--with or --out); refused for `#range`
-        /// continues, which would discard the messages outside the range.
-        #[arg(long = "move")]
-        move_source: bool,
     },
     /// Print a session as compact text
     ///
@@ -204,8 +194,7 @@ async fn main() -> ExitCode {
             from,
             out,
             no_resume,
-            move_source,
-        } => cmd_continue(&id, with, from, out.as_ref(), no_resume, move_source),
+        } => cmd_continue(&id, with, from, out.as_ref(), no_resume),
         Command::View { source, from } => view::cmd_view(&source, from),
         Command::Query {
             pattern,
@@ -215,12 +204,12 @@ async fn main() -> ExitCode {
         } => query::cmd_query(pattern, with, from, cwd.as_deref()),
         Command::Mcp => mcp::serve().await,
         Command::Completion { shell } => {
-            clap_complete::generate(
-                shell,
-                &mut Cli::command(),
-                "txcript",
-                &mut std::io::stdout(),
-            );
+            // Render to a buffer first: a failed stdout write means the
+            // reader is gone (`… | head`), which should end quietly, not
+            // panic inside clap_complete.
+            let mut script = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "txcript", &mut script);
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), &script);
             Ok(ExitCode::SUCCESS)
         }
     };
@@ -300,22 +289,19 @@ mod filter_tests {
 }
 
 #[cfg(test)]
-mod move_tests {
-    use super::move_refusal;
+mod scrub_tests {
+    use super::style::scrub;
 
     #[test]
-    fn move_applies_only_to_a_whole_session_rewrite() {
-        // Cross-harness (or --out) continue of the whole session: the copy
-        // carries everything the source had.
-        assert!(move_refusal(false, false).is_none());
-    }
-
-    #[test]
-    fn move_is_refused_when_the_source_outlives_the_copy() {
-        // Nothing is written, so there'd be no copy to move to.
-        assert!(move_refusal(false, true).is_some());
-        // The copy holds only the range; deleting the source drops the rest.
-        assert!(move_refusal(true, false).is_some());
+    fn control_characters_become_spaces_one_for_one() {
+        // ANSI SGR, an OSC-52 clipboard write, a forged row via newline, and
+        // a bell: all neutralized, and the char count is unchanged so column
+        // math and highlight spans stay aligned.
+        let hostile = "a\x1b[31mred\x1b]52;c;evil\x07b\nrow\ttab";
+        let cleaned = scrub(hostile);
+        assert!(!cleaned.chars().any(char::is_control));
+        assert_eq!(cleaned.chars().count(), hostile.chars().count());
+        assert_eq!(scrub("plain text stays"), "plain text stays");
     }
 }
 
@@ -383,21 +369,33 @@ fn cmd_list(from: Option<HarnessId>, cwd: Option<&std::path::Path>) {
             None => println!("no local sessions found{scope}"),
         }
     } else {
+        use std::io::Write;
         let color = style::enabled();
+        // A failed write means the reader is gone (`txcript list | head`):
+        // stop quietly instead of panicking the way `println!` would.
+        let mut out = std::io::stdout().lock();
         let header = format!("{:<12}  {:<38}  TITLE / FIRST MESSAGE", "HARNESS", "ID");
-        println!("{}", style::dim(&header, color));
+        if writeln!(out, "{}", style::dim(&header, color)).is_err() {
+            return;
+        }
         for s in listed {
             let label = s
                 .meta
                 .title
                 .clone()
                 .unwrap_or_else(|| s.meta.cwd.clone().unwrap_or_default());
-            println!(
+            let row = format!(
                 "{}  {}  {}",
                 style::harness(s.harness, 12, color),
-                style::dim(&format!("{:<38}", truncate(&s.meta.id, 38)), color),
-                truncate(&label, 60)
+                style::dim(
+                    &format!("{:<38}", truncate(&style::scrub(&s.meta.id), 38)),
+                    color
+                ),
+                truncate(&style::scrub(&label), 60)
             );
+            if writeln!(out, "{row}").is_err() {
+                return;
+            }
         }
     }
 }
@@ -426,6 +424,18 @@ mod style {
         } else {
             s.to_string()
         }
+    }
+
+    /// Neutralize control characters in transcript-derived text (ids, titles,
+    /// matched lines, recorded paths) before it reaches the terminal: a
+    /// session file could otherwise drive the terminal itself — ANSI/OSC
+    /// state, clipboard writes, forged rows. One space per control character
+    /// keeps char counts, and with them column padding and highlight spans,
+    /// unchanged.
+    pub fn scrub(s: &str) -> String {
+        s.chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect()
     }
 
     /// The harness name padded to `pad`, in its color when `on`. Each harness
@@ -460,7 +470,6 @@ fn cmd_continue(
     from: Option<HarnessId>,
     out: Option<&PathBuf>,
     no_resume: bool,
-    move_source: bool,
 ) -> Result<ExitCode, String> {
     // Locate the session by exact id or title, optionally scoped to one harness.
     let sessions = discover_with_spinner();
@@ -488,19 +497,11 @@ fn cmd_continue(
             request.as_ref(),
             out.map(PathBuf::as_path),
             resume,
-            move_source,
         ),
         // Modern Amp CLIs are server-authoritative and write no local thread
         // files; an Amp-shaped id that isn't on disk may still exist on
         // ampcode.com, reachable through Amp's own exporter.
         None if matches!(from, None | Some(HarnessId::Amp)) && is_amp_thread_id(src) => {
-            if move_source {
-                // The thread lives on ampcode.com, not on this machine.
-                return Err(format!(
-                    "--move can't apply to `{src}`: it isn't on disk, it's a \
-                     server-side amp thread — delete it in amp if you want it gone"
-                ));
-            }
             continue_amp_server_thread(
                 src,
                 with,
@@ -575,21 +576,15 @@ fn continue_amp_server_thread(
 /// in place, cross-harness re-synthesizes; then exec the harness if `resume`.
 /// A `span_req` restricts the continue to that message range (always as a
 /// rewritten copy — the original can't resume a subset of itself in place).
-/// With `move_source`, the original is deleted once the copy is written.
 fn continue_session(
     found: &local::Session,
     with: Option<HarnessId>,
     span_req: Option<&fragment::SpanReq>,
     out: Option<&std::path::Path>,
     resume: bool,
-    move_source: bool,
 ) -> Result<ExitCode, String> {
     let target = with.unwrap_or(found.harness);
     let in_place = span_req.is_none() && target == found.harness && out.is_none();
-
-    if move_source {
-        check_movable(found, span_req, in_place)?;
-    }
 
     let resume_id = match (span_req, in_place) {
         // Same-harness live sessions can resume by id without rewriting.
@@ -607,69 +602,7 @@ fn continue_session(
         }
     };
 
-    // Only after the copy is safely written: a failed write leaves the source
-    // untouched, and a failed delete leaves a plain copy — the default
-    // behaviour — rather than losing the session.
-    if move_source {
-        let on = style::enabled_err();
-        match found.delete() {
-            Ok(()) => eprintln!(
-                "moved: removed source {}",
-                style::dim(&found.location(), on)
-            ),
-            Err(e) => eprintln!(
-                "warning: copy written, but removing the source failed: {e} \
-                 (the original is still at {})",
-                found.location()
-            ),
-        }
-    }
-
     launch(target, &resume_id, found.meta.cwd.as_deref(), resume)
-}
-
-/// Why `--move` can't apply to this continue, if it can't: the cases where
-/// deleting the source would destroy data the copy doesn't carry.
-fn move_refusal(sliced: bool, in_place: bool) -> Option<&'static str> {
-    if in_place {
-        return Some(
-            "--move needs a copy to move to: a same-harness continue resumes the \
-             original in place and writes nothing. Add --with <harness> or --out <dir>.",
-        );
-    }
-    if sliced {
-        return Some(
-            "--move refuses a `#range` continue: the copy holds only the requested \
-             messages, so deleting the source would discard the rest. Continue the \
-             whole session, or drop --move.",
-        );
-    }
-    None
-}
-
-/// Gate `--move`: refuse what [`move_refusal`] names, and warn loudly about
-/// the rest.
-fn check_movable(
-    found: &local::Session,
-    span_req: Option<&fragment::SpanReq>,
-    in_place: bool,
-) -> Result<(), String> {
-    if let Some(why) = move_refusal(span_req.is_some(), in_place) {
-        return Err(why.to_string());
-    }
-    let on = style::enabled_err();
-    eprintln!(
-        "warning: --move is experimental. The {} session {} will be deleted once the \
-         copy is written; conversion between harnesses is lossy and there is no undo.",
-        found.harness,
-        style::dim(&found.location(), on),
-    );
-    // Brief pause so an interactive user can ctrl-c before anything is
-    // written or removed.
-    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-    }
-    Ok(())
 }
 
 /// Give a to-be-written copy its own identity.
@@ -734,11 +667,15 @@ fn launch(
     if resume {
         // Hand the terminal to the harness — replaces this process on Unix.
         let workdir = resume_workdir(cwd);
-        let shown = std::iter::once(&bin)
-            .chain(&args)
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(" ");
+        // The id inside the command came from a session file; scrub it for
+        // display (the exec below still gets the exact argv).
+        let shown = style::scrub(
+            &std::iter::once(&bin)
+                .chain(&args)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
         match &workdir {
             Some(dir) => eprintln!(
                 "resuming: {shown} {}",
@@ -752,7 +689,10 @@ fn launch(
         }
         handoff(&bin, &args, workdir.as_deref())
     } else {
-        println!("  resume with: {} {}", bin, args.join(" "));
+        println!(
+            "  resume with: {}",
+            style::scrub(&format!("{} {}", bin, args.join(" ")))
+        );
         Ok(ExitCode::SUCCESS)
     }
 }
@@ -766,7 +706,8 @@ fn resume_workdir(cwd: Option<&str>) -> Option<PathBuf> {
             Some(dir)
         } else {
             eprintln!(
-                "warning: session cwd `{c}` no longer exists; resuming from the current directory"
+                "warning: session cwd `{}` no longer exists; resuming from the current directory",
+                style::scrub(c)
             );
             None
         }
@@ -921,7 +862,10 @@ mod query {
     use txcript::search::{DocKey, DocMatch, Extracted, Index, Origin, Query};
     use txcript::{HarnessId, local};
 
-    type Sessions = HashMap<(HarnessId, String), local::Session>;
+    // Keyed by the full DocKey — source included — so two sessions sharing a
+    // (harness, id), as Claude Code writes when one session is resumed from
+    // another cwd, both stay reachable instead of one overwriting the other.
+    type Sessions = HashMap<DocKey, local::Session>;
 
     /// Build the same filtered index used by the CLI for the MCP search tool.
     pub(super) fn index_for(from: Option<HarnessId>, cwd: Option<&std::path::Path>) -> Index {
@@ -948,11 +892,10 @@ mod query {
                 None => Ok(std::process::ExitCode::SUCCESS),
                 Some(key) => {
                     let session = sessions
-                        .get(&(key.harness, key.id.clone()))
+                        .get(&key)
                         .ok_or("internal error: picked session not found")?;
                     drop(index);
-                    // The picker never moves: it offers no way to opt in.
-                    super::continue_session(session, with, None, None, true, false)
+                    super::continue_session(session, with, None, None, true)
                 }
             },
         }
@@ -993,6 +936,7 @@ mod query {
                             let key = DocKey {
                                 harness: scoped[i].harness,
                                 id: scoped[i].meta.id.clone(),
+                                source: Some(scoped[i].location()),
                             };
                             (i, Extracted::new(key, &common))
                         })
@@ -1027,7 +971,14 @@ mod query {
             .into_iter()
             .zip(&indexed)
             .filter_map(|(session, &ok)| {
-                ok.then(|| ((session.harness, session.meta.id.clone()), session))
+                ok.then(|| {
+                    let key = DocKey {
+                        harness: session.harness,
+                        id: session.meta.id.clone(),
+                        source: Some(session.location()),
+                    };
+                    (key, session)
+                })
             })
             .collect();
         spinner.finish();
@@ -1036,7 +987,7 @@ mod query {
 
     /// Print ranked hits for a pattern, colorized when stdout is a terminal.
     fn one_shot(index: &Index, pattern: &str) {
-        use std::io::IsTerminal;
+        use std::io::{IsTerminal, Write};
         let mut q = Query::fuzzy(pattern);
         q.limit = Some(20);
         q.hits_per_doc = Some(3);
@@ -1045,14 +996,22 @@ mod query {
             println!("no matches for `{pattern}`");
         } else {
             let color = std::io::stdout().is_terminal();
+            // A failed write means the reader is gone (`… | head`): stop
+            // quietly instead of panicking the way `println!` would.
+            let mut out = std::io::stdout().lock();
             for m in &matches {
-                println!("{}", doc_line(m, color));
+                if writeln!(out, "{}", doc_line(m, color)).is_err() {
+                    return;
+                }
                 for hit in &m.hits {
-                    println!(
+                    let line = format!(
                         "  [{:>11}] {}",
                         origin_label(hit.origin),
                         highlight(&hit.line, &hit.highlights, 120, color)
                     );
+                    if writeln!(out, "{line}").is_err() {
+                        return;
+                    }
                 }
             }
         }
@@ -1081,9 +1040,9 @@ mod query {
         format!(
             "{}  {}  {}  {}",
             crate::style::harness(m.key.harness, 0, color),
-            crate::style::dim(&m.key.id, color),
+            crate::style::dim(&crate::style::scrub(&m.key.id), color),
             crate::style::dim(&date.to_string(), color),
-            label
+            crate::style::scrub(&label)
         )
     }
 
@@ -1109,7 +1068,10 @@ mod query {
                 out.push_str(if now { "\x1b[1;31m" } else { "\x1b[0m" });
                 in_span = now;
             }
-            out.push(ch);
+            // Matched lines are transcript content: a control character here
+            // could drive the terminal. Same one-for-one swap as
+            // `style::scrub`, inline to keep the span indexes aligned.
+            out.push(if ch.is_control() { ' ' } else { ch });
         }
         if color && in_span {
             out.push_str("\x1b[0m");
@@ -1431,8 +1393,8 @@ mod query {
                 "{} \x1b[2m{} {:<8}\x1b[0m {:<24} ",
                 crate::style::harness(m.key.harness, 11, true),
                 m.meta.timestamp.format("%m-%d %H:%M"),
-                truncate_chars(&m.key.id, 8),
-                truncate_chars(&label, 24),
+                truncate_chars(&crate::style::scrub(&m.key.id), 8),
+                truncate_chars(&crate::style::scrub(&label), 24),
             );
             // 11 + 1 + 11 + 1 + 8 + 1 + 24 + 1 visible chars so far.
             let room = cols.saturating_sub(58);

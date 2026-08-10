@@ -89,7 +89,43 @@ fn key(harness: HarnessId, id: &str) -> DocKey {
     DocKey {
         harness,
         id: id.to_string(),
+        source: None,
     }
+}
+
+/// Two sessions sharing a `(harness, id)` — Claude Code writes the same
+/// sessionId into more than one project directory — must both stay indexed
+/// when their `source` differs, while a same-source re-insert still replaces.
+#[test]
+fn sessions_sharing_an_id_are_distinct_documents_by_source() {
+    let sourced = |source: &str| DocKey {
+        harness: HarnessId::ClaudeCode,
+        id: "dup-1".to_string(),
+        source: Some(source.to_string()),
+    };
+    let transcript = |body: &str| {
+        Transcript::new(
+            meta("dup-1", 0),
+            vec![message(Role::User, vec![text(body)])],
+        )
+    };
+
+    let mut index = Index::new();
+    index.insert(
+        sourced("/projects/a/dup-1.jsonl"),
+        &transcript("alpha copy"),
+    );
+    index.insert(sourced("/projects/b/dup-1.jsonl"), &transcript("beta copy"));
+    assert_eq!(index.len(), 2, "different sources are different documents");
+
+    let hits = index.query(&Query::fuzzy("copy"));
+    assert_eq!(hits.len(), 2, "both copies are searchable");
+
+    index.insert(
+        sourced("/projects/b/dup-1.jsonl"),
+        &transcript("beta copy revised"),
+    );
+    assert_eq!(index.len(), 2, "same source replaces, not duplicates");
 }
 
 #[test]

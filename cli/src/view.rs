@@ -43,6 +43,8 @@ pub fn cmd_view(source: &str, from: Option<HarnessId>) -> Result<ExitCode, Strin
     // `resolve` bounds-checked against `total`, so the render always lands.
     let rendered = text::to_text_fragment(&common, &span)
         .ok_or_else(|| format!("range is out of bounds — the session has {total} messages"))?;
-    print!("{rendered}");
+    // A failed write means the reader is gone (`txcript view … | head`):
+    // finish quietly instead of panicking the way `print!` would.
+    let _ = std::io::Write::write_all(&mut std::io::stdout(), rendered.as_bytes());
     Ok(ExitCode::SUCCESS)
 }

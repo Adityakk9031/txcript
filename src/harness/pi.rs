@@ -550,10 +550,13 @@ pub(crate) fn write_session(
     meta: &Meta,
     records: &[Record],
 ) -> Result<Saved<PathBuf>> {
+    let id = meta.id.clone();
+    // Callers are the pi and campfire stores; either way the id is the
+    // transcript's own.
+    super::checked_id_component("pi", &id)?;
     let cwd = meta.cwd.as_deref().unwrap_or_default();
     let dir = sessions_dir.join(encode_cwd(cwd));
     fs::create_dir_all(&dir)?;
-    let id = meta.id.clone();
     let file_ts = meta
         .timestamp
         .to_rfc3339_opts(SecondsFormat::Millis, true)
@@ -1079,7 +1082,10 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // `file_type` doesn't follow symlinks: a link pointing back at an
+            // ancestor would otherwise recurse forever. Symlinked directories
+            // are skipped; symlinked session files still list.
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
                 collect_jsonl(&path, out);
             } else if path.extension().is_some_and(|e| e == "jsonl") {
                 out.push(path);

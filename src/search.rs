@@ -207,10 +207,19 @@ pub struct Hit {
 }
 
 /// Identity of an indexed document: which harness's session it is.
+///
+/// `source` disambiguates distinct copies that share a `(harness, id)` —
+/// Claude Code, for one, writes the same session id into more than one
+/// project directory when a session is resumed from a different cwd — so
+/// both copies can be indexed side by side instead of one silently
+/// replacing the other. Callers whose ids are already unique may leave it
+/// `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DocKey {
     pub harness: HarnessId,
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl fmt::Display for DocKey {

@@ -1808,6 +1808,7 @@ impl Store for AntigravityStore {
         .into_iter()
         .find(|candidate| !candidate.is_empty())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
+        super::checked_id_component(Antigravity::NAME, &id)?;
 
         let conversations = self.conversations_dir();
         fs::create_dir_all(&conversations)?;
@@ -1832,7 +1833,11 @@ impl Store for AntigravityStore {
     }
 
     /// The `Ref` is the conversation database; deleting removes it, its WAL
-    /// sidecars, and the session's brain directory.
+    /// sidecars, and the session's brain directory. Guarded on shape and
+    /// containment: the database must resolve (symlinks and all) to a file
+    /// directly under `<root>/conversations`, and its stem — which names the
+    /// brain directory — must be a plain path component, so a stale or
+    /// foreign reference never removes files outside the configured root.
     fn delete(&self, reference: &PathBuf) -> Result<()> {
         let id = reference
             .file_stem()
@@ -1842,9 +1847,21 @@ impl Store for AntigravityStore {
                 harness: Antigravity::NAME,
                 detail: format!("not a conversation db path: {}", reference.display()),
             })?;
-        fs::remove_file(reference)?;
+        super::checked_id_component(Antigravity::NAME, &id)?;
+        let canon = reference.canonicalize()?;
+        let conversations = self.conversations_dir().canonicalize()?;
+        if canon.parent() != Some(conversations.as_path()) {
+            return Err(Error::Malformed {
+                harness: Antigravity::NAME,
+                detail: format!(
+                    "refusing to delete outside the conversations root: {}",
+                    reference.display()
+                ),
+            });
+        }
+        fs::remove_file(&canon)?;
         for suffix in ["db-wal", "db-shm"] {
-            let sidecar = reference.with_extension(suffix);
+            let sidecar = canon.with_extension(suffix);
             if sidecar.exists() {
                 fs::remove_file(sidecar)?;
             }
@@ -2046,8 +2063,12 @@ fn read_db(db_path: &Path, root: &Path) -> Result<AntigravityDb> {
 
 #[cfg(feature = "opencode")]
 fn write_db(db_path: &Path, body: &AntigravityDb) -> Result<()> {
-    let conn = Connection::open(db_path).map_err(sqlite_err)?;
-    conn.execute_batch(
+    let mut conn = Connection::open(db_path).map_err(sqlite_err)?;
+    // One transaction around the wipe and every insert: a mid-write failure
+    // (disk full, the CLI holding the database busy) rolls back to the
+    // original store instead of leaving it truncated.
+    let tx = conn.transaction().map_err(sqlite_err)?;
+    tx.execute_batch(
         // user_version 1 matches the CLI's own migration stamp; a zero
         // version makes the CLI treat the database as uninitialized.
         "PRAGMA user_version = 1;\n\
@@ -2077,7 +2098,7 @@ fn write_db(db_path: &Path, body: &AntigravityDb) -> Result<()> {
     .map_err(sqlite_err)?;
 
     for row in &body.trajectory_meta {
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO trajectory_meta \
              (trajectory_id, cascade_id, trajectory_type, source) VALUES (?1, ?2, ?3, ?4)",
             params![
@@ -2090,7 +2111,7 @@ fn write_db(db_path: &Path, body: &AntigravityDb) -> Result<()> {
         .map_err(sqlite_err)?;
     }
     for step in &body.steps {
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO steps (idx, step_type, status, has_subtrajectory, metadata, \
              error_details, permissions, task_details, render_info, step_payload, step_format) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -2111,7 +2132,7 @@ fn write_db(db_path: &Path, body: &AntigravityDb) -> Result<()> {
         .map_err(sqlite_err)?;
     }
     for row in &body.gen_metadata {
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO gen_metadata (idx, data, size) VALUES (?1, ?2, ?3)",
             params![row.idx, row.data, row.size],
         )
@@ -2124,7 +2145,7 @@ fn write_db(db_path: &Path, body: &AntigravityDb) -> Result<()> {
     ];
     for (table, rows) in indexed {
         for row in rows {
-            conn.execute(
+            tx.execute(
                 &format!("INSERT OR REPLACE INTO {table} (idx, data) VALUES (?1, ?2)"),
                 params![row.idx, row.data],
             )
@@ -2132,13 +2153,13 @@ fn write_db(db_path: &Path, body: &AntigravityDb) -> Result<()> {
         }
     }
     for row in &body.trajectory_metadata_blob {
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO trajectory_metadata_blob (id, data) VALUES (?1, ?2)",
             params![row.id, row.data],
         )
         .map_err(sqlite_err)?;
     }
-    Ok(())
+    tx.commit().map_err(sqlite_err)
 }
 
 // Passed point-free to `map_err`, which hands over the error by value.

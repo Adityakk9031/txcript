@@ -147,16 +147,20 @@ fn load_files<C, S>(
 ) where
     C: Codec,
     S: Store<H = C>,
+    S::Ref: std::fmt::Debug,
 {
     // A harness that isn't installed on this machine has no root to scan.
     if let Some(store) = store {
         for found in store.discover().unwrap_or_default() {
+            // Keyed by source too: sessions sharing an id (Claude Code
+            // duplicates a sessionId across project dirs) must all count.
+            let source = format!("{:?}", found.reference);
             match store
                 .load(&found.reference)
                 .and_then(|native| C::to_common(&native))
             {
                 Ok(common) => {
-                    insert(index, harness, found.meta.id, &common);
+                    insert(index, harness, found.meta.id, source, &common);
                     *loaded += 1;
                 }
                 Err(_) => *failed += 1,
@@ -165,6 +169,19 @@ fn load_files<C, S>(
     }
 }
 
-fn insert(index: &mut Index, harness: HarnessId, id: String, common: &Transcript<Common>) {
-    index.insert(DocKey { harness, id }, common);
+fn insert(
+    index: &mut Index,
+    harness: HarnessId,
+    id: String,
+    source: String,
+    common: &Transcript<Common>,
+) {
+    index.insert(
+        DocKey {
+            harness,
+            id,
+            source: Some(source),
+        },
+        common,
+    );
 }

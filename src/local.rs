@@ -230,7 +230,9 @@ pub struct Written {
 
 /// Persist a canonical transcript in `target`'s native, resumable format.
 /// `root` overrides the harness's default on-disk root (file-backed stores
-/// only; `OpenCode` always goes through `opencode import`).
+/// only; `OpenCode` always goes through `opencode import` into the live
+/// database, so a root override for it is refused rather than silently
+/// redirected).
 ///
 /// # Errors
 /// When conversion to the target fails or its store rejects the write.
@@ -323,6 +325,16 @@ pub fn write(
             common,
             |s| s.root,
         ),
+        // `opencode import` writes into the live database wherever it lives;
+        // honoring a root override is impossible, and ignoring it would send
+        // an "export" into the user's real store.
+        HarnessId::OpenCode if root.is_some() => Err(Error::Unconvertible {
+            harness: "opencode",
+            detail: "opencode sessions can only be imported into the live \
+                     opencode database (via `opencode import`); writing to \
+                     an alternate directory is not supported"
+                .to_string(),
+        }),
         HarnessId::OpenCode => write_opencode(common),
     }
 }
@@ -356,16 +368,9 @@ pub fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
         "TRANSCRIPT_{}_RESUME_CMD",
         harness.as_str().to_ascii_uppercase()
     );
-    let overridden = std::env::var(&key).ok().and_then(|template| {
-        let mut parts = template
-            .replace("{id}", id)
-            .split_whitespace()
-            .map(String::from)
-            .collect::<Vec<_>>()
-            .into_iter();
-        // Ignore empty override templates.
-        parts.next().map(|bin| (bin, parts.collect()))
-    });
+    let overridden = std::env::var(&key)
+        .ok()
+        .and_then(|template| apply_resume_template(&template, id));
     overridden.unwrap_or_else(|| {
         let id = id.to_string();
         match harness {
@@ -382,6 +387,21 @@ pub fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
     })
 }
 
+/// Expand a `TRANSCRIPT_<HARNESS>_RESUME_CMD` template into `(binary, args)`.
+///
+/// The template is split into argv entries *before* `{id}` is substituted:
+/// the id comes from the session file, so an id containing whitespace must
+/// stay a single argument rather than becoming extra flags. Empty templates
+/// expand to nothing (the override is ignored).
+fn apply_resume_template(template: &str, id: &str) -> Option<(String, Vec<String>)> {
+    let mut parts = template
+        .split_whitespace()
+        .map(|part| part.replace("{id}", id))
+        .collect::<Vec<_>>()
+        .into_iter();
+    parts.next().map(|bin| (bin, parts.collect()))
+}
+
 fn required<S>(store: Option<S>) -> Result<S> {
     store.ok_or_else(|| {
         Error::Io(std::io::Error::other(
@@ -394,5 +414,39 @@ fn mismatch(harness: HarnessId) -> Error {
     Error::Malformed {
         harness: "local",
         detail: format!("locator does not belong to {harness}"),
+    }
+}
+
+#[cfg(test)]
+mod resume_template_tests {
+    use super::apply_resume_template;
+
+    #[test]
+    fn id_is_substituted_after_argv_splitting() {
+        let (bin, args) =
+            apply_resume_template("claude --resume {id}", "abc --dangerously-skip-permissions")
+                .unwrap_or_else(|| panic!("template expands"));
+        assert_eq!(bin, "claude");
+        // The whole id — spaces, injected flag and all — is one argument.
+        assert_eq!(
+            args,
+            vec![
+                "--resume".to_string(),
+                "abc --dangerously-skip-permissions".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn id_embedded_in_a_flag_stays_one_argument() {
+        let (bin, args) = apply_resume_template("agent --resume={id}", "a b c")
+            .unwrap_or_else(|| panic!("template expands"));
+        assert_eq!(bin, "agent");
+        assert_eq!(args, vec!["--resume=a b c".to_string()]);
+    }
+
+    #[test]
+    fn empty_template_expands_to_nothing() {
+        assert!(apply_resume_template("   ", "id").is_none());
     }
 }

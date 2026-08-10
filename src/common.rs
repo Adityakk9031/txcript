@@ -501,6 +501,20 @@ mod tests {
         );
     }
 
+    /// An unknown key on an individual edit demotes the whole call to `Raw`,
+    /// exactly like an unknown key on the call itself — nothing is silently
+    /// dropped.
+    #[test]
+    fn multi_edit_with_unknown_edit_key_is_raw() {
+        let input = json!({
+            "file_path": "/f",
+            "edits": [{"old_string": "x", "new_string": "y", "surprise": 1}],
+        });
+        let tool = Tool::from_canonical("MultiEdit", input.clone());
+        assert!(matches!(tool, Tool::Raw { .. }), "got {tool:?}");
+        assert_eq!(tool.to_canonical(), ("MultiEdit".to_string(), input));
+    }
+
     /// Bash preserves optional fields such as description and timeout.
     #[test]
     fn bash_keeps_incidental_fields() {
@@ -512,7 +526,11 @@ mod tests {
 }
 
 /// One find/replace within a [`Tool::MultiEdit`].
+// deny_unknown_fields keeps the lossless contract: an edit carrying a key
+// this struct doesn't model must fail the typed parse so the whole call
+// demotes to `Tool::Raw`, instead of silently dropping the key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EditOp {
     pub old_string: String,
     pub new_string: String,

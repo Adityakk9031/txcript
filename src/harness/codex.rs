@@ -729,6 +729,8 @@ impl Store for CodexStore {
     }
 
     fn save(&self, transcript: &Transcript<Codex>) -> Result<Saved<PathBuf>> {
+        let id = transcript.meta.id.clone();
+        super::checked_id_component(Codex::NAME, &id)?;
         let t = &transcript.meta.timestamp;
         let dir = self
             .sessions_dir
@@ -736,7 +738,6 @@ impl Store for CodexStore {
             .join(format!("{:02}", t.month()))
             .join(format!("{:02}", t.day()));
         fs::create_dir_all(&dir)?;
-        let id = transcript.meta.id.clone();
         let compact = t.format("%Y-%m-%dT%H-%M-%S").to_string();
         let path = dir.join(format!("rollout-{compact}-{id}.jsonl"));
         fs::write(&path, Codex::to_text(transcript)?)?;
@@ -823,7 +824,10 @@ fn collect_rollouts(dir: &Path, out: &mut Vec<PathBuf>) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // `file_type` doesn't follow symlinks: a link pointing back at an
+            // ancestor would otherwise recurse forever. Symlinked directories
+            // are skipped; symlinked rollout files still list.
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
                 collect_rollouts(&path, out);
             } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
                 && name.starts_with("rollout-")

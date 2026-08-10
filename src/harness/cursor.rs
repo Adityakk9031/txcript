@@ -174,6 +174,7 @@ impl Store for CursorStore {
         } else {
             transcript.meta.id.clone()
         };
+        super::checked_id_component(Cursor::NAME, &id)?;
         let cwd = transcript
             .meta
             .cwd
@@ -201,17 +202,34 @@ impl Store for CursorStore {
     }
 
     /// The `Ref` is the session's `store.db`; deleting removes its parent
-    /// directory. Guarded on the file name to avoid deleting unrelated
-    /// directories.
+    /// directory. Guarded on shape and containment: the store file must
+    /// exist and its session directory must resolve (symlinks and all) to
+    /// `<chats_dir>/<workspace>/<id>`, so a stale or foreign reference never
+    /// removes an unrelated tree.
     fn delete(&self, reference: &PathBuf) -> Result<()> {
         let session_dir = reference
             .parent()
             .filter(|_| reference.file_name().is_some_and(|n| n == "store.db"))
+            .filter(|_| reference.is_file())
             .ok_or_else(|| Error::Malformed {
                 harness: "cursor",
                 detail: format!("not a session store.db path: {}", reference.display()),
             })?;
-        Ok(std::fs::remove_dir_all(session_dir)?)
+        let canon = session_dir.canonicalize()?;
+        let root = self.chats_dir.canonicalize()?;
+        let contained = canon
+            .strip_prefix(&root)
+            .is_ok_and(|rest| rest.components().count() == 2);
+        if !contained {
+            return Err(Error::Malformed {
+                harness: "cursor",
+                detail: format!(
+                    "refusing to delete outside the chats root: {}",
+                    reference.display()
+                ),
+            });
+        }
+        Ok(std::fs::remove_dir_all(canon)?)
     }
 
     fn fingerprints(&self, refs: &[PathBuf]) -> Result<HashMap<String, String>> {
@@ -297,8 +315,12 @@ fn read_db(db_path: &Path) -> Result<CursorDb> {
 
 #[cfg(feature = "opencode")]
 fn write_db(db_path: &Path, body: &CursorDb) -> Result<()> {
-    let conn = Connection::open(db_path).map_err(sqlite_err)?;
-    conn.execute_batch(
+    let mut conn = Connection::open(db_path).map_err(sqlite_err)?;
+    // One transaction around the wipe and every insert: a mid-write failure
+    // (disk full, the CLI holding the database busy) rolls back to the
+    // original store instead of leaving it truncated.
+    let tx = conn.transaction().map_err(sqlite_err)?;
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS blobs (id TEXT PRIMARY KEY, data BLOB);
          CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
          DELETE FROM blobs;
@@ -306,20 +328,20 @@ fn write_db(db_path: &Path, body: &CursorDb) -> Result<()> {
     )
     .map_err(sqlite_err)?;
     for blob in &body.blobs {
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO blobs (id, data) VALUES (?1, ?2)",
             params![blob.id, blob.data],
         )
         .map_err(sqlite_err)?;
     }
     for entry in &body.meta {
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
             params![entry.key, entry.value],
         )
         .map_err(sqlite_err)?;
     }
-    Ok(())
+    tx.commit().map_err(sqlite_err)
 }
 
 // Passed point-free to `map_err`, which hands over the error by value.

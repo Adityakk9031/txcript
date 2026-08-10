@@ -43,7 +43,7 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::common::{Block, ImageSource, Message, Meta, Role, StopReason, Tool, ToolOutput};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::harness::jsonl;
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
 
@@ -305,10 +305,14 @@ fn index_updates(updates: &[Value]) -> DisplayIndex {
                 let is_image = content.get("type").and_then(Value::as_str) == Some("image");
                 // Chunks of one prompt share a promptIndex; without one, a
                 // text chunk opens a new prompt and an image joins the last.
+                // The index is untrusted input and sizes a Vec below, so a
+                // value no real log can reach (each prompt occupies at least
+                // one update line) is treated as absent, not allocated.
                 let slot = update
                     .pointer("/_meta/promptIndex")
                     .and_then(Value::as_u64)
                     .and_then(|i| usize::try_from(i).ok())
+                    .filter(|&i| i <= updates.len())
                     .unwrap_or_else(|| {
                         let started = idx.prompts.len();
                         if is_image {
@@ -1370,6 +1374,7 @@ impl Store for GrokStore {
         } else {
             meta.id.clone()
         };
+        super::checked_id_component(Grok::NAME, &id)?;
         let cwd = meta.cwd.clone().unwrap_or_default();
         let dir = self.sessions_dir.join(encode_cwd(&cwd)).join(&id);
         fs::create_dir_all(&dir)?;
@@ -1412,8 +1417,34 @@ impl Store for GrokStore {
     }
 
     /// A grok session is a self-contained directory; delete removes it whole.
+    /// Guarded on shape and containment: the directory must carry a
+    /// conversation log (the same sniff as `discover`) and resolve (symlinks
+    /// and all) to `<sessions_dir>/<project>/<id>`, so a stale or foreign
+    /// reference never removes an unrelated tree.
     fn delete(&self, reference: &PathBuf) -> Result<()> {
-        Ok(fs::remove_dir_all(reference)?)
+        if !(reference.join("updates.jsonl").is_file()
+            || reference.join("chat_history.jsonl").is_file())
+        {
+            return Err(Error::Malformed {
+                harness: Grok::NAME,
+                detail: format!("not a grok session directory: {}", reference.display()),
+            });
+        }
+        let canon = reference.canonicalize()?;
+        let root = self.sessions_dir.canonicalize()?;
+        let contained = canon
+            .strip_prefix(&root)
+            .is_ok_and(|rest| rest.components().count() == 2);
+        if !contained {
+            return Err(Error::Malformed {
+                harness: Grok::NAME,
+                detail: format!(
+                    "refusing to delete outside the sessions root: {}",
+                    reference.display()
+                ),
+            });
+        }
+        Ok(fs::remove_dir_all(canon)?)
     }
 
     fn fingerprints(&self, refs: &[PathBuf]) -> Result<HashMap<String, String>> {

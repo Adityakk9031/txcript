@@ -931,9 +931,20 @@ mod store {
             use std::process::{Command, Stdio};
 
             let export = serde_json::to_string(&transcript.body)?;
+            // A randomized name plus `create_new` keeps the staging file off
+            // any predictable, pre-plantable path (and never follows a
+            // symlink); 0600 keeps the exported transcript private in a
+            // world-shared temp dir.
             let tmp =
-                std::env::temp_dir().join(format!("opencode-import-{}.json", transcript.meta.id));
-            let mut file = std::fs::File::create(&tmp)?;
+                std::env::temp_dir().join(format!("opencode-import-{}.json", uuid::Uuid::new_v4()));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&tmp)?;
             file.write_all(export.as_bytes())?;
             drop(file);
 

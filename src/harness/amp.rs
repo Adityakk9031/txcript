@@ -1065,6 +1065,7 @@ impl Store for AmpStore {
                 harness: Amp::NAME,
                 detail: "thread has no id to name its file".to_string(),
             })?;
+        super::checked_id_component(Amp::NAME, &id)?;
         fs::create_dir_all(&self.threads_dir)?;
         let path = self.threads_dir.join(format!("{id}.json"));
         fs::write(&path, Amp::to_text(transcript)?)?;

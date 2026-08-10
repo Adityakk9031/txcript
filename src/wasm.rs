@@ -117,6 +117,7 @@ impl Searcher {
         let key = crate::search::DocKey {
             harness,
             id: id.to_string(),
+            source: None,
         };
         self.index.insert(key, &common);
         Ok(())
@@ -128,6 +129,7 @@ impl Searcher {
         let key = crate::search::DocKey {
             harness: parse_harness(harness)?,
             id: id.to_string(),
+            source: None,
         };
         Ok(self.index.remove(&key))
     }
