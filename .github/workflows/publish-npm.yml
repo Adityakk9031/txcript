@@ -1,13 +1,18 @@
 name: publish-npm
 
-# Publishes the WASM package to npm. Manual-only for now — automatic
-# publish on version tags is disabled until the npm pipeline is fixed.
-# Guards that the tag matches package.json before publishing.
+# Publishes the WASM package to npm via trusted publishing (OIDC) —
+# the txcript package on npm trusts this repo + workflow filename, so
+# no registry token is involved. Runs on version tags, with manual
+# dispatch (on a tag ref) as the fallback. Guards that the tag matches
+# package.json before publishing.
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   npm:
@@ -27,16 +32,16 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm >= 11.5.1; Node 24 can bundle older.
+      - run: npm install -g npm@latest
       - name: Tag matches package.json version
         run: |
           tag="${GITHUB_REF_NAME#v}"
           ver="$(node -p "require('./package.json').version")"
           echo "tag=$tag manifest=$ver"
           [ "$tag" = "$ver" ] || { echo "::error::tag $tag != package.json version $ver"; exit 1; }
-      # Build the wasm artifact into pkg/, then publish it.
+      # Build the wasm artifact into pkg/, then publish via OIDC.
       - run: bun run build
       - run: npm publish --access public --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
