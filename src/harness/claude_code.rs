@@ -208,17 +208,6 @@ impl Codec for ClaudeCode {
         };
         let mut records = Vec::with_capacity(transcript.body.len() + 1);
 
-        // A leading summary gives `claude --resume` a friendly title.
-        if let Some(title) = meta.title.as_deref().filter(|t| !t.is_empty()) {
-            records.push(Record::Summary(SummaryLine {
-                summary: title.to_string(),
-                extra: Map::from_iter([(
-                    "leafUuid".into(),
-                    Value::String(entry_uuid(&session_id, usize::MAX)),
-                )]),
-            }));
-        }
-
         // Ids of the commands written so far, so their output lands on a
         // `local_command` line instead of a stray `tool_result`.
         let mut command_ids = std::collections::HashSet::new();
@@ -282,6 +271,28 @@ impl Codec for ClaudeCode {
                 Role::Assistant => Record::Assistant(entry),
             });
             parent_uuid = Some(uuid);
+        }
+
+        // A leading summary gives `claude --resume` a friendly title — but its
+        // `leafUuid` must name a real user/assistant line in this file. Claude
+        // Code resolves a session by walking to the leaf the summaries point
+        // at; a summary whose leafUuid matches nothing leaves it with no leaf
+        // and the whole session reads as missing ("No conversation found with
+        // session ID"). A `local_command` line is not an eligible leaf either,
+        // so anchor to the last real turn.
+        if let Some(title) = meta.title.as_deref().filter(|t| !t.is_empty())
+            && let Some(leaf) = records.iter().rev().find_map(|record| match record {
+                Record::User(entry) | Record::Assistant(entry) => Some(entry.uuid.clone()),
+                _ => None,
+            })
+        {
+            records.insert(
+                0,
+                Record::Summary(SummaryLine {
+                    summary: title.to_string(),
+                    extra: Map::from_iter([("leafUuid".into(), Value::String(leaf))]),
+                }),
+            );
         }
 
         Ok(Transcript::new(meta.clone(), records))

@@ -287,6 +287,27 @@ fn from_common_is_deterministic() {
     assert_eq!(a, b);
 }
 
+/// Claude Code resolves `--resume <id>` by walking to the leaf its summary
+/// lines name. A `leafUuid` matching no line in the file leaves it with no
+/// leaf and the session reads as missing, so the summary must anchor to the
+/// last real turn — never to a synthetic uuid.
+#[test]
+fn summary_leaf_uuid_names_the_last_written_turn() {
+    let native = claude_code::ClaudeCode::from_common(&sample_common()).unwrap();
+    let lines = serde_json::to_value(&native.body).unwrap();
+    let lines = lines.as_array().unwrap();
+
+    let leaf = lines[0]["leafUuid"].as_str().unwrap();
+    assert_eq!(lines[0]["type"], "summary");
+
+    let last_turn = lines
+        .iter()
+        .rev()
+        .find(|line| line["type"] == "user" || line["type"] == "assistant")
+        .unwrap();
+    assert_eq!(last_turn["uuid"].as_str().unwrap(), leaf);
+}
+
 // ── local command envelopes ────────────────────────────────────────────
 
 /// Every shape Claude Code has written its local-command markup in, drawn from
