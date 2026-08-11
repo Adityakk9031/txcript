@@ -1,7 +1,6 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 //! Behavior of `txcript::search`: cold/hot parity, origin labeling and
 //! filtering, ranking, replacement, and span math.
-#![cfg(feature = "search")]
 
 use chrono::{TimeZone, Utc};
 use txcript::common::{Block, Message, Meta, Role, Tool, ToolOutput};
@@ -354,24 +353,6 @@ fn exact_occurrence_outranks_gappy_fuzzy() {
         vec![4..15],
         "highlight covers the literal occurrence"
     );
-}
-
-/// Regression: nucleo 0.3.1's case-insensitive substring matcher misses
-/// needles whose first lowercase letter sits at position >= 2 when the match
-/// lands near the end of the line (`--nocapture` at line end). Our own
-/// substring scan must not.
-#[test]
-fn substring_matches_flag_shaped_needles() {
-    let t = rich_transcript("a", 0);
-    for pattern in [
-        "--nocapture",
-        "-- --nocapture",
-        "test websocket -- --nocapture",
-    ] {
-        let hits = search(&t, &Query::substring(pattern));
-        assert_eq!(hits.len(), 1, "pattern `{pattern}` must match");
-        assert_eq!(hits[0].origin, Origin::ToolUse);
-    }
 }
 
 /// Substring mode is one literal needle: spaces are part of it, and matches

@@ -214,7 +214,10 @@ errors:
    `render_from_common`) and the doc-comment harness list.
 6. `Cargo.toml` — feature entry if a new dep; keep it out of the `wasm` build.
 7. `README.md` — supported-harness list, string id, WASM text-format note.
-8. `tests/<name>.rs` and a new hop in `tests/cross_harness.rs`.
+8. `tests/integration/<name>.rs` (declared in `tests/integration/main.rs`),
+   a new hop in `tests/integration/cross_harness.rs`, and a new
+   `assert_fixpoint` line in `tests/integration/properties.rs` — see
+   `tests/README.md` for the taxonomy.
 
 Repo style: hierarchical imports — import modules and qualify (`common::Tool`,
 `jsonl::parse`), never flatten items to the crate root. Clippy pedantic is on

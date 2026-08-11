@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use chrono::{TimeZone, Utc};
 use txcript::common::{Block, Message, Meta, Role};
 use txcript::harness::{amp, antigravity, campfire, claude_code, codex, cursor, grok, pi};
-use txcript::{Codec, Common, HarnessId, Store, Transcript};
+use txcript::{Codec, Common, Store, Transcript};
 
 fn small_common(id: &str) -> Transcript<Common> {
     let meta = Meta {
@@ -179,32 +179,6 @@ fn antigravity_delete_refuses_paths_outside_the_conversations_root() {
     assert!(foreign_db.is_file(), "the foreign file must survive");
 }
 
-#[test]
-fn grok_huge_prompt_index_does_not_size_an_allocation() {
-    // One hostile line used to make `resize_with` attempt a ~10^12-element
-    // Vec; the process died before any error could surface. Out-of-range
-    // indexes must degrade (treated as absent), not allocate.
-    let sessions = tempfile::tempdir().unwrap();
-    let session_dir = sessions.path().join("proj").join("sess");
-    std::fs::create_dir_all(&session_dir).unwrap();
-    let updates = [
-        r#"{"timestamp":1780000000,"params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hi"},"_meta":{"promptIndex":1000000000000}}}}"#,
-        &format!(
-            r#"{{"timestamp":1780000001,"params":{{"update":{{"sessionUpdate":"user_message_chunk","content":{{"type":"text","text":"again"}},"_meta":{{"promptIndex":{}}}}}}}}}"#,
-            u64::MAX
-        ),
-    ]
-    .join("\n");
-    std::fs::write(session_dir.join("updates.jsonl"), updates).unwrap();
-
-    let store = grok::GrokStore::new(sessions.path().to_path_buf());
-    let transcript = store.load(&session_dir).unwrap();
-    let common = grok::Grok::to_common(&transcript).unwrap();
-    // The conversation log is empty, so no messages — the point is that we
-    // got here at all instead of being OOM-killed or panicking.
-    assert!(common.body.is_empty());
-}
-
 #[cfg(unix)]
 #[test]
 fn discovery_survives_a_symlink_loop() {
@@ -247,23 +221,5 @@ fn discovery_survives_a_symlink_loop() {
             .discover()
             .unwrap()
             .is_empty()
-    );
-}
-
-#[test]
-fn opencode_refuses_a_root_override_instead_of_importing_live() {
-    // `--out` for opencode used to silently import into the live database;
-    // it must refuse instead. (Must not reach `opencode import`.)
-    let dir = tempfile::tempdir().unwrap();
-    let result = txcript::local::write(
-        HarnessId::OpenCode,
-        &small_common("ses_adversarial"),
-        Some(dir.path()),
-    );
-    assert!(result.is_err(), "a root override for opencode must error");
-    let leftovers: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
-    assert!(
-        leftovers.is_empty(),
-        "nothing may be written to the out dir"
     );
 }

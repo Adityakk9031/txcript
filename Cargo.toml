@@ -53,6 +53,8 @@ uuid = { version = "1.23.4", features = ["v4", "v5"] }
 wasm-bindgen = { version = "0.2.126", optional = true }
 
 [dev-dependencies]
+criterion = "0.8.2"
+proptest = "1.11.0"
 tempfile = "3.27.0"
 
 # cdylib for the WASM/C-ABI output; rlib so the cli crate and tests still
@@ -66,6 +68,17 @@ crate-type = ["cdylib", "rlib"]
 # builds fail on the example.
 [[example]]
 name = "search_bench"
+required-features = ["search"]
+
+# Criterion benches bring their own main; see tests/README.md for the
+# taxonomy. The search bench needs the feature for txcript::search.
+[[bench]]
+name = "codec"
+harness = false
+
+[[bench]]
+name = "search"
+harness = false
 required-features = ["search"]
 
 [features]
