@@ -294,8 +294,9 @@ impl FromStr for HarnessId {
             "pi" => Ok(HarnessId::Pi),
             "campfire" => Ok(HarnessId::Campfire),
             "cursor" | "cursor_cli" | "cursor-cli" | "cursorcli" => Ok(HarnessId::Cursor),
-            "cursor_desktop" | "cursor-desktop" | "cursordesktop" | "cursor_ide"
-            | "cursor-ide" => Ok(HarnessId::CursorDesktop),
+            "cursor_desktop" | "cursor-desktop" | "cursordesktop" | "cursor_ide" | "cursor-ide" => {
+                Ok(HarnessId::CursorDesktop)
+            }
             "grok" | "grok_cli" | "grok-cli" | "grokcli" | "grok_build" | "grok-build" => {
                 Ok(HarnessId::Grok)
             }

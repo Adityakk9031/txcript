@@ -584,7 +584,13 @@ fn bubble_skeleton() -> Map<String, Value> {
     m
 }
 
-fn new_bubble(cid: &str, i: usize, j: usize, bubble_type: u64, ts: DateTime<Utc>) -> Map<String, Value> {
+fn new_bubble(
+    cid: &str,
+    i: usize,
+    j: usize,
+    bubble_type: u64,
+    ts: DateTime<Utc>,
+) -> Map<String, Value> {
     let mut b = bubble_skeleton();
     b.insert("_v".into(), json!(3));
     b.insert("type".into(), json!(bubble_type));
@@ -703,12 +709,7 @@ fn bubbles_from_messages(cid: &str, messages: &[Message]) -> Vec<Map<String, Val
                             is_error,
                         } => {
                             if let Some(&idx) = pending.get(tool_use_id) {
-                                attach_result(
-                                    &mut bubbles[idx],
-                                    content,
-                                    *is_error,
-                                    msg.timestamp,
-                                );
+                                attach_result(&mut bubbles[idx], content, *is_error, msg.timestamp);
                             }
                         }
                         _ => {}
@@ -731,7 +732,7 @@ fn bubbles_from_messages(cid: &str, messages: &[Message]) -> Vec<Map<String, Val
             }
             Role::Assistant => {
                 for (j, block) in msg.content.iter().enumerate() {
-                    let mut b = new_bubble(cid,i, j, 2, msg.timestamp);
+                    let mut b = new_bubble(cid, i, j, 2, msg.timestamp);
                     if let Some(model) = &msg.model {
                         b.insert("modelInfo".into(), json!({ "modelName": model }));
                     }
@@ -760,10 +761,7 @@ fn bubbles_from_messages(cid: &str, messages: &[Message]) -> Vec<Map<String, Val
                             }
                             call.insert("name".into(), Value::from(name));
                             call.insert("toolCallId".into(), Value::from(id.clone()));
-                            call.insert(
-                                "params".into(),
-                                Value::from(compact(&input)),
-                            );
+                            call.insert("params".into(), Value::from(compact(&input)));
                             call.insert("rawArgs".into(), json!(""));
                             call.insert("status".into(), json!("started"));
                             call.insert("result".into(), json!(""));
@@ -903,7 +901,10 @@ fn header_entry(b: &Map<String, Value>) -> Value {
         if is_user {
             grouping.insert("isShortPlainText".into(), json!(text.len() < 100));
         } else {
-            grouping.insert("isKeptFinalAiVisibleOutsideWorkedForGroup".into(), json!(true));
+            grouping.insert(
+                "isKeptFinalAiVisibleOutsideWorkedForGroup".into(),
+                json!(true),
+            );
         }
     }
     json!({
@@ -1003,7 +1004,10 @@ impl CursorDesktopStore {
         let user = if cfg!(target_os = "macos") {
             home.join("Library/Application Support/Cursor/User")
         } else if cfg!(windows) {
-            home.join("AppData").join("Roaming").join("Cursor").join("User")
+            home.join("AppData")
+                .join("Roaming")
+                .join("Cursor")
+                .join("User")
         } else {
             home.join(".config/Cursor/User")
         };
@@ -1099,7 +1103,10 @@ impl Store for CursorDesktopStore {
         let mut conn = Connection::open(&db_path).map_err(sqlite_err)?;
         write_session(&mut conn, &id, &body)?;
         register_in_sidebar(&conn, &id, &transcript.meta, body.workspace_id.as_deref())?;
-        Ok(Saved { id: id.clone(), reference: id })
+        Ok(Saved {
+            id: id.clone(),
+            reference: id,
+        })
     }
 
     fn delete(&self, reference: &String) -> Result<()> {
@@ -1328,9 +1335,7 @@ fn register_in_sidebar(
         .unwrap_or_default();
     let project_id = projects
         .iter()
-        .find(|p| {
-            p.pointer("/workspace/uri/fsPath").and_then(Value::as_str) == Some(cwd)
-        })
+        .find(|p| p.pointer("/workspace/uri/fsPath").and_then(Value::as_str) == Some(cwd))
         .and_then(|p| p.get("id").and_then(Value::as_str))
         .map(str::to_string);
     let project_id = if let Some(existing) = project_id {

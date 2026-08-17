@@ -186,7 +186,10 @@ fn store_round_trip_is_lossless_on_disk() {
     let saved = store.save(&sample_transcript()).unwrap();
     assert_eq!(saved.id, CID);
     assert!(
-        dir.path().join("globalStorage").join("state.vscdb").is_file(),
+        dir.path()
+            .join("globalStorage")
+            .join("state.vscdb")
+            .is_file(),
         "save writes the app's database path shape"
     );
 
@@ -389,15 +392,13 @@ fn fixpoint_common() -> Transcript<Common> {
             },
             common::Message {
                 role: common::Role::Assistant,
-                content: vec![
-                    common::Block::ToolUse {
-                        id: "call-b".into(),
-                        tool: common::Tool::Raw {
-                            tool_name: "ask_question".into(),
-                            input: json!({"title": "Pick one", "questions": []}),
-                        },
+                content: vec![common::Block::ToolUse {
+                    id: "call-b".into(),
+                    tool: common::Tool::Raw {
+                        tool_name: "ask_question".into(),
+                        input: json!({"title": "Pick one", "questions": []}),
                     },
-                ],
+                }],
                 timestamp: t1,
                 model: None,
                 stop_reason: None,

@@ -170,8 +170,7 @@ fn conversation_survives_every_hop() {
         "cursor"
     );
 
-    let cursor_desktop =
-        convert::<cursor::Cursor, cursor_desktop::CursorDesktop>(&cursor).unwrap();
+    let cursor_desktop = convert::<cursor::Cursor, cursor_desktop::CursorDesktop>(&cursor).unwrap();
     assert_eq!(
         signature(&cursor_desktop::CursorDesktop::to_common(&cursor_desktop).unwrap()),
         expected,

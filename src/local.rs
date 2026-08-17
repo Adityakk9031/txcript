@@ -187,11 +187,11 @@ impl Session {
                 go(antigravity::AntigravityStore::default_root(), p)
             }
             #[cfg(feature = "opencode")]
-            #[cfg(feature = "opencode")]
             (HarnessId::CursorDesktop, Locator::Id(id)) => {
                 let store = required(cursor_desktop::CursorDesktopStore::default_root())?;
                 cursor_desktop::CursorDesktop::to_common(&store.load(id)?)
             }
+            #[cfg(feature = "opencode")]
             (HarnessId::OpenCode, Locator::Id(id)) => opencode::OpenCode::to_common(
                 &required(opencode::OpenCodeStore::default_db())?.load(id)?,
             ),

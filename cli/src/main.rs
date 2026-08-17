@@ -43,8 +43,7 @@ mod fragment;
 mod mcp;
 mod view;
 
-const HARNESSES: &str =
-    "harnesses: claude_code, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, amp, \
+const HARNESSES: &str = "harnesses: claude_code, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, amp, \
      antigravity";
 
 #[derive(Parser)]
@@ -452,16 +451,16 @@ mod style {
 
     const fn color(h: HarnessId) -> &'static str {
         match h {
-            HarnessId::ClaudeCode => "\x1b[33m",  // yellow
-            HarnessId::Codex => "\x1b[36m",       // cyan
-            HarnessId::OpenCode => "\x1b[32m",    // green
-            HarnessId::Pi => "\x1b[35m",          // magenta
-            HarnessId::Campfire => "\x1b[91m",    // bright red
+            HarnessId::ClaudeCode => "\x1b[33m",    // yellow
+            HarnessId::Codex => "\x1b[36m",         // cyan
+            HarnessId::OpenCode => "\x1b[32m",      // green
+            HarnessId::Pi => "\x1b[35m",            // magenta
+            HarnessId::Campfire => "\x1b[91m",      // bright red
             HarnessId::Cursor => "\x1b[34m",        // blue
             HarnessId::CursorDesktop => "\x1b[96m", // bright cyan
-            HarnessId::Grok => "\x1b[37m",        // white
-            HarnessId::Amp => "\x1b[95m",         // bright magenta
-            HarnessId::Antigravity => "\x1b[94m", // bright blue
+            HarnessId::Grok => "\x1b[37m",          // white
+            HarnessId::Amp => "\x1b[95m",           // bright magenta
+            HarnessId::Antigravity => "\x1b[94m",   // bright blue
         }
     }
 }
