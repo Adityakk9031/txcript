@@ -22,7 +22,9 @@
 //! parse as JSON (they come back as [`ToolOutput::Json`]).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+#[cfg(feature = "opencode")]
+use std::path::Path;
+use std::path::PathBuf;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
