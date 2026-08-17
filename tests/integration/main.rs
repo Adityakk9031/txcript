@@ -12,6 +12,7 @@ mod claude_code;
 mod codex;
 mod cross_harness;
 mod cursor;
+mod cursor_desktop;
 mod grok;
 mod opencode;
 mod path_safety;

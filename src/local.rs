@@ -21,6 +21,9 @@ use chrono::{DateTime, Utc};
 
 use crate::common::Meta;
 use crate::harness::{amp, antigravity, campfire, claude_code, codex, cursor, grok, pi};
+
+#[cfg(feature = "opencode")]
+use crate::harness::cursor_desktop;
 use crate::{Codec, Common, Error, HarnessId, Result, Store, Transcript};
 
 #[cfg(feature = "opencode")]
@@ -109,6 +112,18 @@ pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session>
 
     #[cfg(feature = "opencode")]
     {
+        on_store(HarnessId::CursorDesktop, out.len());
+        if let Some(store) = cursor_desktop::CursorDesktopStore::default_root() {
+            for d in store.discover().unwrap_or_default() {
+                out.push(Session {
+                    harness: HarnessId::CursorDesktop,
+                    meta: d.meta,
+                    // The database doesn't surface a per-session mtime.
+                    updated_at: None,
+                    locator: Locator::Id(d.reference),
+                });
+            }
+        }
         on_store(HarnessId::OpenCode, out.len());
         if let Some(store) = opencode::OpenCodeStore::default_db() {
             for d in store.discover().unwrap_or_default() {
@@ -172,6 +187,11 @@ impl Session {
                 go(antigravity::AntigravityStore::default_root(), p)
             }
             #[cfg(feature = "opencode")]
+            #[cfg(feature = "opencode")]
+            (HarnessId::CursorDesktop, Locator::Id(id)) => {
+                let store = required(cursor_desktop::CursorDesktopStore::default_root())?;
+                cursor_desktop::CursorDesktop::to_common(&store.load(id)?)
+            }
             (HarnessId::OpenCode, Locator::Id(id)) => opencode::OpenCode::to_common(
                 &required(opencode::OpenCodeStore::default_db())?.load(id)?,
             ),
@@ -205,6 +225,10 @@ impl Session {
             (HarnessId::Amp, Locator::Path(p)) => go(amp::AmpStore::default_root(), p),
             (HarnessId::Antigravity, Locator::Path(p)) => {
                 go(antigravity::AntigravityStore::default_root(), p)
+            }
+            #[cfg(feature = "opencode")]
+            (HarnessId::CursorDesktop, Locator::Id(id)) => {
+                required(cursor_desktop::CursorDesktopStore::default_root())?.delete(id)
             }
             #[cfg(feature = "opencode")]
             (HarnessId::OpenCode, Locator::Id(id)) => {
@@ -336,7 +360,33 @@ pub fn write(
                 .to_string(),
         }),
         HarnessId::OpenCode => write_opencode(common),
+        // The desktop app reads one fixed database; a root override names an
+        // alternate `User` directory rather than a session directory.
+        HarnessId::CursorDesktop => write_cursor_desktop(common, root),
     }
+}
+
+#[cfg(feature = "opencode")]
+fn write_cursor_desktop(common: &Transcript<Common>, root: Option<&Path>) -> Result<Written> {
+    let store = match root {
+        Some(dir) => cursor_desktop::CursorDesktopStore::new(dir.to_path_buf()),
+        None => required(cursor_desktop::CursorDesktopStore::default_root())?,
+    };
+    let native = cursor_desktop::CursorDesktop::from_common(common)?;
+    let saved = store.save(&native)?;
+    Ok(Written {
+        id: saved.id,
+        location: store.db_display(),
+    })
+}
+
+#[cfg(not(feature = "opencode"))]
+fn write_cursor_desktop(_: &Transcript<Common>, _: Option<&Path>) -> Result<Written> {
+    Err(Error::Unconvertible {
+        harness: "cursor_desktop",
+        detail: "Cursor desktop support not compiled in (enable the `opencode` feature)"
+            .to_string(),
+    })
 }
 
 #[cfg(feature = "opencode")]
@@ -380,6 +430,9 @@ pub fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
             HarnessId::Pi => ("pi".into(), vec!["--session".into(), id]),
             HarnessId::Campfire => ("campfire".into(), vec!["--session".into(), id]),
             HarnessId::Cursor => ("agent".into(), vec![format!("--resume={id}")]),
+            // No per-session CLI entry point: `cursor` opens the IDE, where
+            // the session is in the Agents sidebar.
+            HarnessId::CursorDesktop => ("cursor".into(), Vec::new()),
             HarnessId::Grok => ("grok".into(), vec!["--resume".into(), id]),
             HarnessId::Amp => ("amp".into(), vec!["threads".into(), "continue".into(), id]),
             HarnessId::Antigravity => ("agy".into(), vec![format!("--conversation={id}")]),

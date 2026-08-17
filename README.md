@@ -1,7 +1,7 @@
 # txcript
 
 Convert coding-agent session transcripts between Claude Code, Codex, OpenCode,
-pi, Campfire, Cursor, Grok CLI, Amp, and Antigravity.
+pi, Campfire, Cursor (CLI and desktop), Grok CLI, Amp, and Antigravity.
 
 <p align="center">
   <a href="https://claude.com/claude-code"><img src="https://github.com/anthropics.png?size=160" alt="Claude Code" height="48" width="48"></a>
@@ -27,7 +27,9 @@ Supported harnesses (string ids in parentheses, used by the CLI and WASM):
 - OpenCode (`opencode`)
 - pi (`pi`)
 - Campfire (`campfire`)
-- Cursor (`cursor`)
+- Cursor CLI (`cursor`)
+- Cursor desktop (`cursor_desktop`) — the IDE app's Agents sessions, read from
+  and written to its `state.vscdb` database
 - Grok CLI (`grok`)
 - Amp (`amp`) — convert *from* amp only: threads are server-side and the CLI
   has no import, so sessions can't be continued into amp
@@ -52,7 +54,7 @@ Three layers, smallest to largest:
 - `TextCodec` — `from_text` / `to_text`: parse/render a harness's native session
   text, no I/O.
 - `Store` — discover/load/save against a real backend (session directories, or
-  SQLite DBs for OpenCode and Cursor).
+  SQLite DBs for OpenCode and both Cursors).
 
 Convert in memory (no filesystem):
 
@@ -271,12 +273,13 @@ writeFileSync("session.jsonl", convert(input, "codex", "claude_code"));
 const common = JSON.parse(toCommon(input, "codex"));   // { meta, messages }
 const pi = fromCommon(JSON.stringify(common), "pi");
 
-harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor","grok","amp","antigravity"]
+harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor","cursor_desktop","grok","amp","antigravity"]
 ```
 
 Text-in / text-out: `input` is a harness's native session text (JSONL for
 claude_code/codex/pi/campfire, the `opencode export` JSON for opencode, a
-JSON export of Cursor's `store.db` for cursor, a JSON bundle of the
+JSON export of Cursor's `store.db` for cursor, a JSON dump of the session's
+`state.vscdb` rows for cursor_desktop, a JSON bundle of the
 session directory's files for grok, and the thread JSON document — the
 `amp threads export` shape — for amp, and a JSON dump of the conversation
 database — hex-encoded protobuf step blobs — for antigravity); the result is

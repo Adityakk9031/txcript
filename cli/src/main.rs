@@ -44,7 +44,8 @@ mod mcp;
 mod view;
 
 const HARNESSES: &str =
-    "harnesses: claude_code, codex, opencode, pi, campfire, cursor, grok, amp, antigravity";
+    "harnesses: claude_code, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, amp, \
+     antigravity";
 
 #[derive(Parser)]
 #[command(
@@ -456,7 +457,8 @@ mod style {
             HarnessId::OpenCode => "\x1b[32m",    // green
             HarnessId::Pi => "\x1b[35m",          // magenta
             HarnessId::Campfire => "\x1b[91m",    // bright red
-            HarnessId::Cursor => "\x1b[34m",      // blue
+            HarnessId::Cursor => "\x1b[34m",        // blue
+            HarnessId::CursorDesktop => "\x1b[96m", // bright cyan
             HarnessId::Grok => "\x1b[37m",        // white
             HarnessId::Amp => "\x1b[95m",         // bright magenta
             HarnessId::Antigravity => "\x1b[94m", // bright blue
