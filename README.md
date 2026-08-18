@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<p align="center">Convert coding-agent session transcripts between harness formats — and continue any session in any harness.</p>
+<p align="center">Convert coding-agent session transcripts between harness formats, and continue any session in any harness.</p>
 
 <p align="center">
   English | <a href="README.ja.md">日本語</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.zh-TW.md">繁體中文</a> | <a href="README.ko.md">한국어</a> | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.it.md">Italiano</a> | <a href="README.pt-BR.md">Português (Brasil)</a> | <a href="README.ru.md">Русский</a>
@@ -32,7 +32,7 @@
 </p>
 
 Start a session in Claude Code, hit a usage limit or a wall, and pick it up in
-Codex — with the full conversation, reasoning, and tool history intact:
+Codex with the full conversation, reasoning, and tool history intact:
 
 ```console
 $ txcript list
@@ -51,20 +51,20 @@ where available. It ships as a **Rust library**, a **CLI**, and a prebuilt
 
 ## Highlights
 
-- **9 harnesses, one model** — every format converts through
+- **9 harnesses, one model**: every format converts through
   `Transcript<Common>`, so adding a harness connects it to all the others.
-- **Byte-lossless round-trips** — loading and saving a session in its own
+- **Byte-lossless round-trips**: loading and saving a session in its own
   format reproduces it exactly.
-- **Continue anywhere** — `txcript continue <id> --with <harness>` rewrites a
+- **Continue anywhere**: `txcript continue <id> --with <harness>` rewrites a
   session into another harness's native format and launches it. The original
   is never modified.
-- **Search everything** — fuzzy/substring search across every session on the
+- **Search everything**: fuzzy/substring search across every session on the
   machine (fzf-style syntax, powered by [nucleo](https://github.com/helix-editor/nucleo)),
   as a library API, a one-shot CLI query, or an interactive picker.
-- **MCP server** — `txcript mcp` exposes read-only `list_sessions`,
+- **MCP server**: `txcript mcp` exposes read-only `list_sessions`,
   `search_sessions`, and `read_session` tools, so agents can mine past
   sessions as context.
-- **Documented formats** — every harness's on-disk format is written up in
+- **Documented formats**: every harness's on-disk format is written up in
   [`docs/formats/`](docs/formats), with provenance for each claim (official
   docs, source permalinks, or reverse-engineering notes).
 
@@ -143,15 +143,15 @@ txcript view <id>[#range]                # print a session as compact text
 `continue` hands the terminal to the harness when done (on Unix it `exec`s).
 Same-harness continues resume the original in place; `--with` re-synthesizes
 into another harness's native format first. A cross-harness continue leaves
-the original session where it was — what is written is always a copy; the
+the original session where it was: what is written is always a copy; the
 source is never modified or removed. Override the launch command per harness
 with `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template), e.g.
 `TRANSCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
 
 `view` prints a token-conscious text projection with a `── #N ──` rule
-numbering each message. `#range` names a 1-based, inclusive message range —
+numbering each message. `#range` names a 1-based, inclusive message range:
 `abc#7` is message 7, `abc#5-12`, `abc#5-` (from 5 on), `abc#-10` (through
-10) — and the printed ordinals are the ones ranges use, so what you see is
+10). The printed ordinals are the ones ranges use, so what you see is
 what you reference. `continue` accepts the same suffix and continues just
 those messages as a new session; ranges that cut a tool call away from its
 result are refused, with the nearest valid range suggested.
@@ -168,7 +168,7 @@ txcript query                            # fzf-style picker; Enter continues
 The picker is dependency-free (raw-mode ANSI): type to filter with fzf-style
 fuzzy syntax, arrows / ctrl-p/n to move, Enter to continue the selection in
 its own harness (or `--with`), Esc to cancel. Every row shows which kind of
-content matched — user text, assistant text, thinking, tool use, tool output,
+content matched: user text, assistant text, thinking, tool use, tool output,
 or session metadata.
 
 ### MCP server
@@ -206,11 +206,11 @@ txcript = "0.5"
 
 Three layers, smallest to largest:
 
-- `Codec` — `to_common` / `from_common` per harness; `convert::<A, B>` chains
+- `Codec`: `to_common` / `from_common` per harness; `convert::<A, B>` chains
   them through the canonical model.
-- `TextCodec` — `from_text` / `to_text`: parse/render a harness's native session
+- `TextCodec`: `from_text` / `to_text` to parse and render a harness's native session
   text, no I/O.
-- `Store` — discover/load/save against a real backend (session directories, or
+- `Store`: discover/load/save against a real backend (session directories, or
   SQLite DBs for OpenCode and Cursor).
 
 Convert in memory (no filesystem):
@@ -238,12 +238,12 @@ let codex = convert::<_, codex::Codex>(&claude)?;
 codex::CodexStore::default_root().expect("home dir").save(&codex)?;  // resumable on disk
 ```
 
-The canonical model is `Transcript<Common>` — `Meta` + `Vec<Message>`, where a
+The canonical model is `Transcript<Common>`: `Meta` + `Vec<Message>`, where a
 `Message` holds typed `Block`s (`Text`, `Thinking`, `ToolUse`, `ToolResult`,
 `Image`) and a typed `Tool` enum.
 
 A slash command the user ran at the harness is a `Tool::Command` on a user
-turn, with whatever the harness printed back as the paired `ToolResult` — so
+turn, with whatever the harness printed back as the paired `ToolResult`, so
 `/release patch` reads as a call rather than as the markup the harness happens
 to record it in. The leading `/` is what marks it canonically: no model-facing
 tool name has one. Boilerplate the harness regenerates on its own (Claude
@@ -287,7 +287,7 @@ text, and compact tool calls/results while omitting replay-only payloads such
 as encrypted reasoning, usage accounting, and inline image bytes.
 `to_text_fragment(&common, &span)` renders a `Span` of the body in the same
 format with `── #N ──` rules carrying each message's 1-based ordinal in the
-full session — the numbering `txcript view` prints.
+full session, the numbering `txcript view` prints.
 
 ## WASM module (Bun / Node / browsers)
 
@@ -319,9 +319,9 @@ harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor","grok
 Text-in / text-out: `input` is a harness's native session text (JSONL for
 claude_code/codex/pi/campfire, the `opencode export` JSON for opencode, a
 JSON export of Cursor's `store.db` for cursor, a JSON bundle of the session
-directory's files for grok, the thread JSON document — the
-`amp threads export` shape — for amp, and a JSON dump of the conversation
-database — hex-encoded protobuf step blobs — for antigravity); the result is
+directory's files for grok, the `amp threads export` JSON
+document for amp, and a JSON dump of the conversation database with
+hex-encoded protobuf step blobs for antigravity); the result is
 the target's native text. Invalid harness names or unparseable input throw a
 JS `Error`.
 
@@ -337,9 +337,9 @@ bun run build        # produces ./pkg
 ## Format documentation
 
 Not all of these transcript formats are documented by their vendors.
-[`docs/formats/`](docs/formats) has one document per harness — where sessions
-live on disk, how discovery finds them, a dissection of every part of the
-format, and its quirks — each tagged with the provenance of what it claims:
+[`docs/formats/`](docs/formats) has one document per harness covering where
+sessions live on disk, how discovery finds them, a dissection of every part
+of the format, and its quirks, each tagged with the provenance of what it claims:
 official documentation, the harness's own open-source serialization code
 (cited with commit-pinned permalinks), or reverse engineering.
 
