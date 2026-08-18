@@ -70,19 +70,39 @@ where available. It ships as a **Rust library**, a **CLI**, and a prebuilt
 
 ## Supported harnesses
 
-| Harness | id | Format doc | Notes |
-|---|---|---|---|
-| [Claude Code](https://claude.com/claude-code) | `claude_code` | [claude-code.md](docs/formats/claude-code.md) | |
-| [Codex](https://github.com/openai/codex) | `codex` | [codex.md](docs/formats/codex.md) | |
-| [OpenCode](https://opencode.ai) | `opencode` | [opencode.md](docs/formats/opencode.md) | |
-| [pi](https://pi.dev) | `pi` | [pi.md](docs/formats/pi.md) | |
-| Campfire | `campfire` | [campfire.md](docs/formats/campfire.md) | |
-| [Cursor](https://cursor.com) | `cursor` | [cursor.md](docs/formats/cursor.md) | |
-| [Grok CLI](https://github.com/xai-org/grok-build) | `grok` | [grok.md](docs/formats/grok.md) | |
-| [Amp](https://ampcode.com) | `amp` | [amp.md](docs/formats/amp.md) | Convert *from* only — threads are server-side and the CLI has no import |
-| [Antigravity](https://antigravity.google) | `antigravity` | [antigravity.md](docs/formats/antigravity.md) | |
+Every harness converts through the same canonical model, so adding one connects
+it to all the others:
 
-The string ids are what the CLI and WASM APIs take.
+```mermaid
+flowchart LR
+    claude["Claude Code"] <--> common(("Transcript&lt;Common&gt;"))
+    codex["Codex"] <--> common
+    opencode["OpenCode"] <--> common
+    pi["pi"] <--> common
+    campfire["Campfire"] <--> common
+    common <--> cursor["Cursor"]
+    common <--> grok["Grok CLI"]
+    common <--> antigravity["Antigravity"]
+    amp["Amp"] --> common
+```
+
+Discovery, listing, search, `view`, and byte-lossless native round-trips work
+for all nine. The string ids are what the CLI and WASM APIs take.
+
+| Harness | id | Sessions on disk | Native format | Convert | Continue into | Doc |
+|---|---|---|---|:---:|:---:|---|
+| [Claude Code](https://claude.com/claude-code) | `claude_code` | `~/.claude/projects/` | JSONL | ⇄ | ✓ | [spec](docs/formats/claude-code.md) |
+| [Codex](https://github.com/openai/codex) | `codex` | `~/.codex/sessions/` | rollout JSONL | ⇄ | ✓ | [spec](docs/formats/codex.md) |
+| [OpenCode](https://opencode.ai) | `opencode` | `~/.local/share/opencode/opencode.db` | SQLite | ⇄ | ✓ | [spec](docs/formats/opencode.md) |
+| [pi](https://pi.dev) | `pi` | `~/.pi/agent/sessions/` | JSONL | ⇄ | ✓ | [spec](docs/formats/pi.md) |
+| Campfire | `campfire` | `~/.campfire/agent/sessions/` | JSONL | ⇄ | ✓ | [spec](docs/formats/campfire.md) |
+| [Cursor](https://cursor.com) | `cursor` | `~/.cursor/chats/` | SQLite (`store.db`) | ⇄ | ✓ | [spec](docs/formats/cursor.md) |
+| [Grok CLI](https://github.com/xai-org/grok-build) | `grok` | `~/.grok/sessions/` | session dir (JSON) | ⇄ | ✓ | [spec](docs/formats/grok.md) |
+| [Amp](https://ampcode.com) | `amp` | `~/.local/share/amp/threads/` | thread JSON | → | — <sup>1</sup> | [spec](docs/formats/amp.md) |
+| [Antigravity](https://antigravity.google) | `antigravity` | `~/.gemini/antigravity-cli/` | SQLite (protobuf) | ⇄ | ✓ | [spec](docs/formats/antigravity.md) |
+
+<sup>1</sup> Amp threads are server-side and the CLI has no import: sessions
+convert *from* Amp, but can't be continued into it.
 
 ## Install
 
