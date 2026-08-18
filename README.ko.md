@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<p align="center">코딩 에이전트 세션 트랜스크립트를 하네스 형식 간에 변환하고 — 어떤 세션이든 어떤 하네스에서든 이어서 진행하세요.</p>
+<p align="center">txcript는 코딩 에이전트 간에 세션을 옮기기 위한 라이브러리입니다.</p>
 
 <p align="center">
   <a href="README.md">English</a> | <a href="README.ja.md">日本語</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.zh-TW.md">繁體中文</a> | 한국어 | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.it.md">Italiano</a> | <a href="README.pt-BR.md">Português (Brasil)</a> | <a href="README.ru.md">Русский</a>

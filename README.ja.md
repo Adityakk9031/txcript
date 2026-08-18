@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<p align="center">コーディングエージェントのセッショントランスクリプトをハーネス形式間で変換 — そして任意のセッションを任意のハーネスで続行。</p>
+<p align="center">txcript は、コーディングエージェント間でセッションを移動するためのライブラリです。</p>
 
 <p align="center">
   <a href="README.md">English</a> | 日本語 | <a href="README.zh-CN.md">简体中文</a> | <a href="README.zh-TW.md">繁體中文</a> | <a href="README.ko.md">한국어</a> | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.it.md">Italiano</a> | <a href="README.pt-BR.md">Português (Brasil)</a> | <a href="README.ru.md">Русский</a>
