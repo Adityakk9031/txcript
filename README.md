@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<p align="center">A library for moving sessions between coding agents</p>
+<p align="center">A library for moving sessions between harnesses</p>
 
 <p align="center">
   English | <a href="README.ja.md">日本語</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.zh-TW.md">繁體中文</a> | <a href="README.ko.md">한국어</a> | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.it.md">Italiano</a> | <a href="README.pt-BR.md">Português (Brasil)</a> | <a href="README.ru.md">Русский</a>
@@ -20,19 +20,24 @@
 </p>
 
 <p align="center">
-  <a href="https://claude.com/claude-code"><img src="https://github.com/anthropics.png?size=160" alt="Claude Code" height="44" width="44"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://claude.com/claude-code"><img src="docs/assets/claude-icon.svg" alt="Claude Code" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://github.com/openai/codex"><img src="https://github.com/openai.png?size=160" alt="Codex" height="44" width="44"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://opencode.ai"><img src="https://opencode.ai/apple-touch-icon-v3.png" alt="OpenCode" height="44" width="44"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://pi.dev"><img src="https://pi.dev/logo-auto.svg" alt="pi" height="44" width="44"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://cursor.com"><img src="https://github.com/cursor.png?size=160" alt="Cursor" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://github.com/xai-org/grok-build"><img src="https://github.com/xai-org.png?size=160" alt="Grok CLI" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://ampcode.com"><img src="https://ampcode.com/app-icon.png?v=3" alt="Amp" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://antigravity.google"><img src="https://github.com/google-antigravity.png?size=160" alt="Antigravity" height="44" width="44"></a>
 </p>
 
-Start a session in Claude Code, hit a usage limit or a wall, and pick it up in
-Codex with the full conversation, reasoning, and tool history intact:
+Start a session in Claude Code, hit a usage limit or a wall, and pick it up in Codex with the full conversation, reasoning, and tool history intact:
 
 ```console
 $ txcript list
@@ -43,35 +48,18 @@ $ txcript list
 $ txcript continue 9f3a21 --with codex    # re-synthesize into Codex, then launch it
 ```
 
-txcript maps each harness's native transcript format through a typed common
-model. Native load/save is byte-lossless; cross-harness conversion preserves
-messages, reasoning, tool calls, tool results, images, metadata, and usage
-where available. It ships as a **Rust library**, a **CLI**, and a prebuilt
-**WASM module** for Bun, Node, and browsers.
+txcript maps each harness's native transcript format through a typed common model. Native load/save is byte-lossless; cross-harness conversion preserves messages, reasoning, tool calls, tool results, images, metadata, and usage where available. It ships as a [**CLI**](#cli), a [**Rust crate**](#rust-crate), and an [**npm package**](#npm-package).
 
 ## Highlights
 
-- **9 harnesses, one model**: every format converts through
-  `Transcript<Common>`, so adding a harness connects it to all the others.
-- **Byte-lossless round-trips**: loading and saving a session in its own
-  format reproduces it exactly.
-- **Continue anywhere**: `txcript continue <id> --with <harness>` rewrites a
-  session into another harness's native format and launches it. The original
-  is never modified.
-- **Search everything**: fuzzy/substring search across every session on the
-  machine (fzf-style syntax, powered by [nucleo](https://github.com/helix-editor/nucleo)),
-  as a library API, a one-shot CLI query, or an interactive picker.
-- **MCP server**: `txcript mcp` exposes read-only `list_sessions`,
-  `search_sessions`, and `read_session` tools, so agents can mine past
-  sessions as context.
-- **Documented formats**: every harness's on-disk format is written up in
-  [`docs/formats/`](docs/formats), with provenance for each claim (official
-  docs, source permalinks, or reverse-engineering notes).
+- **10 harnesses, one model**: every format converts through `Transcript<Common>`, so adding a harness connects it to all the others.
+- **Byte-lossless round-trips**: loading and saving a session in its own format reproduces it exactly.
+- **Continue anywhere**: `txcript continue <id> --with <harness>` rewrites a session into another harness's native format and launches it. The original is never modified.
+- **Search everything**: fuzzy/substring search across every session on the machine (fzf-style syntax, powered by [nucleo](https://github.com/helix-editor/nucleo)), as a library API, a one-shot CLI query, or an interactive picker.
+- **MCP server**: `txcript mcp` exposes read-only `list_sessions`, `search_sessions`, and `read_session` tools, so agents can mine past sessions as context.
+- **Documented formats**: every harness's on-disk format is written up in [`docs/formats/`](docs/formats), with provenance for each claim (official docs, source permalinks, or reverse-engineering notes).
 
 ## Supported harnesses
-
-Every harness converts through the same canonical model, so adding one connects
-it to all the others:
 
 ```mermaid
 flowchart LR
@@ -80,14 +68,14 @@ flowchart LR
     opencode["OpenCode"] <--> common
     pi["pi"] <--> common
     campfire["Campfire"] <--> common
-    common <--> cursor["Cursor"]
+    common <--> cursor["Cursor CLI"]
+    common <--> cursordesktop["Cursor desktop"]
     common <--> grok["Grok CLI"]
     common <--> antigravity["Antigravity"]
     amp["Amp"] --> common
 ```
 
-Discovery, listing, search, `view`, and byte-lossless native round-trips work
-for all nine. The string ids are what the CLI and WASM APIs take.
+Discovery, listing, search, `view`, and native round-trips work for every harness. The `id` strings are what the CLI and WASM APIs take.
 
 | Harness | id | Sessions on disk | Native format | Convert | Continue into | Doc |
 |---|---|---|---|:---:|:---:|---|
@@ -95,14 +83,14 @@ for all nine. The string ids are what the CLI and WASM APIs take.
 | [Codex](https://github.com/openai/codex) | `codex` | `~/.codex/sessions/` | rollout JSONL | ⇄ | ✓ | [spec](docs/formats/codex.md) |
 | [OpenCode](https://opencode.ai) | `opencode` | `~/.local/share/opencode/opencode.db` | SQLite | ⇄ | ✓ | [spec](docs/formats/opencode.md) |
 | [pi](https://pi.dev) | `pi` | `~/.pi/agent/sessions/` | JSONL | ⇄ | ✓ | [spec](docs/formats/pi.md) |
-| Campfire | `campfire` | `~/.campfire/agent/sessions/` | JSONL | ⇄ | ✓ | [spec](docs/formats/campfire.md) |
-| [Cursor](https://cursor.com) | `cursor` | `~/.cursor/chats/` | SQLite (`store.db`) | ⇄ | ✓ | [spec](docs/formats/cursor.md) |
-| [Grok CLI](https://github.com/xai-org/grok-build) | `grok` | `~/.grok/sessions/` | session dir (JSON) | ⇄ | ✓ | [spec](docs/formats/grok.md) |
+| [Campfire](docs/formats/campfire.md) | `campfire` | `~/.campfire/agent/sessions/` | JSONL | ⇄ | ✓ | [spec](docs/formats/campfire.md) |
+| [Cursor CLI](https://cursor.com/cli) | `cursor` | `~/.cursor/chats/` | SQLite | ⇄ | ✓ | [spec](docs/formats/cursor.md) |
+| [Cursor desktop](https://cursor.com) | `cursor_desktop` | `<Cursor User dir>/globalStorage/` | SQLite | ⇄ | ✓ | — |
+| [Grok CLI](https://github.com/xai-org/grok-build) | `grok` | `~/.grok/sessions/` | JSON session dir | ⇄ | ✓ | [spec](docs/formats/grok.md) |
 | [Amp](https://ampcode.com) | `amp` | `~/.local/share/amp/threads/` | thread JSON | → | — <sup>1</sup> | [spec](docs/formats/amp.md) |
-| [Antigravity](https://antigravity.google) | `antigravity` | `~/.gemini/antigravity-cli/` | SQLite (protobuf) | ⇄ | ✓ | [spec](docs/formats/antigravity.md) |
+| [Antigravity](https://antigravity.google) | `antigravity` | `~/.gemini/antigravity-cli/` | SQLite | ⇄ | ✓ | [spec](docs/formats/antigravity.md) |
 
-<sup>1</sup> Amp threads are server-side and the CLI has no import: sessions
-convert *from* Amp, but can't be continued into it.
+<sup>1</sup> Amp threads are server-side and the CLI has no import: sessions convert *from* Amp, but can't be continued into it.
 
 ## Install
 
@@ -113,13 +101,13 @@ cargo install --git https://github.com/skillsynchq/txcript txcript-cli
 # or from a checkout: cargo install --path cli
 ```
 
-**Rust library**:
+**Rust crate**:
 
 ```sh
 cargo add txcript
 ```
 
-**JS / TS** (prebuilt WASM, no Rust toolchain needed):
+**npm package** (prebuilt WASM, no Rust toolchain needed):
 
 ```sh
 bun add txcript     # or: npm install txcript
@@ -140,21 +128,20 @@ txcript view <id>[#range]                # print a session as compact text
     [--from <harness>]                    #   scope the id lookup to one harness
 ```
 
-`continue` hands the terminal to the harness when done (on Unix it `exec`s).
-Same-harness continues resume the original in place; `--with` re-synthesizes
-into another harness's native format first. A cross-harness continue leaves
-the original session where it was: what is written is always a copy; the
-source is never modified or removed. Override the launch command per harness
-with `TRANSCRIPT_<HARNESS>_RESUME_CMD` (a `{id}` template), e.g.
-`TRANSCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
+`continue` writes the session where the target harness keeps its sessions, then launches that harness on it, handing over the terminal:
 
-`view` prints a token-conscious text projection with a `── #N ──` rule
-numbering each message. `#range` names a 1-based, inclusive message range:
-`abc#7` is message 7, `abc#5-12`, `abc#5-` (from 5 on), `abc#-10` (through
-10). The printed ordinals are the ones ranges use, so what you see is
-what you reference. `continue` accepts the same suffix and continues just
-those messages as a new session; ranges that cut a tool call away from its
-result are refused, with the nearest valid range suggested.
+- Same-harness: resumes the original in place.
+- Cross-harness (`--with`): re-synthesizes the session into the target's native format. What is written is always a copy; the source session is never modified or removed.
+- The launch command is per-harness and overridable: set `TRANSCRIPT_<HARNESS>_RESUME_CMD` to a `{id}` template, e.g. `TRANSCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
+
+`view` prints the session as compact text, each message numbered by a `── #N ──` rule. `#range` selects messages by those printed ordinals, 1-based and inclusive:
+
+- `abc#7`: message 7 only
+- `abc#5-12`: messages 5 through 12
+- `abc#5-`: message 5 to the end
+- `abc#-10`: start through message 10
+
+`continue` accepts the same suffix and continues just those messages as a new session. A range that would cut a tool call away from its result is refused, and the error suggests the nearest valid range.
 
 ### Search
 
@@ -165,11 +152,7 @@ txcript query                            # fzf-style picker; Enter continues
     [--with <harness>]                   #   continue the pick in <harness>
 ```
 
-The picker is dependency-free (raw-mode ANSI): type to filter with fzf-style
-fuzzy syntax, arrows / ctrl-p/n to move, Enter to continue the selection in
-its own harness (or `--with`), Esc to cancel. Every row shows which kind of
-content matched: user text, assistant text, thinking, tool use, tool output,
-or session metadata.
+The picker is dependency-free (raw-mode ANSI): type to filter with fzf-style fuzzy syntax, arrows / ctrl-p/n to move, Enter to continue the selection in its own harness (or `--with`), Esc to cancel. Every row shows which kind of content matched: user text, assistant text, thinking, tool use, tool output, or session metadata.
 
 ### MCP server
 
@@ -177,15 +160,13 @@ or session metadata.
 txcript mcp                              # stdio transport
 ```
 
-Exposes exactly three read-only tools; their optional filters match the CLI:
+Exposes three read-only tools; their optional filters match the CLI:
 
 - `list_sessions(from?, cwd?)`
 - `search_sessions(pattern, from?, cwd?)`
 - `read_session(id, from?)`
 
-Omitting `from` includes every harness. Omitting `cwd` applies no directory
-filter, including sessions without a recorded working directory; when `cwd` is
-present, those sessions do not match.
+<sub>\* Omitting `from` includes every harness; omitting `cwd` applies no directory filter. Sessions without a recorded working directory match only when `cwd` is omitted.</sub>
 
 ### Shell completions
 
@@ -195,23 +176,20 @@ source <(txcript completion bash)               # bash, ad hoc
 txcript completion fish > ~/.config/fish/completions/txcript.fish
 ```
 
-## Rust library
+## Rust crate
 
 ```toml
 [dependencies]
-txcript = "0.5"
+txcript = "0.6"
 # Drops the OpenCode SQLite store (rusqlite); the OpenCode codec stays available.
-# txcript = { version = "0.5", default-features = false }
+# txcript = { version = "0.6", default-features = false }
 ```
 
 Three layers, smallest to largest:
 
-- `Codec`: `to_common` / `from_common` per harness; `convert::<A, B>` chains
-  them through the canonical model.
-- `TextCodec`: `from_text` / `to_text` to parse and render a harness's native session
-  text, no I/O.
-- `Store`: discover/load/save against a real backend (session directories, or
-  SQLite DBs for OpenCode and both Cursors).
+- `Codec`: `to_common` / `from_common` per harness; `convert::<A, B>` chains them through the canonical model.
+- `TextCodec`: `from_text` / `to_text` to parse and render a harness's native session text, no I/O.
+- `Store`: discover/load/save against a real backend (session directories, or SQLite DBs for OpenCode and both Cursors).
 
 Convert in memory (no filesystem):
 
@@ -238,21 +216,13 @@ let codex = convert::<_, codex::Codex>(&claude)?;
 codex::CodexStore::default_root().expect("home dir").save(&codex)?;  // resumable on disk
 ```
 
-The canonical model is `Transcript<Common>`: `Meta` + `Vec<Message>`, where a
-`Message` holds typed `Block`s (`Text`, `Thinking`, `ToolUse`, `ToolResult`,
-`Image`) and a typed `Tool` enum.
+The canonical model is `Transcript<Common>`: `Meta` + `Vec<Message>`, where a `Message` holds typed `Block`s (`Text`, `Thinking`, `ToolUse`, `ToolResult`, `Image`) and a typed `Tool` enum.
 
-A slash command the user ran at the harness is a `Tool::Command` on a user
-turn, with whatever the harness printed back as the paired `ToolResult`, so
-`/release patch` reads as a call rather than as the markup the harness happens
-to record it in. The leading `/` is what marks it canonically: no model-facing
-tool name has one. Boilerplate the harness regenerates on its own (Claude
-Code's local-command caveat) does not survive into the model.
+Slash commands the user ran at the harness (`/release patch`) are canonical too: a `Tool::Command` call on the user turn, paired with what the command printed back as its `ToolResult`.
 
 ### Search (feature `search`, on by default)
 
-`txcript::search` supports fuzzy and substring search over transcripts via
-[nucleo](https://github.com/helix-editor/nucleo). One-shot search:
+`txcript::search` supports fuzzy and substring search over transcripts via [nucleo](https://github.com/helix-editor/nucleo). One-shot search:
 
 ```rust
 use txcript::search::{Query, search};
@@ -275,30 +245,15 @@ index.insert(DocKey { harness, id }, &common);   // re-insert replaces; caller o
 let matches = index.query(&Query::fuzzy("srch")); // ranked docs, best lines as hits
 ```
 
-An empty pattern returns documents newest-first. Tool outputs are excluded by
-default; use `Origin::ALL` to include them. `Query.harnesses`, `Query.limit`,
-and `Query.hits_per_doc` narrow results.
+An empty pattern returns documents newest-first. Tool outputs are excluded by default; use `Origin::ALL` to include them. `Query.harnesses`, `Query.limit`, and `Query.hits_per_doc` narrow results.
 
 ### Text projection
 
-`txcript::text::to_text(&common)` is a one-way, token-conscious projection of
-`Transcript<Common>` for use as LLM context. It keeps messages, reasoning
-text, and compact tool calls/results while omitting replay-only payloads such
-as encrypted reasoning, usage accounting, and inline image bytes.
-`to_text_fragment(&common, &span)` renders a `Span` of the body in the same
-format with `── #N ──` rules carrying each message's 1-based ordinal in the
-full session, the numbering `txcript view` prints.
+`txcript::text::to_text(&common)` is the projection behind [`txcript view`](#cli): a one-way, token-conscious rendering of `Transcript<Common>` for use as LLM context. It keeps messages, reasoning text, and compact tool calls/results; replay-only payloads (encrypted reasoning, usage accounting, inline image bytes) are omitted. `to_text_fragment(&common, &span)` renders a `Span` of the body, keeping each message's ordinal in the full session.
 
-## WASM module (Bun / Node / browsers)
+## npm package
 
-The pure codec compiles to WebAssembly; the JS host owns all I/O and calls in
-for the transformation. The `Store` layer (filesystem, SQLite, subprocess)
-stays native and is excluded from the WASM build. The npm package ships the
-wasm prebuilt:
-
-```sh
-bun add txcript     # or: npm install txcript
-```
+The npm package ships the codec as prebuilt WASM for Bun, Node, and browsers. The JS host owns all I/O and calls in for the transformation; the `Store` layer (filesystem, SQLite, subprocess) stays native and is excluded from the WASM build.
 
 ```ts
 import { convert, toCommon, fromCommon, harnesses } from "txcript";
@@ -316,15 +271,17 @@ const pi = fromCommon(JSON.stringify(common), "pi");
 harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor","cursor_desktop","grok","amp","antigravity"]
 ```
 
-Text-in / text-out: `input` is a harness's native session text (JSONL for
-claude_code/codex/pi/campfire, the `opencode export` JSON for opencode, a
-JSON export of Cursor's `store.db` for cursor, a JSON dump of the session's
-`state.vscdb` rows for cursor_desktop, a JSON bundle of the session
-directory's files for grok, the `amp threads export` JSON
-document for amp, and a JSON dump of the conversation database with
-hex-encoded protobuf step blobs for antigravity); the result is
-the target's native text. Invalid harness names or unparseable input throw a
-JS `Error`.
+Text-in / text-out: `input` is the source harness's native session text and the result is the target's. Invalid harness names or unparseable input throw a JS `Error`.
+
+| Harness | Session text |
+|---|---|
+| `claude_code`, `codex`, `pi`, `campfire` | session JSONL |
+| `opencode` | `opencode export` JSON |
+| `cursor` | JSON export of the session's `store.db` |
+| `cursor_desktop` | JSON dump of the session's `state.vscdb` rows |
+| `grok` | JSON bundle of the session directory's files |
+| `amp` | `amp threads export` JSON |
+| `antigravity` | JSON dump of the conversation database, protobuf blobs hex-encoded |
 
 To build the wasm from source instead:
 
@@ -337,12 +294,7 @@ bun run build        # produces ./pkg
 
 ## Format documentation
 
-Not all of these transcript formats are documented by their vendors.
-[`docs/formats/`](docs/formats) has one document per harness covering where
-sessions live on disk, how discovery finds them, a dissection of every part
-of the format, and its quirks, each tagged with the provenance of what it claims:
-official documentation, the harness's own open-source serialization code
-(cited with commit-pinned permalinks), or reverse engineering.
+Not all of these transcript formats are documented by their vendors. [`docs/formats/`](docs/formats) has one document per harness covering where sessions live on disk, how discovery finds them, a dissection of every part of the format, and its quirks, each tagged with the provenance of what it claims: official documentation, the harness's own open-source serialization code (cited with commit-pinned permalinks), or reverse engineering.
 
 ## Development
 
@@ -352,8 +304,7 @@ cargo test --no-default-features                    # without the SQLite store
 bun run build && bun examples/convert.ts <file> <from> <to>
 ```
 
-The binary lives in its own workspace crate (`cli/`, package `txcript-cli`) so
-its dependencies (clap) never touch library consumers.
+The binary lives in its own workspace crate (`cli/`, package `txcript-cli`) so its dependencies (clap) never touch library consumers.
 
 ## License
 
