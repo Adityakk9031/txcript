@@ -13,17 +13,28 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use txcript::common::Meta;
 use txcript::search::{DocMatch, Hit, Origin, Query};
-use txcript::{HarnessId, local, text};
+use txcript::{HarnessId, Span, local, text};
+
+/// Ceiling on one `read_session` response, in rendered bytes. Reads over it
+/// are refused with ready-made `#range` chunks so a caller never floods its
+/// own context by accident; an explicitly requested single message is always
+/// served, however large.
+const READ_BUDGET: usize = 100_000;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ListSessionsRequest {
     /// Only include this harness. Omit to include every harness.
     from: Option<String>,
-    /// Only include sessions recorded in this working directory. Omit to
-    /// include every directory. Sessions without a recorded cwd are excluded
-    /// when this filter is present.
+    /// Only include sessions recorded in or under this working directory.
+    /// Omit to include every directory. Sessions without a recorded cwd are
+    /// excluded when this filter is present.
     cwd: Option<String>,
+    /// Return at most this many sessions. Omit for no cap.
+    limit: Option<usize>,
+    /// Skip this many sessions from the newest end first — page with
+    /// `limit`. Omit for 0.
+    offset: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -33,16 +44,19 @@ struct SearchSessionsRequest {
     pattern: String,
     /// Search only this harness. Omit to search every harness.
     from: Option<String>,
-    /// Search only sessions recorded in this working directory. Omit to
-    /// search every directory. Sessions without a recorded cwd are excluded
-    /// when this filter is present.
+    /// Search only sessions recorded in or under this working directory.
+    /// Omit to search every directory. Sessions without a recorded cwd are
+    /// excluded when this filter is present.
     cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReadSessionRequest {
-    /// Exact session id or exact title.
+    /// Session id (any unambiguous prefix works) or exact title, with an
+    /// optional `#range` of 1-based inclusive message numbers (`abc#5-12`,
+    /// `abc#7`, `abc#5-`, `abc#-10`). Reads rendering past the byte budget
+    /// are refused with suggested sub-ranges to request instead.
     id: String,
     /// Only look in this harness. Omit to look across every harness.
     from: Option<String>,
@@ -50,6 +64,10 @@ struct ReadSessionRequest {
 
 #[derive(Debug, Serialize, JsonSchema)]
 struct SessionList {
+    /// Sessions matching the filters, before `limit`/`offset` paging.
+    total: usize,
+    /// Index of the first returned session within that filtered set.
+    offset: usize,
     sessions: Vec<SessionSummary>,
 }
 
@@ -154,9 +172,9 @@ impl TxcriptServer {
 )]
 impl TxcriptServer {
     /// List local sessions newest-first, with the same harness and working
-    /// directory filters as `txcript list`.
+    /// directory filters as `txcript list`, paged by `limit`/`offset`.
     #[tool(
-        description = "List local coding-agent sessions newest-first. Optional `from` and `cwd` filters match the txcript CLI; omitted filters include all harnesses or directories.",
+        description = "List local coding-agent sessions newest-first. Optional `from` and `cwd` filters match the txcript CLI; omitted filters include all harnesses or directories. Optional `limit`/`offset` page the listing; the result carries the pre-paging `total`.",
         annotations(title = "List sessions", read_only_hint = true)
     )]
     fn list_sessions(
@@ -165,12 +183,23 @@ impl TxcriptServer {
     ) -> Result<Json<SessionList>, ErrorData> {
         let from = parse_from(request.from.as_deref())?;
         let cwd = request.cwd.as_deref().map(Path::new);
-        let sessions = local::discover()
+        let all: Vec<SessionSummary> = local::discover()
             .into_iter()
             .filter(|session| super::selected(session, from, cwd))
             .map(|session| SessionSummary::new(session.harness, &session.meta))
             .collect();
-        Ok(Json(SessionList { sessions }))
+        let total = all.len();
+        let offset = request.offset.unwrap_or(0).min(total);
+        let sessions = all
+            .into_iter()
+            .skip(offset)
+            .take(request.limit.unwrap_or(usize::MAX))
+            .collect();
+        Ok(Json(SessionList {
+            total,
+            offset,
+            sessions,
+        }))
     }
 
     /// Search local session content using the same fzf-style pattern, harness,
@@ -194,11 +223,11 @@ impl TxcriptServer {
         Ok(Json(SearchResults { matches }))
     }
 
-    /// Read one session by exact id or title and return its token-optimized
-    /// text projection. The optional harness scope behaves like `--from` on
-    /// `txcript continue`.
+    /// Read one session — or a `#range` of its messages — as the
+    /// token-optimized text projection `txcript view` prints. The optional
+    /// harness scope behaves like `--from` on `txcript continue`.
     #[tool(
-        description = "Read a local session by exact id or title as token-optimized text. Omit `from` to search every harness.",
+        description = "Read a local session by id (any unambiguous prefix) or exact title as token-optimized text. Append `#range` (1-based inclusive, e.g. `abc#5-12`) to read part of it; reads over the byte budget are refused with suggested sub-ranges. Omit `from` to search every harness.",
         annotations(title = "Read session", read_only_hint = true)
     )]
     fn read_session(
@@ -207,23 +236,99 @@ impl TxcriptServer {
     ) -> Result<String, ErrorData> {
         let from = parse_from(request.from.as_deref())?;
         let sessions = local::discover();
-        let found = sessions.iter().find(|session| {
-            from.is_none_or(|harness| session.harness == harness)
-                && (session.meta.id == request.id
-                    || session.meta.title.as_deref() == Some(request.id.as_str()))
-        });
-        let session = found.ok_or_else(|| {
-            let scope = from.map_or(String::new(), |harness| format!(" {harness}"));
-            ErrorData::invalid_params(
-                format!("no local{scope} session matches `{}`", request.id),
+        // A whole-input match (a title that itself contains `#12`) beats the
+        // fragment interpretation, as everywhere else.
+        let (src, span_req) = match crate::fragment::parse_ref(&request.id) {
+            (_, Some(_)) if super::find_exact(&sessions, from, &request.id).is_some() => {
+                (request.id.as_str(), None)
+            }
+            parsed => parsed,
+        };
+        let session = super::find_session(&sessions, from, src)
+            .map_err(|ambiguous| ErrorData::invalid_params(ambiguous, None))?
+            .ok_or_else(|| {
+                let scope = from.map_or(String::new(), |harness| format!(" {harness}"));
+                ErrorData::invalid_params(format!("no local{scope} session matches `{src}`"), None)
+            })?;
+        let common = session.read().map_err(|error| {
+            ErrorData::internal_error(format!("reading session `{src}`: {error}"), None)
+        })?;
+        let total = common.body.len();
+        let span = match &span_req {
+            Some(req) => req
+                .resolve(total)
+                .map_err(|error| ErrorData::invalid_params(error, None))?,
+            None => Span(0..total),
+        };
+        // `resolve` bounds-checked against `total`, so the render lands.
+        let rendered = text::to_text_fragment(&common, &span).ok_or_else(|| {
+            ErrorData::internal_error(
+                format!("range is out of bounds — the session has {total} messages"),
                 None,
             )
         })?;
-        let common = session.read().map_err(|error| {
-            ErrorData::internal_error(format!("reading session `{}`: {error}", request.id), None)
-        })?;
-        Ok(text::to_text(&common))
+        // An explicitly requested single message is served whatever its size
+        // — there is no smaller range left to suggest.
+        if rendered.len() > READ_BUDGET && span.0.len() > 1 {
+            return Err(ErrorData::invalid_params(
+                over_budget(src, &common, &span, rendered.len()),
+                None,
+            ));
+        }
+        Ok(rendered)
     }
+}
+
+/// The refusal for an over-budget read: how big it was, and concrete
+/// `#range` chunks — sized from each message's actual rendered bytes — the
+/// caller can request instead.
+fn over_budget(
+    src: &str,
+    common: &txcript::Transcript<txcript::Common>,
+    span: &Span,
+    rendered: usize,
+) -> String {
+    let sizes: Vec<usize> = span
+        .0
+        .clone()
+        .map(|i| text::to_text_fragment(common, &Span(i..i + 1)).map_or(0, |s| s.len()))
+        .collect();
+    let chunks = chunk_ranges(&sizes, span.0.start, READ_BUDGET);
+    let shown = chunks
+        .iter()
+        .take(12)
+        .map(|r| match r.len() {
+            1 => format!("`{src}#{}`", r.start + 1),
+            _ => format!("`{src}#{}-{}`", r.start + 1, r.end),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let more = if chunks.len() > 12 { ", …" } else { "" };
+    format!(
+        "session `{src}` renders to {rendered} bytes, over the {READ_BUDGET}-byte read budget — \
+         read it in ranges: {shown}{more}"
+    )
+}
+
+/// Consecutive message ranges (absolute indices, the first starting at
+/// `start`) each fitting `budget` rendered bytes; a message alone over the
+/// budget gets its own range.
+fn chunk_ranges(sizes: &[usize], start: usize, budget: usize) -> Vec<std::ops::Range<usize>> {
+    let mut chunks = Vec::new();
+    let mut lo = 0usize;
+    let mut acc = 0usize;
+    for (i, &size) in sizes.iter().enumerate() {
+        if i > lo && acc + size > budget {
+            chunks.push(start + lo..start + i);
+            lo = i;
+            acc = 0;
+        }
+        acc += size;
+    }
+    if lo < sizes.len() {
+        chunks.push(start + lo..start + sizes.len());
+    }
+    chunks
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -236,7 +341,7 @@ impl ServerHandler for TxcriptServer {
                     .with_description("Find, search, and read local coding-agent sessions"),
             )
             .with_instructions(
-                "Use list_sessions to browse, search_sessions to find content, and read_session to retrieve token-optimized context. Omitted `from` and `cwd` filters include all harnesses and directories.",
+                "Use list_sessions to browse (`limit`/`offset` page it), search_sessions to find content, and read_session to retrieve token-optimized context — append `#5-12` to a session ref to read a message range, and expect over-budget reads to come back with suggested ranges. Omitted `from` and `cwd` filters include all harnesses and directories.",
             )
     }
 }
@@ -283,6 +388,8 @@ mod tests {
         let list = TxcriptServer::list_sessions_tool_attr();
         assert!(list.input_schema["properties"].get("from").is_some());
         assert!(list.input_schema["properties"].get("cwd").is_some());
+        assert!(list.input_schema["properties"].get("limit").is_some());
+        assert!(list.input_schema["properties"].get("offset").is_some());
         assert!(list.input_schema.get("required").is_none());
 
         let search = TxcriptServer::search_sessions_tool_attr();
@@ -293,6 +400,22 @@ mod tests {
             search.input_schema["required"],
             serde_json::json!(["pattern"])
         );
+
+        let read = TxcriptServer::read_session_tool_attr();
+        assert_eq!(read.input_schema["required"], serde_json::json!(["id"]));
+    }
+
+    #[test]
+    fn chunking_packs_messages_under_the_budget() {
+        // Two forty-byte messages fit a 100-byte budget; the third spills.
+        assert_eq!(chunk_ranges(&[40, 40, 40], 0, 100), [0..2, 2..3]);
+        // A message alone over the budget gets its own range rather than
+        // blocking the split.
+        assert_eq!(chunk_ranges(&[10, 500, 10], 0, 100), [0..1, 1..2, 2..3]);
+        // Absolute indices honor the span's start.
+        assert_eq!(chunk_ranges(&[60, 60], 4, 100), [4..5, 5..6]);
+        // Everything fitting the budget means one whole-span range.
+        assert_eq!(chunk_ranges(&[10, 10], 0, 100), vec![0..2]);
     }
 
     #[test]

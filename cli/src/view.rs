@@ -14,20 +14,14 @@ use crate::fragment;
 
 pub fn cmd_view(source: &str, from: Option<HarnessId>) -> Result<ExitCode, String> {
     let sessions = super::discover_with_spinner();
-    let find = |needle: &str| {
-        sessions.iter().find(|s| {
-            from.is_none_or(|h| s.harness == h)
-                && (s.meta.id == needle || s.meta.title.as_deref() == Some(needle))
-        })
-    };
     // A whole-input match (a title that itself contains `#12`) beats the
     // fragment interpretation.
     let (src, request) = match fragment::parse_ref(source) {
-        (_, Some(_)) if find(source).is_some() => (source, None),
+        (_, Some(_)) if super::find_exact(&sessions, from, source).is_some() => (source, None),
         parsed => parsed,
     };
 
-    let session = find(src).ok_or_else(|| {
+    let session = super::find_session(&sessions, from, src)?.ok_or_else(|| {
         let scope = from.map_or(String::new(), |h| format!(" {h}"));
         format!("no local{scope} session matches `{src}` (try `txcript list`)")
     })?;

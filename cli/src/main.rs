@@ -4,7 +4,9 @@
 //! ```text
 //! txcript list                          # all local sessions, every harness
 //!     [--from <harness>]                    #   only this harness's sessions
-//!     [--cwd <dir>]                         #   only sessions recorded in <dir>
+//!     [--cwd <dir>]                         #   only sessions recorded under <dir>
+//!     [-n <N>]                              #   at most N sessions
+//!     [--since <when>] [--until <when>]     #   bound the session start time
 //! txcript continue <id>[#range]         # continue <id>, then launch the harness
 //!     [--with <harness>]                    #   ...continuing in <harness> instead
 //!     [--from <harness>]                    #   scope the id lookup to one harness
@@ -28,6 +30,10 @@
 //! `#range` is a 1-based, inclusive message range (`#7`, `#5-12`, `#5-`,
 //! `#-10`); `view` prints the matching ordinals, so what you see is what you
 //! reference. See `fragment.rs`.
+//!
+//! Anywhere a session id is accepted, any unambiguous prefix of it works too;
+//! an ambiguous prefix errors with the candidates. Exact ids and titles win
+//! over prefix interpretation.
 //!
 //! Session discovery/conversion lives in [`txcript::local`]; ranking lives in
 //! [`txcript::search`].
@@ -65,9 +71,20 @@ enum Command {
         /// List only this harness's sessions
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         from: Option<HarnessId>,
-        /// Only sessions recorded in this working directory
+        /// Only sessions recorded in or under this working directory
         #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
         cwd: Option<PathBuf>,
+        /// Show at most this many sessions
+        #[arg(long, short = 'n', value_name = "N")]
+        limit: Option<usize>,
+        /// Only sessions started at or after this time (RFC3339 or
+        /// YYYY-MM-DD, a bare date meaning that local midnight)
+        #[arg(long, value_name = "WHEN", value_parser = parse_since)]
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        /// Only sessions started at or before this time (RFC3339 or
+        /// YYYY-MM-DD, a bare date meaning the end of that local day)
+        #[arg(long, value_name = "WHEN", value_parser = parse_until)]
+        until: Option<chrono::DateTime<chrono::Utc>>,
     },
     /// Continue a session, then launch its harness
     ///
@@ -80,8 +97,9 @@ enum Command {
     /// today's timestamp — the source is never modified. The printed resume
     /// command carries the new id.
     Continue {
-        /// Session id or its exact title, with an optional `#range` of
-        /// 1-based inclusive message numbers (`abc#5-12`, `#7`, `#5-`, `#-10`)
+        /// Session id (any unambiguous prefix) or its exact title, with an
+        /// optional `#range` of 1-based inclusive message numbers
+        /// (`abc#5-12`, `#7`, `#5-`, `#-10`)
         // Other: without a hint, generated completions fall back to filenames.
         #[arg(value_hint = clap::ValueHint::Other)]
         id: String,
@@ -108,8 +126,9 @@ enum Command {
     /// straight back as a `#range`. Output is colorless and pager-free —
     /// it pipes cleanly into pbcopy or an LLM prompt.
     View {
-        /// Session id or its exact title, with an optional `#range` of
-        /// 1-based inclusive message numbers (`abc#5-12`, `#7`, `#5-`, `#-10`)
+        /// Session id (any unambiguous prefix) or its exact title, with an
+        /// optional `#range` of 1-based inclusive message numbers
+        /// (`abc#5-12`, `#7`, `#5-`, `#-10`)
         // Other: without a hint, generated completions fall back to filenames.
         #[arg(value_hint = clap::ValueHint::Other)]
         source: String,
@@ -134,7 +153,7 @@ enum Command {
         /// Search only this harness
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         from: Option<HarnessId>,
-        /// Only sessions recorded in this working directory
+        /// Only sessions recorded in or under this working directory
         #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
         cwd: Option<PathBuf>,
     },
@@ -184,8 +203,14 @@ impl clap::builder::TypedValueParser for HarnessParser {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::List { from, cwd } => {
-            cmd_list(from, cwd.as_deref());
+        Command::List {
+            from,
+            cwd,
+            limit,
+            since,
+            until,
+        } => {
+            cmd_list(from, cwd.as_deref(), limit, since, until);
             Ok(ExitCode::SUCCESS)
         }
         Command::Continue {
@@ -219,13 +244,16 @@ async fn main() -> ExitCode {
     })
 }
 
-/// True when a session's recorded `cwd` names `dir`. Both sides are
-/// canonicalized so different spellings of one directory still match (`/tmp`
-/// vs `/private/tmp`, `$PWD` through a symlink); a path that no longer exists
-/// keeps its raw spelling, so vanished directories compare as plain strings.
-fn same_dir(session_cwd: &str, dir: &std::path::Path) -> bool {
+/// True when a session's recorded `cwd` is `dir` or anywhere under it, so a
+/// monorepo session started in `repo/packages/foo` shows up when listing
+/// `repo`. The check is component-wise (`/foo/barbaz` is not under
+/// `/foo/bar`). Both sides are canonicalized so different spellings of one
+/// directory still match (`/tmp` vs `/private/tmp`, `$PWD` through a
+/// symlink); a path that no longer exists keeps its raw spelling, so
+/// vanished directories compare as plain components.
+fn under_dir(session_cwd: &str, dir: &std::path::Path) -> bool {
     let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    canon(std::path::Path::new(session_cwd)) == canon(dir)
+    canon(std::path::Path::new(session_cwd)).starts_with(canon(dir))
 }
 
 /// The `--from`/`--cwd` session filters shared by `list` and `query`.
@@ -246,7 +274,145 @@ fn matches_filters(
     cwd: Option<&std::path::Path>,
 ) -> bool {
     from.is_none_or(|harness| session_harness == harness)
-        && cwd.is_none_or(|dir| session_cwd.is_some_and(|recorded| same_dir(recorded, dir)))
+        && cwd.is_none_or(|dir| session_cwd.is_some_and(|recorded| under_dir(recorded, dir)))
+}
+
+/// The first session matching `needle` exactly — by id or title — scoped to
+/// `from` when given. Discovery order is newest-first, so copies sharing an
+/// id resolve to the newest.
+fn find_exact<'a>(
+    sessions: &'a [local::Session],
+    from: Option<HarnessId>,
+    needle: &str,
+) -> Option<&'a local::Session> {
+    sessions.iter().find(|s| {
+        from.is_none_or(|h| s.harness == h)
+            && (s.meta.id == needle || s.meta.title.as_deref() == Some(needle))
+    })
+}
+
+/// Resolve `needle` to a session: exact id or exact title first, then an
+/// unambiguous id prefix. `Ok(None)` when nothing matches; `Err` with the
+/// candidates when several distinct ids share the prefix.
+fn find_session<'a>(
+    sessions: &'a [local::Session],
+    from: Option<HarnessId>,
+    needle: &str,
+) -> Result<Option<&'a local::Session>, String> {
+    if let Some(found) = find_exact(sessions, from, needle) {
+        return Ok(Some(found));
+    }
+    if needle.is_empty() {
+        return Ok(None);
+    }
+    let scoped: Vec<&local::Session> = sessions
+        .iter()
+        .filter(|s| from.is_none_or(|h| s.harness == h))
+        .collect();
+    let hits = distinct_prefix_matches(scoped.iter().map(|s| s.meta.id.as_str()), needle);
+    match hits.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(scoped[*one])),
+        many => {
+            let candidates: Vec<&local::Session> = many.iter().map(|&i| scoped[i]).collect();
+            Err(ambiguous_message(needle, &candidates))
+        }
+    }
+}
+
+/// Positions of the first occurrence of each distinct id starting with
+/// `prefix`. Claude Code writes a session resumed from another cwd under the
+/// same id in a second store; those copies collapse to the first (newest —
+/// discovery order) rather than reading as an ambiguity.
+fn distinct_prefix_matches<'a>(
+    ids: impl Iterator<Item = &'a str>,
+    prefix: &str,
+) -> Vec<usize> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut hits = Vec::new();
+    for (i, id) in ids.enumerate() {
+        if id.starts_with(prefix) && !seen.contains(&id) {
+            seen.push(id);
+            hits.push(i);
+        }
+    }
+    hits
+}
+
+fn ambiguous_message(needle: &str, candidates: &[&local::Session]) -> String {
+    use std::fmt::Write as _;
+    let mut msg = format!(
+        "`{needle}` prefixes {} session ids — add characters:",
+        candidates.len()
+    );
+    for s in candidates.iter().take(10) {
+        let title = s.meta.title.as_deref().unwrap_or("");
+        let _ = write!(
+            msg,
+            "\n  {:<12}  {}  {}",
+            s.harness,
+            style::scrub(&s.meta.id),
+            style::scrub(title)
+        );
+    }
+    if candidates.len() > 10 {
+        let _ = write!(msg, "\n  …and {} more", candidates.len() - 10);
+    }
+    msg
+}
+
+/// `--since`: a bare `YYYY-MM-DD` means that local midnight.
+fn parse_since(s: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    parse_when(s, false)
+}
+
+/// `--until`: a bare `YYYY-MM-DD` means the end of that local day.
+fn parse_until(s: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    parse_when(s, true)
+}
+
+fn parse_when(s: &str, end_of_day: bool) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    use chrono::TimeZone as _;
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(t.with_timezone(&chrono::Utc));
+    }
+    let date = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| {
+        format!("`{s}` is neither RFC3339 (2026-08-18T10:00:00Z) nor a date (2026-08-18)")
+    })?;
+    let time = if end_of_day {
+        chrono::NaiveTime::from_hms_opt(23, 59, 59).unwrap_or(chrono::NaiveTime::MIN)
+    } else {
+        chrono::NaiveTime::MIN
+    };
+    // Bare dates read as the user's local calendar. A time made ambiguous or
+    // skipped by a DST edge takes the earlier mapping; UTC is the fallback.
+    Ok(match chrono::Local.from_local_datetime(&date.and_time(time)) {
+        chrono::LocalResult::Single(t) | chrono::LocalResult::Ambiguous(t, _) => {
+            t.with_timezone(&chrono::Utc)
+        }
+        chrono::LocalResult::None => chrono::Utc.from_utc_datetime(&date.and_time(time)),
+    })
+}
+
+/// Compact age for the listing's WHEN column: relative inside a week, the
+/// local date past it. Widths stay within 10 characters.
+fn format_when(ts: chrono::DateTime<chrono::Utc>) -> String {
+    format_when_at(ts, chrono::Utc::now())
+}
+
+fn format_when_at(
+    ts: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let delta = now.signed_duration_since(ts);
+    // Small clock skew (a session stamped just ahead of us) reads as now.
+    match delta {
+        d if d.num_seconds() < 60 => "just now".to_string(),
+        d if d.num_minutes() < 60 => format!("{}m ago", d.num_minutes()),
+        d if d.num_hours() < 24 => format!("{}h ago", d.num_hours()),
+        d if d.num_days() < 7 => format!("{}d ago", d.num_days()),
+        _ => ts.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -286,6 +452,103 @@ mod filter_tests {
             Some(cwd)
         ));
     }
+
+    #[test]
+    fn cwd_filter_admits_subdirectories_on_component_boundaries() {
+        let repo = std::path::Path::new("/some/repo");
+        assert!(matches_filters(
+            HarnessId::Codex,
+            Some("/some/repo/packages/foo"),
+            None,
+            Some(repo)
+        ));
+        // A sibling sharing the prefix as a string is not under the filter.
+        assert!(!matches_filters(
+            HarnessId::Codex,
+            Some("/some/repo2"),
+            None,
+            Some(repo)
+        ));
+        // The subtree runs downward only: a parent isn't "under" its child.
+        assert!(!matches_filters(
+            HarnessId::Codex,
+            Some("/some"),
+            None,
+            Some(repo)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::distinct_prefix_matches;
+
+    #[test]
+    fn prefixes_match_first_copy_of_each_distinct_id() {
+        let ids = ["abc123", "abcdef", "abc123", "zzz"];
+        // Two distinct ids share `abc`; the duplicate collapses to its first
+        // (newest) copy.
+        assert_eq!(distinct_prefix_matches(ids.into_iter(), "abc"), [0, 1]);
+        assert_eq!(distinct_prefix_matches(ids.into_iter(), "abc1"), [0]);
+        assert_eq!(distinct_prefix_matches(ids.into_iter(), "nope"), [] as [usize; 0]);
+    }
+}
+
+#[cfg(test)]
+mod when_tests {
+    use super::{format_when_at, parse_since, parse_until};
+
+    #[test]
+    fn ages_stay_within_the_ten_char_column() {
+        let now: chrono::DateTime<chrono::Utc> = "2026-08-18T12:00:00Z".parse().unwrap();
+        let at = |s: &str| format_when_at(s.parse().unwrap(), now);
+        assert_eq!(at("2026-08-18T11:59:30Z"), "just now");
+        assert_eq!(at("2026-08-18T11:15:00Z"), "45m ago");
+        assert_eq!(at("2026-08-18T02:00:00Z"), "10h ago");
+        assert_eq!(at("2026-08-15T12:00:00Z"), "3d ago");
+        // Past a week: an absolute local date, exactly 10 chars.
+        assert_eq!(at("2026-01-01T00:00:00Z").len(), 10);
+        // A session stamped slightly ahead of our clock reads as now.
+        assert_eq!(at("2026-08-18T12:00:20Z"), "just now");
+    }
+
+    #[test]
+    fn bounds_accept_rfc3339_and_bare_dates() {
+        let expected: chrono::DateTime<chrono::Utc> = "2026-08-18T10:00:00Z".parse().unwrap();
+        assert_eq!(parse_since("2026-08-18T10:00:00Z").unwrap(), expected);
+        // A bare date spans its whole local day: until lands after since.
+        let since = parse_since("2026-08-18").unwrap();
+        let until = parse_until("2026-08-18").unwrap();
+        assert!(until > since);
+        assert_eq!((until - since).num_seconds(), 24 * 3600 - 1);
+        assert!(parse_since("yesterday").is_err());
+    }
+}
+
+#[cfg(test)]
+mod stamp_tests {
+    use super::stamp_live_cwd;
+
+    #[test]
+    fn dead_cwds_rehome_to_the_current_directory_except_for_exports() {
+        let mut copy = super::identity_tests::transcript();
+        copy.meta.cwd = Some("/no/such/dir/txcript-test".into());
+        stamp_live_cwd(&mut copy, None);
+        let current = std::env::current_dir().unwrap();
+        assert_eq!(copy.meta.cwd.as_deref(), current.to_str());
+
+        // A cwd that still exists is kept.
+        let mut copy = super::identity_tests::transcript();
+        copy.meta.cwd = current.to_str().map(String::from);
+        stamp_live_cwd(&mut copy, None);
+        assert_eq!(copy.meta.cwd.as_deref(), current.to_str());
+
+        // `--out` exports stay faithful to the source, dead cwd or not.
+        let mut copy = super::identity_tests::transcript();
+        copy.meta.cwd = Some("/no/such/dir/txcript-test".into());
+        stamp_live_cwd(&mut copy, Some(std::path::Path::new("/tmp/x")));
+        assert_eq!(copy.meta.cwd.as_deref(), Some("/no/such/dir/txcript-test"));
+    }
 }
 
 #[cfg(test)]
@@ -310,7 +573,7 @@ mod identity_tests {
     use super::{Common, HarnessId, Transcript, fresh_identity};
     use txcript::common::Meta;
 
-    fn transcript() -> Transcript<Common> {
+    pub(crate) fn transcript() -> Transcript<Common> {
         Transcript::new(
             Meta {
                 id: "bb3c5476-0d25-46d0-803a-0ed9de155e6b".into(),
@@ -359,14 +622,32 @@ mod identity_tests {
     }
 }
 
-fn cmd_list(from: Option<HarnessId>, cwd: Option<&std::path::Path>) {
+fn cmd_list(
+    from: Option<HarnessId>,
+    cwd: Option<&std::path::Path>,
+    limit: Option<usize>,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+) {
     let sessions = discover_with_spinner();
-    let listed: Vec<_> = sessions.iter().filter(|s| selected(s, from, cwd)).collect();
+    let listed: Vec<_> = sessions
+        .iter()
+        .filter(|s| {
+            selected(s, from, cwd)
+                && since.is_none_or(|t| s.meta.timestamp >= t)
+                && until.is_none_or(|t| s.meta.timestamp <= t)
+        })
+        .take(limit.unwrap_or(usize::MAX))
+        .collect();
     if listed.is_empty() {
         let scope = cwd.map_or(String::new(), |d| format!(" for {}", d.display()));
+        let when = match (since, until) {
+            (None, None) => String::new(),
+            _ => " in that time range".to_string(),
+        };
         match from {
-            Some(h) => println!("no local {h} sessions found{scope}"),
-            None => println!("no local sessions found{scope}"),
+            Some(h) => println!("no local {h} sessions found{scope}{when}"),
+            None => println!("no local sessions found{scope}{when}"),
         }
     } else {
         use std::io::Write;
@@ -374,7 +655,10 @@ fn cmd_list(from: Option<HarnessId>, cwd: Option<&std::path::Path>) {
         // A failed write means the reader is gone (`txcript list | head`):
         // stop quietly instead of panicking the way `println!` would.
         let mut out = std::io::stdout().lock();
-        let header = format!("{:<12}  {:<38}  TITLE / FIRST MESSAGE", "HARNESS", "ID");
+        let header = format!(
+            "{:<12}  {:<10}  {:<38}  TITLE / FIRST MESSAGE",
+            "HARNESS", "WHEN", "ID"
+        );
         if writeln!(out, "{}", style::dim(&header, color)).is_err() {
             return;
         }
@@ -385,8 +669,9 @@ fn cmd_list(from: Option<HarnessId>, cwd: Option<&std::path::Path>) {
                 .clone()
                 .unwrap_or_else(|| s.meta.cwd.clone().unwrap_or_default());
             let row = format!(
-                "{}  {}  {}",
+                "{}  {}  {}  {}",
                 style::harness(s.harness, 12, color),
+                style::dim(&format!("{:<10}", format_when(s.meta.timestamp)), color),
                 style::dim(
                     &format!("{:<38}", truncate(&style::scrub(&s.meta.id), 38)),
                     color
@@ -472,21 +757,16 @@ fn cmd_continue(
     out: Option<&PathBuf>,
     no_resume: bool,
 ) -> Result<ExitCode, String> {
-    // Locate the session by exact id or title, optionally scoped to one harness.
+    // Locate the session by id (exact or unambiguous prefix) or exact title,
+    // optionally scoped to one harness.
     let sessions = discover_with_spinner();
-    let find = |needle: &str| {
-        sessions.iter().find(|s| {
-            from.is_none_or(|h| s.harness == h)
-                && (s.meta.id == needle || s.meta.title.as_deref() == Some(needle))
-        })
-    };
     // A whole-input match (a title that itself contains `#12`) beats the
     // fragment interpretation.
     let (src, request) = match fragment::parse_ref(id) {
-        (_, Some(_)) if find(id).is_some() => (id, None),
+        (_, Some(_)) if find_exact(&sessions, from, id).is_some() => (id, None),
         parsed => parsed,
     };
-    let found = find(src);
+    let found = find_session(&sessions, from, src)?;
 
     // Resuming an `--out` copy can't work — the harness reads its live root, not
     // our redirect — so a redirect implies "write only".
@@ -560,6 +840,7 @@ fn continue_amp_server_thread(
         (None, false) => {
             let mut copy = common.clone();
             fresh_identity(&mut copy, target, out);
+            stamp_live_cwd(&mut copy, out);
             write_and_report(HarnessId::Amp, target, &copy, out)?
         }
         // A sliced continue always rewrites — the server thread can't resume
@@ -567,6 +848,7 @@ fn continue_amp_server_thread(
         (Some(req), _) => {
             let mut copy = fragment::sliced(&common, req)?;
             fresh_identity(&mut copy, target, out);
+            stamp_live_cwd(&mut copy, out);
             write_and_report(HarnessId::Amp, target, &copy, out)?
         }
     };
@@ -593,12 +875,14 @@ fn continue_session(
         (None, false) => {
             let mut common = found.read().map_err(|e| e.to_string())?;
             fresh_identity(&mut common, target, out);
+            stamp_live_cwd(&mut common, out);
             write_and_report(found.harness, target, &common, out)?
         }
         (Some(req), _) => {
             let common = found.read().map_err(|e| e.to_string())?;
             let mut copy = fragment::sliced(&common, req)?;
             fresh_identity(&mut copy, target, out);
+            stamp_live_cwd(&mut copy, out);
             write_and_report(found.harness, target, &copy, out)?
         }
     };
@@ -634,6 +918,25 @@ fn fresh_identity(
         _ => uuid::Uuid::new_v4().to_string(),
     };
     common.meta.timestamp = chrono::Utc::now();
+}
+
+/// Re-home a live-store copy whose recorded cwd no longer exists. The stores
+/// shard by `meta.cwd`, so a copy filed under a dead directory would be
+/// invisible to the harness, which `launch` starts from the fallback
+/// (current) directory in that case. `--out` exports keep the recorded cwd —
+/// they're faithful exports, and no harness reads them in place.
+fn stamp_live_cwd(common: &mut Transcript<Common>, out: Option<&std::path::Path>) {
+    if out.is_some() {
+        return;
+    }
+    let dead = common
+        .meta
+        .cwd
+        .as_deref()
+        .is_some_and(|c| !c.is_empty() && !std::path::Path::new(c).is_dir());
+    if dead && let Ok(current) = std::env::current_dir() {
+        common.meta.cwd = Some(current.to_string_lossy().into_owned());
+    }
 }
 
 /// Write `common` as `target`'s native format, print the conversion line,
