@@ -39,14 +39,9 @@
 
 Claude Code मध्ये सेशन सुरू करा; usage limit लागली किंवा काम अडलं, की संपूर्ण संभाषण, reasoning आणि टूल हिस्ट्रीसह तेच सेशन Codex मध्ये जसंच्या तसं पुढे चालू ठेवा:
 
-```console
-$ txcript list
-  claude_code   2h ago   fix relay reconnect bug          9f3a21…
-  codex         1d ago   wire up usage accounting         c41b8d…
-  opencode      3d ago   migrate store to sqlite          77e0f2…
-
-$ txcript continue 9f3a21 --with codex    # re-synthesize into Codex, then launch it
-```
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="txcript continue: an OpenCode session resumed in Claude Code">
+</p>
 
 txcript प्रत्येक हार्नेसचा नेटिव्ह ट्रान्सक्रिप्ट फॉरमॅट एका टाइप्ड कॉमन मॉडेलमधून मॅप करते. नेटिव्ह load/save बाइट-न्-बाइट लॉसलेस आहे; एका हार्नेसमधून दुसऱ्यात रूपांतर करताना मेसेजेस, reasoning, टूल कॉल्स, टूल रिझल्ट्स, इमेजेस, मेटाडेटा आणि usage (जिथे उपलब्ध असेल तिथे) जपले जातात. हे [**CLI**](#cli), [**Rust crate**](#rust-crate) आणि [**npm package**](#npm-package) या तीन रूपांत मिळते.
 

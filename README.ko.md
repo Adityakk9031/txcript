@@ -39,14 +39,9 @@
 
 Claude Code에서 세션을 시작했다가 사용량 한도나 막다른 길에 부딪히면, Codex에서 그대로 이어가세요 — 대화, 추론, 도구 히스토리를 전부 유지한 채로:
 
-```console
-$ txcript list
-  claude_code   2h ago   fix relay reconnect bug          9f3a21…
-  codex         1d ago   wire up usage accounting         c41b8d…
-  opencode      3d ago   migrate store to sqlite          77e0f2…
-
-$ txcript continue 9f3a21 --with codex    # re-synthesize into Codex, then launch it
-```
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="txcript continue: an OpenCode session resumed in Claude Code">
+</p>
 
 txcript는 각 하네스의 네이티브 트랜스크립트 형식을 타입이 지정된 공통 모델을 통해 매핑합니다. 네이티브 로드/저장은 바이트 단위로 무손실이며, 하네스 간 변환은 메시지, 추론, 도구 호출, 도구 결과, 이미지, 메타데이터, 그리고 가능한 경우 사용량 정보를 보존합니다. [**CLI**](#cli), [**Rust 크레이트**](#rust-크레이트), [**npm 패키지**](#npm-패키지)로 제공됩니다.
 

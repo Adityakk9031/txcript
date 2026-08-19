@@ -39,14 +39,9 @@
 
 在 Claude Code 中开始一个会话，遇到用量限制或卡壳时，换到 Codex 里接着做，完整的对话、推理和工具历史原样保留：
 
-```console
-$ txcript list
-  claude_code   2h ago   fix relay reconnect bug          9f3a21…
-  codex         1d ago   wire up usage accounting         c41b8d…
-  opencode      3d ago   migrate store to sqlite          77e0f2…
-
-$ txcript continue 9f3a21 --with codex    # re-synthesize into Codex, then launch it
-```
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="txcript continue: an OpenCode session resumed in Claude Code">
+</p>
 
 txcript 通过一个带类型的公共模型来映射各个 harness 的原生会话记录格式。原生加载/保存是字节级无损的；跨 harness 转换会保留消息、推理、工具调用、工具结果、图像、元数据，以及在可用时的用量信息。它以 [**CLI**](#cli)、[**Rust crate**](#rust-crate) 和 [**npm 包**](#npm-包) 的形式发布。
 

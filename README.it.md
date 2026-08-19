@@ -39,14 +39,9 @@
 
 Inizia una sessione in Claude Code, raggiungi un limite di utilizzo o un punto morto, e riprendila in Codex con l'intera conversazione, il reasoning e la cronologia degli strumenti intatti:
 
-```console
-$ txcript list
-  claude_code   2h ago   fix relay reconnect bug          9f3a21…
-  codex         1d ago   wire up usage accounting         c41b8d…
-  opencode      3d ago   migrate store to sqlite          77e0f2…
-
-$ txcript continue 9f3a21 --with codex    # re-synthesize into Codex, then launch it
-```
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="txcript continue: an OpenCode session resumed in Claude Code">
+</p>
 
 txcript mappa il formato di trascrizione nativo di ogni harness attraverso un modello comune tipizzato. Il caricamento/salvataggio nativo è lossless al byte; la conversione tra harness preserva messaggi, reasoning, chiamate agli strumenti, risultati degli strumenti, immagini, metadati e dati di utilizzo ove disponibili. Viene distribuito come [**CLI**](#cli), [**crate Rust**](#crate-rust) e [**pacchetto npm**](#pacchetto-npm).
 
