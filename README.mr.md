@@ -1,0 +1,311 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/wordmark-dark.svg">
+    <img src="docs/assets/wordmark-light.svg" alt="txcript" width="600">
+  </picture>
+</p>
+
+<p align="center">हार्नेसमधील सेशन्स हलवण्यासाठीची लायब्ररी</p>
+
+<p align="center">
+  <a href="README.md">English</a> | <a href="README.ja.md">日本語</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.zh-TW.md">繁體中文</a> | <a href="README.ko.md">한국어</a> | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.it.md">Italiano</a> | <a href="README.pt-BR.md">Português (Brasil)</a> | <a href="README.ru.md">Русский</a> | मराठी | <a href="README.ta.md">தமிழ்</a>
+</p>
+
+<p align="center">
+  <a href="https://crates.io/crates/txcript"><img src="https://img.shields.io/crates/v/txcript?logo=rust&color=4c71f2" alt="crates.io"></a>
+  <a href="https://www.npmjs.com/package/txcript"><img src="https://img.shields.io/npm/v/txcript?logo=npm&color=4c71f2" alt="npm"></a>
+  <a href="https://docs.rs/txcript"><img src="https://img.shields.io/docsrs/txcript?logo=docsdotrs" alt="docs.rs"></a>
+  <a href="https://github.com/skillsynchq/txcript/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/skillsynchq/txcript/ci.yml?branch=main&logo=github&label=ci" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-555" alt="License"></a>
+</p>
+
+<p align="center">
+  <a href="https://claude.com/claude-code"><img src="docs/assets/claude-icon.svg" alt="Claude Code" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://github.com/openai/codex"><img src="https://github.com/openai.png?size=160" alt="Codex" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://opencode.ai"><img src="https://opencode.ai/apple-touch-icon-v3.png" alt="OpenCode" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://pi.dev"><img src="https://pi.dev/logo-auto.svg" alt="pi" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://cursor.com"><img src="https://github.com/cursor.png?size=160" alt="Cursor" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://github.com/xai-org/grok-build"><img src="https://github.com/xai-org.png?size=160" alt="Grok CLI" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://ampcode.com"><img src="https://ampcode.com/app-icon.png?v=3" alt="Amp" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://antigravity.google"><img src="https://github.com/google-antigravity.png?size=160" alt="Antigravity" height="44" width="44"></a>
+</p>
+
+Claude Code मध्ये सेशन सुरू करा; usage limit लागली किंवा काम अडलं, की संपूर्ण संभाषण, reasoning आणि टूल हिस्ट्रीसह तेच सेशन Codex मध्ये जसंच्या तसं पुढे चालू ठेवा:
+
+```console
+$ txcript list
+  claude_code   2h ago   fix relay reconnect bug          9f3a21…
+  codex         1d ago   wire up usage accounting         c41b8d…
+  opencode      3d ago   migrate store to sqlite          77e0f2…
+
+$ txcript continue 9f3a21 --with codex    # re-synthesize into Codex, then launch it
+```
+
+txcript प्रत्येक हार्नेसचा नेटिव्ह ट्रान्सक्रिप्ट फॉरमॅट एका टाइप्ड कॉमन मॉडेलमधून मॅप करते. नेटिव्ह load/save बाइट-न्-बाइट लॉसलेस आहे; एका हार्नेसमधून दुसऱ्यात रूपांतर करताना मेसेजेस, reasoning, टूल कॉल्स, टूल रिझल्ट्स, इमेजेस, मेटाडेटा आणि usage (जिथे उपलब्ध असेल तिथे) जपले जातात. हे [**CLI**](#cli), [**Rust crate**](#rust-crate) आणि [**npm package**](#npm-package) या तीन रूपांत मिळते.
+
+## ठळक वैशिष्ट्ये
+
+- **10 हार्नेस, एकच मॉडेल**: प्रत्येक फॉरमॅट `Transcript<Common>` मधून रूपांतरित होतो, त्यामुळे नवीन हार्नेस जोडला की तो आपोआप बाकी सगळ्यांशी जोडला जातो.
+- **बाइट-लॉसलेस राउंड-ट्रिप**: सेशन त्याच्या स्वतःच्या फॉरमॅटमध्ये लोड करून सेव्ह केल्यास ते जसंच्या तसं परत मिळतं.
+- **कुठेही पुढे चालू ठेवा**: `txcript continue <id> --with <harness>` सेशन दुसऱ्या हार्नेसच्या नेटिव्ह फॉरमॅटमध्ये पुन्हा लिहून तो हार्नेस लाँच करते. मूळ सेशनला कधीही धक्का लागत नाही.
+- **सगळं शोधा**: मशीनवरील प्रत्येक सेशनवर fuzzy/substring शोध (fzf-शैलीचा सिंटॅक्स, [nucleo](https://github.com/helix-editor/nucleo) वर आधारित) — लायब्ररी API, वन-शॉट CLI क्वेरी किंवा इंटरॅक्टिव्ह पिकर म्हणून.
+- **MCP सर्व्हर**: `txcript mcp` रीड-ओन्ली `list_sessions`, `search_sessions` आणि `read_session` टूल्स उपलब्ध करून देते, त्यामुळे एजंट्स जुनी सेशन्स कॉन्टेक्स्ट म्हणून वापरू शकतात.
+- **डॉक्युमेंट केलेले फॉरमॅट्स**: प्रत्येक हार्नेसचा ऑन-डिस्क फॉरमॅट [`docs/formats/`](docs/formats) मध्ये सविस्तर लिहिलेला आहे, आणि प्रत्येक विधानाला त्याचा पुरावा जोडलेला आहे (अधिकृत डॉक्स, source permalinks किंवा reverse-engineering नोट्स).
+
+## समर्थित हार्नेस
+
+```mermaid
+flowchart LR
+    claude["Claude Code"] <--> common(("Transcript&lt;Common&gt;"))
+    codex["Codex"] <--> common
+    opencode["OpenCode"] <--> common
+    pi["pi"] <--> common
+    campfire["Campfire"] <--> common
+    common <--> cursor["Cursor CLI"]
+    common <--> cursordesktop["Cursor desktop"]
+    common <--> grok["Grok CLI"]
+    common <--> antigravity["Antigravity"]
+    amp["Amp"] --> common
+```
+
+डिस्कव्हरी, लिस्टिंग, शोध, `view` आणि नेटिव्ह राउंड-ट्रिप प्रत्येक हार्नेससाठी चालतात. हेच `id` स्ट्रिंग्स CLI आणि WASM API ला द्यायचे असतात.
+
+| हार्नेस | id | डिस्कवरील सेशन्स | नेटिव्ह फॉरमॅट | रूपांतर | पुढे चालू | डॉक |
+|---|---|---|---|:---:|:---:|---|
+| [Claude Code](https://claude.com/claude-code) | `claude_code` | `~/.claude/projects/` | JSONL | ⇄ | ✓ | [स्पेक](docs/formats/claude-code.md) |
+| [Codex](https://github.com/openai/codex) | `codex` | `~/.codex/sessions/` | rollout JSONL | ⇄ | ✓ | [स्पेक](docs/formats/codex.md) |
+| [OpenCode](https://opencode.ai) | `opencode` | `~/.local/share/opencode/opencode.db` | SQLite | ⇄ | ✓ | [स्पेक](docs/formats/opencode.md) |
+| [pi](https://pi.dev) | `pi` | `~/.pi/agent/sessions/` | JSONL | ⇄ | ✓ | [स्पेक](docs/formats/pi.md) |
+| [Campfire](docs/formats/campfire.md) | `campfire` | `~/.campfire/agent/sessions/` | JSONL | ⇄ | ✓ | [स्पेक](docs/formats/campfire.md) |
+| [Cursor CLI](https://cursor.com/cli) | `cursor` | `~/.cursor/chats/` | SQLite | ⇄ | ✓ | [स्पेक](docs/formats/cursor.md) |
+| [Cursor desktop](https://cursor.com) | `cursor_desktop` | `<Cursor User dir>/globalStorage/` | SQLite | ⇄ | ✓ | — |
+| [Grok CLI](https://github.com/xai-org/grok-build) | `grok` | `~/.grok/sessions/` | सेशन डिरेक्टरी (JSON) | ⇄ | ✓ | [स्पेक](docs/formats/grok.md) |
+| [Amp](https://ampcode.com) | `amp` | `~/.local/share/amp/threads/` | थ्रेड JSON | → | — <sup>1</sup> | [स्पेक](docs/formats/amp.md) |
+| [Antigravity](https://antigravity.google) | `antigravity` | `~/.gemini/antigravity-cli/` | SQLite | ⇄ | ✓ | [स्पेक](docs/formats/antigravity.md) |
+
+<sup>1</sup> Amp चे थ्रेड्स सर्व्हर-साइड असतात आणि CLI मध्ये import नाही: सेशन्स Amp *मधून* रूपांतरित होतात, पण Amp मध्ये पुढे चालू ठेवता येत नाहीत.
+
+## इन्स्टॉलेशन
+
+**CLI** (`txcript` बायनरी इन्स्टॉल होते):
+
+```sh
+cargo install --git https://github.com/skillsynchq/txcript txcript-cli
+# or from a checkout: cargo install --path cli
+```
+
+**Rust crate**:
+
+```sh
+cargo add txcript
+```
+
+**npm package** (आधीच बिल्ड केलेलं WASM, Rust टूलचेनची गरज नाही):
+
+```sh
+bun add txcript     # or: npm install txcript
+```
+
+## CLI
+
+लोकल सेशन्स शोधा आणि कोणत्याही हार्नेसमध्ये पुढे चालू ठेवा:
+
+```sh
+txcript list                             # local sessions across every harness
+txcript continue <id>[#range]            # continue <id>, then launch its harness
+    [--with <harness>]                    #   ...continuing in <harness> instead
+    [--from <harness>]                    #   scope the id lookup to one harness
+    [--out <dir>]                         #   write under <dir>; implies --no-resume
+    [--no-resume]                         #   write the session but don't launch
+txcript view <id>[#range]                # print a session as compact text
+    [--from <harness>]                    #   scope the id lookup to one harness
+```
+
+`continue` टार्गेट हार्नेस जिथे सेशन्स ठेवतो तिथे सेशन लिहिते, आणि मग त्या सेशनवर तो हार्नेस लाँच करून टर्मिनल त्याच्या हवाली करते:
+
+- एकाच हार्नेसमध्ये: मूळ सेशन जागच्या जागी resume होते.
+- हार्नेस बदलताना (`--with`): सेशन टार्गेटच्या नेटिव्ह फॉरमॅटमध्ये पुन्हा तयार केले जाते. लिहिली जाते ती नेहमी एक कॉपीच; मूळ सेशन कधीही बदलले किंवा हटवले जात नाही.
+- लाँच कमांड हार्नेसनुसार असते आणि बदलता येते: `TRANSCRIPT_<HARNESS>_RESUME_CMD` ला `{id}` टेम्प्लेट द्या, उदा. `TRANSCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
+
+`view` सेशन कॉम्पॅक्ट टेक्स्ट म्हणून छापते; प्रत्येक मेसेजला `── #N ──` अशा रेषेने क्रमांक मिळतो. `#range` त्या छापलेल्या क्रमांकांनुसार मेसेज निवडते — 1 पासून सुरू, दोन्ही टोकं धरून:
+
+- `abc#7`: फक्त मेसेज 7
+- `abc#5-12`: मेसेज 5 ते 12
+- `abc#5-`: मेसेज 5 पासून शेवटपर्यंत
+- `abc#-10`: सुरुवातीपासून मेसेज 10 पर्यंत
+
+`continue` ला हाच suffix चालतो, आणि तेवढेच मेसेज नवीन सेशन म्हणून पुढे चालू होतात. टूल कॉलला त्याच्या रिझल्टपासून तोडणारी रेंज नाकारली जाते, आणि एररमध्ये सर्वात जवळची वैध रेंज सुचवली जाते.
+
+### शोध
+
+```sh
+txcript query 'relay bug'                # one-shot: ranked hits, highlighted
+txcript query                            # fzf-style picker; Enter continues
+    [--from <harness>]                   #   search only <harness> (default: all)
+    [--with <harness>]                   #   continue the pick in <harness>
+```
+
+पिकरला कोणतीही dependency लागत नाही (raw-mode ANSI): टाइप करताच fzf-शैलीच्या fuzzy सिंटॅक्सने फिल्टर होते, arrow keys किंवा ctrl-p/n ने वर-खाली, Enter ने निवडलेले सेशन त्याच्याच हार्नेसमध्ये (किंवा `--with` दिलेल्या हार्नेसमध्ये) पुढे चालू, Esc ने रद्द. कोणत्या प्रकारच्या कंटेंटमध्ये मॅच सापडला — युजर टेक्स्ट, असिस्टंट टेक्स्ट, thinking, टूल यूज, टूल आउटपुट की सेशन मेटाडेटा — हे प्रत्येक ओळीत दिसते.
+
+### MCP सर्व्हर
+
+```sh
+txcript mcp                              # stdio transport
+```
+
+तीन रीड-ओन्ली टूल्स उपलब्ध करून देते; त्यांचे ऑप्शनल फिल्टर CLI सारखेच:
+
+- `list_sessions(from?, cwd?)`
+- `search_sessions(pattern, from?, cwd?)`
+- `read_session(id, from?)`
+
+<sub>\* `from` वगळल्यास सर्व हार्नेस धरले जातात; `cwd` वगळल्यास डिरेक्टरीचा फिल्टर लागत नाही. ज्या सेशनमध्ये working directory नोंदलेली नाही, ती फक्त `cwd` वगळल्यावरच मॅच होतात.</sub>
+
+### शेल कम्प्लीशन्स
+
+```sh
+txcript completion zsh > ~/.zfunc/_txcript      # or wherever your fpath looks
+source <(txcript completion bash)               # bash, ad hoc
+txcript completion fish > ~/.config/fish/completions/txcript.fish
+```
+
+## Rust crate
+
+```toml
+[dependencies]
+txcript = "0.6"
+# Drops the OpenCode SQLite store (rusqlite); the OpenCode codec stays available.
+# txcript = { version = "0.6", default-features = false }
+```
+
+लहानापासून मोठ्यापर्यंत तीन लेयर:
+
+- `Codec`: प्रत्येक हार्नेससाठी `to_common` / `from_common`; `convert::<A, B>` त्यांना canonical मॉडेलमधून साखळीने जोडते.
+- `TextCodec`: `from_text` / `to_text` — हार्नेसचा नेटिव्ह सेशन टेक्स्ट पार्स आणि रेंडर करण्यासाठी, कोणताही I/O न करता.
+- `Store`: खऱ्या बॅकएंडवर (सेशन डिरेक्टरीज, किंवा OpenCode आणि दोन्ही Cursor साठी SQLite DB) discover/load/save.
+
+मेमरीतच रूपांतर (फाइलसिस्टम नाही):
+
+```rust
+use txcript::harness::{claude_code, codex};
+use txcript::{Codec, TextCodec, convert};
+
+let claude = claude_code::ClaudeCode::from_text(jsonl_text)?;          // Transcript<ClaudeCode>
+let codex = convert::<claude_code::ClaudeCode, codex::Codex>(&claude)?; // Transcript<Codex>
+let codex_text = codex::Codex::to_text(&codex)?;                       // native rollout JSONL
+```
+
+किंवा `Store` मार्फत डिस्कवरून:
+
+```rust
+use txcript::harness::{claude_code, codex};
+use txcript::{Store, convert};
+
+let store = claude_code::ClaudeStore::default_root().expect("home dir");
+let found = store.discover()?;                       // cheap metadata scan
+let claude = store.load(&found[0].reference)?;       // Transcript<ClaudeCode>
+
+let codex = convert::<_, codex::Codex>(&claude)?;
+codex::CodexStore::default_root().expect("home dir").save(&codex)?;  // resumable on disk
+```
+
+canonical मॉडेल म्हणजे `Transcript<Common>`: `Meta` + `Vec<Message>`, जिथे `Message` मध्ये टाइप्ड `Block` (`Text`, `Thinking`, `ToolUse`, `ToolResult`, `Image`) आणि टाइप्ड `Tool` enum असतो.
+
+युजरने हार्नेसवर चालवलेल्या स्लॅश कमांड्ससुद्धा (`/release patch`) canonical आहेत: युजर टर्नवर एक `Tool::Command` कॉल येतो, आणि कमांडने परत छापलेलं आउटपुट त्याचा `ToolResult` बनतं.
+
+### शोध (`search` फीचर, डीफॉल्ट चालू)
+
+`txcript::search` [nucleo](https://github.com/helix-editor/nucleo) वापरून ट्रान्सक्रिप्टवर fuzzy आणि substring शोध देते. वन-शॉट शोध:
+
+```rust
+use txcript::search::{Query, search};
+
+let hits = search(&common, &Query::fuzzy("relay bug"));   // fzf syntax: 'exact ^prefix !not
+for hit in hits {
+    // hit.origin: User | Assistant | Thinking | ToolUse | ToolResult | Meta
+    // hit.span addresses the message; hit.highlights are char ranges into hit.line
+    let messages = common.fragment(&hit.span);            // zero-copy: Option<&[Message]>
+}
+```
+
+पिकर-शैलीच्या शोधासाठी `Index` एकदाच बांधा आणि प्रत्येक keystroke ला क्वेरी करा:
+
+```rust
+use txcript::search::{DocKey, Index, Query};
+
+let mut index = Index::new();
+index.insert(DocKey { harness, id }, &common);   // re-insert replaces; caller owns refresh
+let matches = index.query(&Query::fuzzy("srch")); // ranked docs, best lines as hits
+```
+
+रिकामा पॅटर्न दिल्यास सगळ्यात नवीन डॉक्युमेंट्स आधी मिळतात. टूल आउटपुट डीफॉल्ट वगळले जातात; ते हवे असल्यास `Origin::ALL` वापरा. `Query.harnesses`, `Query.limit` आणि `Query.hits_per_doc` ने निकाल मर्यादित करता येतात.
+
+### टेक्स्ट प्रोजेक्शन
+
+`txcript::text::to_text(&common)` हे [`txcript view`](#cli) च्या मागचं प्रोजेक्शन आहे: `Transcript<Common>` चं LLM कॉन्टेक्स्ट म्हणून वापरण्यासाठीचं वन-वे, टोकनांची काटकसर करणारं रेंडरिंग. मेसेजेस, reasoning टेक्स्ट आणि कॉम्पॅक्ट टूल कॉल/रिझल्ट ठेवले जातात; फक्त replay साठी लागणारे payload (एन्क्रिप्टेड reasoning, usage अकाउंटिंग, इनलाइन इमेज बाइट्स) वगळले जातात. `to_text_fragment(&common, &span)` सेशन कंटेंटचा एक `Span` रेंडर करते, आणि प्रत्येक मेसेजचा पूर्ण सेशनमधला क्रमांक तसाच ठेवते.
+
+## npm package
+
+npm पॅकेज कोडेक Bun, Node आणि ब्राउझरसाठी आधीच बिल्ड केलेलं WASM म्हणून देते. सगळा I/O JS होस्ट सांभाळतो; फक्त रूपांतरासाठी लायब्ररीला कॉल केला जातो. `Store` लेयर (फाइलसिस्टम, SQLite, subprocess) नेटिव्हच राहते आणि WASM बिल्डमध्ये नसते.
+
+```ts
+import { convert, toCommon, fromCommon, harnesses } from "txcript";
+import { readFileSync, writeFileSync } from "node:fs";
+
+const input = readFileSync("rollout.jsonl", "utf8");
+
+// native -> native (e.g. a Codex rollout into Claude Code's JSONL)
+writeFileSync("session.jsonl", convert(input, "codex", "claude_code"));
+
+// canonical view, and back
+const common = JSON.parse(toCommon(input, "codex"));   // { meta, messages }
+const pi = fromCommon(JSON.stringify(common), "pi");
+
+harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor","cursor_desktop","grok","amp","antigravity"]
+```
+
+टेक्स्ट-इन / टेक्स्ट-आउट: `input` म्हणजे सोर्स हार्नेसचा नेटिव्ह सेशन टेक्स्ट, आणि रिझल्ट टार्गेटचा. चुकीची हार्नेस नावं किंवा पार्स न होणारे इनपुट JS `Error` फेकतात.
+
+| हार्नेस | सेशन टेक्स्ट |
+|---|---|
+| `claude_code`, `codex`, `pi`, `campfire` | सेशन JSONL |
+| `opencode` | `opencode export` चे JSON |
+| `cursor` | सेशनच्या `store.db` चा JSON एक्स्पोर्ट |
+| `cursor_desktop` | सेशनच्या `state.vscdb` पंक्तींचा JSON डम्प |
+| `grok` | सेशन डिरेक्टरीतील फाइल्सचा JSON बंडल |
+| `amp` | `amp threads export` चे JSON |
+| `antigravity` | संभाषण डेटाबेसचा JSON डम्प, protobuf blob हेक्स-एन्कोडेड |
+
+त्याऐवजी wasm सोर्सपासून बिल्ड करायचे असल्यास:
+
+```sh
+git clone https://github.com/skillsynchq/txcript.git
+cd txcript
+bun run setup        # once: wasm target + wasm-bindgen-cli
+bun run build        # produces ./pkg
+```
+
+## फॉरमॅट डॉक्युमेंटेशन
+
+प्रत्येक ट्रान्सक्रिप्ट फॉरमॅटचं त्याच्या व्हेंडरकडून डॉक्युमेंटेशन असतंच असं नाही. [`docs/formats/`](docs/formats) मध्ये प्रत्येक हार्नेससाठी एक डॉक्युमेंट आहे: सेशन्स डिस्कवर कुठे राहतात, डिस्कव्हरी ती कशी शोधते, फॉरमॅटच्या प्रत्येक भागाचं सविस्तर विश्लेषण आणि त्याच्या खोडी — आणि प्रत्येक विधानाला त्याचा पुरावा जोडलेला आहे: अधिकृत डॉक्युमेंटेशन, हार्नेसचाच ओपन-सोर्स serialization कोड (commit-pinned permalinks सह) किंवा reverse engineering.
+
+## डेव्हलपमेंट
+
+```sh
+cargo test                                          # native suite
+cargo test --no-default-features                    # without the SQLite store
+bun run build && bun examples/convert.ts <file> <from> <to>
+```
+
+बायनरी स्वतःच्या वेगळ्या workspace क्रेटमध्ये (`cli/`, पॅकेज `txcript-cli`) राहते, त्यामुळे तिच्या dependencies (clap) लायब्ररी वापरणाऱ्यांपर्यंत कधीच पोहोचत नाहीत.
+
+## लायसन्स
+
+[Apache-2.0](LICENSE)
