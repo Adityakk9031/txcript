@@ -324,10 +324,7 @@ fn find_session<'a>(
 /// `prefix`. Claude Code writes a session resumed from another cwd under the
 /// same id in a second store; those copies collapse to the first (newest —
 /// discovery order) rather than reading as an ambiguity.
-fn distinct_prefix_matches<'a>(
-    ids: impl Iterator<Item = &'a str>,
-    prefix: &str,
-) -> Vec<usize> {
+fn distinct_prefix_matches<'a>(ids: impl Iterator<Item = &'a str>, prefix: &str) -> Vec<usize> {
     let mut seen: Vec<&str> = Vec::new();
     let mut hits = Vec::new();
     for (i, id) in ids.enumerate() {
@@ -386,12 +383,14 @@ fn parse_when(s: &str, end_of_day: bool) -> Result<chrono::DateTime<chrono::Utc>
     };
     // Bare dates read as the user's local calendar. A time made ambiguous or
     // skipped by a DST edge takes the earlier mapping; UTC is the fallback.
-    Ok(match chrono::Local.from_local_datetime(&date.and_time(time)) {
-        chrono::LocalResult::Single(t) | chrono::LocalResult::Ambiguous(t, _) => {
-            t.with_timezone(&chrono::Utc)
-        }
-        chrono::LocalResult::None => chrono::Utc.from_utc_datetime(&date.and_time(time)),
-    })
+    Ok(
+        match chrono::Local.from_local_datetime(&date.and_time(time)) {
+            chrono::LocalResult::Single(t) | chrono::LocalResult::Ambiguous(t, _) => {
+                t.with_timezone(&chrono::Utc)
+            }
+            chrono::LocalResult::None => chrono::Utc.from_utc_datetime(&date.and_time(time)),
+        },
+    )
 }
 
 /// Compact age for the listing's WHEN column: relative inside a week, the
@@ -400,10 +399,7 @@ fn format_when(ts: chrono::DateTime<chrono::Utc>) -> String {
     format_when_at(ts, chrono::Utc::now())
 }
 
-fn format_when_at(
-    ts: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> String {
+fn format_when_at(ts: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
     let delta = now.signed_duration_since(ts);
     // Small clock skew (a session stamped just ahead of us) reads as now.
     match delta {
@@ -411,7 +407,10 @@ fn format_when_at(
         d if d.num_minutes() < 60 => format!("{}m ago", d.num_minutes()),
         d if d.num_hours() < 24 => format!("{}h ago", d.num_hours()),
         d if d.num_days() < 7 => format!("{}d ago", d.num_days()),
-        _ => ts.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string(),
+        _ => ts
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string(),
     }
 }
 
@@ -490,7 +489,10 @@ mod resolve_tests {
         // (newest) copy.
         assert_eq!(distinct_prefix_matches(ids.into_iter(), "abc"), [0, 1]);
         assert_eq!(distinct_prefix_matches(ids.into_iter(), "abc1"), [0]);
-        assert_eq!(distinct_prefix_matches(ids.into_iter(), "nope"), [] as [usize; 0]);
+        assert_eq!(
+            distinct_prefix_matches(ids.into_iter(), "nope"),
+            [] as [usize; 0]
+        );
     }
 }
 
