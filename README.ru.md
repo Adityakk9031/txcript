@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<p align="center">Библиотека для переноса сессий между кодинг-агентами</p>
+<p align="center">Библиотека для переноса сессий между харнессами</p>
 
 <p align="center">
   <a href="README.md">English</a> | <a href="README.ja.md">日本語</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.zh-TW.md">繁體中文</a> | <a href="README.ko.md">한국어</a> | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.it.md">Italiano</a> | <a href="README.pt-BR.md">Português (Brasil)</a> | Русский
@@ -20,20 +20,24 @@
 </p>
 
 <p align="center">
-  <a href="https://claude.com/claude-code"><img src="https://github.com/anthropics.png?size=160" alt="Claude Code" height="44" width="44"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://claude.com/claude-code"><img src="docs/assets/claude-icon.svg" alt="Claude Code" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://github.com/openai/codex"><img src="https://github.com/openai.png?size=160" alt="Codex" height="44" width="44"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://opencode.ai"><img src="https://opencode.ai/apple-touch-icon-v3.png" alt="OpenCode" height="44" width="44"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://pi.dev"><img src="https://pi.dev/logo-auto.svg" alt="pi" height="44" width="44"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://cursor.com"><img src="https://github.com/cursor.png?size=160" alt="Cursor" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://github.com/xai-org/grok-build"><img src="https://github.com/xai-org.png?size=160" alt="Grok CLI" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://ampcode.com"><img src="https://ampcode.com/app-icon.png?v=3" alt="Amp" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://antigravity.google"><img src="https://github.com/google-antigravity.png?size=160" alt="Antigravity" height="44" width="44"></a>
 </p>
 
-Начните сессию в Claude Code, упритесь в лимит использования или в тупик — и
-продолжите её в Codex, с полной историей разговора, рассуждений и вызовов
-инструментов:
+Начните сессию в Claude Code, упритесь в лимит использования или в тупик, и продолжите её в Codex с полной историей разговора, рассуждений и вызовов инструментов:
 
 ```console
 $ txcript list
@@ -44,39 +48,18 @@ $ txcript list
 $ txcript continue 9f3a21 --with codex    # re-synthesize into Codex, then launch it
 ```
 
-txcript отображает нативный формат транскрипта каждого harness через
-типизированную общую модель. Нативные загрузка и сохранение побайтово точны,
-без потерь; конвертация между harness'ами сохраняет сообщения, рассуждения,
-вызовы инструментов, их результаты, изображения, метаданные и данные об
-использовании токенов, где они доступны. Проект поставляется как
-**библиотека на Rust**, **CLI** и готовый **WASM-модуль** для Bun, Node и
-браузеров.
+txcript отображает нативный формат транскрипта каждого харнесса через типизированную общую модель. Нативные загрузка и сохранение побайтово точны, без потерь; конвертация между харнессами сохраняет сообщения, рассуждения, вызовы инструментов, их результаты, изображения, метаданные и данные об использовании, где они доступны. Проект поставляется как [**CLI**](#cli), [**Rust-крейт**](#rust-крейт) и [**npm-пакет**](#npm-пакет).
 
 ## Основные возможности
 
-- **9 harness'ов, одна модель** — каждый формат конвертируется через
-  `Transcript<Common>`, поэтому добавление нового harness сразу связывает его
-  со всеми остальными.
-- **Побайтово точные round-trip'ы** — загрузка и сохранение сессии в её
-  собственном формате воспроизводит её байт в байт.
-- **Продолжайте где угодно** — `txcript continue <id> --with <harness>`
-  переписывает сессию в нативный формат другого harness и запускает его.
-  Оригинал никогда не изменяется.
-- **Поиск по всему** — нечёткий и подстроковый поиск по всем сессиям на
-  машине (синтаксис в стиле fzf, на основе [nucleo](https://github.com/helix-editor/nucleo)):
-  как библиотечный API, разовый запрос из CLI или интерактивный picker.
-- **MCP-сервер** — `txcript mcp` предоставляет read-only-инструменты
-  `list_sessions`, `search_sessions` и `read_session`, так что агенты могут
-  использовать прошлые сессии как контекст.
-- **Задокументированные форматы** — формат хранения каждого harness описан в
-  [`docs/formats/`](docs/formats), с указанием источника каждого утверждения
-  (официальная документация, permalink'и на исходный код или заметки по
-  реверс-инжинирингу).
+- **10 харнессов, одна модель** — каждый формат конвертируется через `Transcript<Common>`, поэтому добавление харнесса связывает его со всеми остальными.
+- **Побайтово точные round-trip'ы** — загрузка и сохранение сессии в её собственном формате воспроизводит её точно.
+- **Продолжайте где угодно** — `txcript continue <id> --with <harness>` переписывает сессию в нативный формат другого харнесса и запускает его. Оригинал никогда не изменяется.
+- **Поиск по всему** — нечёткий/подстроковый поиск по всем сессиям на машине (синтаксис в стиле fzf, на основе [nucleo](https://github.com/helix-editor/nucleo)), как библиотечный API, разовый запрос из CLI или интерактивный picker.
+- **MCP-сервер** — `txcript mcp` предоставляет read-only-инструменты `list_sessions`, `search_sessions` и `read_session`, так что агенты могут использовать прошлые сессии как контекст.
+- **Задокументированные форматы** — формат хранения каждого харнесса описан в [`docs/formats/`](docs/formats), с указанием источника каждого утверждения (официальная документация, permalink'и на исходный код или заметки по реверс-инжинирингу).
 
-## Поддерживаемые harness'ы
-
-Каждый harness конвертируется через одну и ту же каноническую модель, поэтому
-добавление нового сразу связывает его со всеми остальными:
+## Поддерживаемые харнессы
 
 ```mermaid
 flowchart LR
@@ -85,15 +68,14 @@ flowchart LR
     opencode["OpenCode"] <--> common
     pi["pi"] <--> common
     campfire["Campfire"] <--> common
-    common <--> cursor["Cursor"]
+    common <--> cursor["Cursor CLI"]
+    common <--> cursordesktop["Cursor desktop"]
     common <--> grok["Grok CLI"]
     common <--> antigravity["Antigravity"]
     amp["Amp"] --> common
 ```
 
-Обнаружение, вывод списка, поиск, `view` и побайтово точные нативные
-round-trip'ы работают для всех девяти. Строковые id — это то, что принимают
-CLI и WASM API.
+Обнаружение, вывод списка, поиск, `view` и нативные round-trip'ы работают для каждого харнесса. Строки `id` — это то, что принимают CLI и WASM API.
 
 | Harness | id | Сессии на диске | Нативный формат | Конвертация | Продолжение в | Док. |
 |---|---|---|---|:---:|:---:|---|
@@ -101,14 +83,14 @@ CLI и WASM API.
 | [Codex](https://github.com/openai/codex) | `codex` | `~/.codex/sessions/` | rollout JSONL | ⇄ | ✓ | [спецификация](docs/formats/codex.md) |
 | [OpenCode](https://opencode.ai) | `opencode` | `~/.local/share/opencode/opencode.db` | SQLite | ⇄ | ✓ | [спецификация](docs/formats/opencode.md) |
 | [pi](https://pi.dev) | `pi` | `~/.pi/agent/sessions/` | JSONL | ⇄ | ✓ | [спецификация](docs/formats/pi.md) |
-| Campfire | `campfire` | `~/.campfire/agent/sessions/` | JSONL | ⇄ | ✓ | [спецификация](docs/formats/campfire.md) |
-| [Cursor](https://cursor.com) | `cursor` | `~/.cursor/chats/` | SQLite (`store.db`) | ⇄ | ✓ | [спецификация](docs/formats/cursor.md) |
+| [Campfire](docs/formats/campfire.md) | `campfire` | `~/.campfire/agent/sessions/` | JSONL | ⇄ | ✓ | [спецификация](docs/formats/campfire.md) |
+| [Cursor CLI](https://cursor.com/cli) | `cursor` | `~/.cursor/chats/` | SQLite | ⇄ | ✓ | [спецификация](docs/formats/cursor.md) |
+| [Cursor desktop](https://cursor.com) | `cursor_desktop` | `<Cursor User dir>/globalStorage/` | SQLite | ⇄ | ✓ | — |
 | [Grok CLI](https://github.com/xai-org/grok-build) | `grok` | `~/.grok/sessions/` | каталог сессии (JSON) | ⇄ | ✓ | [спецификация](docs/formats/grok.md) |
 | [Amp](https://ampcode.com) | `amp` | `~/.local/share/amp/threads/` | JSON треда | → | — <sup>1</sup> | [спецификация](docs/formats/amp.md) |
-| [Antigravity](https://antigravity.google) | `antigravity` | `~/.gemini/antigravity-cli/` | SQLite (protobuf) | ⇄ | ✓ | [спецификация](docs/formats/antigravity.md) |
+| [Antigravity](https://antigravity.google) | `antigravity` | `~/.gemini/antigravity-cli/` | SQLite | ⇄ | ✓ | [спецификация](docs/formats/antigravity.md) |
 
-<sup>1</sup> Треды Amp хранятся на сервере, а у CLI нет импорта: сессии
-конвертируются *из* Amp, но продолжить их в нём нельзя.
+<sup>1</sup> Треды Amp хранятся на сервере, а у CLI нет импорта: сессии конвертируются *из* Amp, но продолжить их в нём нельзя.
 
 ## Установка
 
@@ -119,13 +101,13 @@ cargo install --git https://github.com/skillsynchq/txcript txcript-cli
 # or from a checkout: cargo install --path cli
 ```
 
-**Библиотека Rust**:
+**Rust-крейт**:
 
 ```sh
 cargo add txcript
 ```
 
-**JS / TS** (готовый WASM, Rust-тулчейн не нужен):
+**npm-пакет** (готовый WASM, Rust-тулчейн не нужен):
 
 ```sh
 bun add txcript     # or: npm install txcript
@@ -133,7 +115,7 @@ bun add txcript     # or: npm install txcript
 
 ## CLI
 
-Найдите локальные сессии и продолжите любую из них в любом harness:
+Найдите локальные сессии и продолжите любую из них в любом харнессе:
 
 ```sh
 txcript list                             # local sessions across every harness
@@ -146,22 +128,20 @@ txcript view <id>[#range]                # print a session as compact text
     [--from <harness>]                    #   scope the id lookup to one harness
 ```
 
-`continue` по завершении передаёт терминал harness'у (в Unix — через `exec`).
-Продолжение в том же harness возобновляет оригинал на месте; `--with` сначала
-пересинтезирует сессию в нативный формат другого harness. При продолжении в
-другом harness исходная сессия остаётся там, где была: записывается всегда
-копия; источник никогда не изменяется и не удаляется. Команду запуска для
-каждого harness можно переопределить через `TRANSCRIPT_<HARNESS>_RESUME_CMD`
-(шаблон с `{id}`), например `TRANSCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
+`continue` записывает сессию туда, где целевой харнесс хранит свои сессии, а затем запускает этот харнесс на ней, передавая ему терминал:
 
-`view` печатает экономную по токенам текстовую проекцию, где линия
-`── #N ──` нумерует каждое сообщение. `#range` задаёт диапазон сообщений
-(нумерация с 1, границы включительно) — `abc#7` — это сообщение 7,
-`abc#5-12`, `abc#5-` (с 5-го и дальше), `abc#-10` (по 10-е) — и напечатанные
-номера — это именно те, которыми оперируют диапазоны: на что смотрите, на то
-и ссылаетесь. `continue` принимает тот же суффикс и продолжает только эти
-сообщения как новую сессию; диапазоны, отрезающие вызов инструмента от его
-результата, отклоняются с подсказкой ближайшего допустимого диапазона.
+- Тот же харнесс: возобновляет оригинал на месте.
+- Другой харнесс (`--with`): пересинтезирует сессию в нативный формат целевого харнесса. Записывается всегда копия; исходная сессия никогда не изменяется и не удаляется.
+- Команда запуска задаётся отдельно для каждого харнесса и переопределяется: установите `TRANSCRIPT_<HARNESS>_RESUME_CMD` в шаблон с `{id}`, например `TRANSCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
+
+`view` печатает сессию как компактный текст, где каждое сообщение пронумеровано линией `── #N ──`. `#range` выбирает сообщения по этим напечатанным порядковым номерам, нумерация с 1, границы включительно:
+
+- `abc#7`: только сообщение 7
+- `abc#5-12`: сообщения с 5 по 12
+- `abc#5-`: с сообщения 5 и до конца
+- `abc#-10`: с начала по сообщение 10
+
+`continue` принимает тот же суффикс и продолжает только эти сообщения как новую сессию. Диапазон, отрезающий вызов инструмента от его результата, отклоняется, а в ошибке предлагается ближайший допустимый диапазон.
 
 ### Поиск
 
@@ -172,12 +152,7 @@ txcript query                            # fzf-style picker; Enter continues
     [--with <harness>]                   #   continue the pick in <harness>
 ```
 
-Picker не требует зависимостей (ANSI в raw-режиме): набирайте текст для
-фильтрации с нечётким синтаксисом в стиле fzf, стрелки / ctrl-p/n —
-перемещение, Enter — продолжить выбранную сессию в её родном harness (или в
-указанном через `--with`), Esc — отмена. Каждая строка показывает, какой тип
-содержимого совпал — текст пользователя, текст ассистента, размышления,
-вызов инструмента, вывод инструмента или метаданные сессии.
+Picker не требует зависимостей (ANSI в raw-режиме): набирайте текст для фильтрации с нечётким синтаксисом в стиле fzf, стрелки / ctrl-p/n для перемещения, Enter — продолжить выбранную сессию в её родном харнессе (или в указанном через `--with`), Esc — отмена. Каждая строка показывает, какой тип содержимого совпал: текст пользователя, текст ассистента, размышления, вызов инструмента, вывод инструмента или метаданные сессии.
 
 ### MCP-сервер
 
@@ -185,16 +160,13 @@ Picker не требует зависимостей (ANSI в raw-режиме): 
 txcript mcp                              # stdio transport
 ```
 
-Предоставляет ровно три read-only-инструмента; их необязательные фильтры
-совпадают с CLI:
+Предоставляет три read-only-инструмента; их необязательные фильтры совпадают с CLI:
 
 - `list_sessions(from?, cwd?)`
 - `search_sessions(pattern, from?, cwd?)`
 - `read_session(id, from?)`
 
-Если `from` не указан, включаются все harness'ы. Если не указан `cwd`, фильтр
-по каталогу не применяется — попадают и сессии без записанного рабочего
-каталога; если `cwd` задан, такие сессии не совпадают.
+<sub>\* Если `from` не указан, включаются все харнессы; если не указан `cwd`, фильтр по каталогу не применяется. Сессии без записанного рабочего каталога совпадают только тогда, когда `cwd` опущен.</sub>
 
 ### Автодополнение shell
 
@@ -204,23 +176,20 @@ source <(txcript completion bash)               # bash, ad hoc
 txcript completion fish > ~/.config/fish/completions/txcript.fish
 ```
 
-## Библиотека Rust
+## Rust-крейт
 
 ```toml
 [dependencies]
-txcript = "0.5"
+txcript = "0.6"
 # Drops the OpenCode SQLite store (rusqlite); the OpenCode codec stays available.
-# txcript = { version = "0.5", default-features = false }
+# txcript = { version = "0.6", default-features = false }
 ```
 
 Три слоя, от меньшего к большему:
 
-- `Codec` — `to_common` / `from_common` для каждого harness;
-  `convert::<A, B>` связывает их через каноническую модель.
-- `TextCodec` — `from_text` / `to_text`: парсинг и рендеринг нативного текста
-  сессии harness, без I/O.
-- `Store` — обнаружение/загрузка/сохранение поверх реального бэкенда
-  (каталоги сессий или базы SQLite для OpenCode и Cursor).
+- `Codec` — `to_common` / `from_common` для каждого харнесса; `convert::<A, B>` связывает их через каноническую модель.
+- `TextCodec` — `from_text` / `to_text` для парсинга и рендеринга нативного текста сессии харнесса, без I/O.
+- `Store` — обнаружение/загрузка/сохранение поверх реального бэкенда (каталоги сессий или базы SQLite для OpenCode и обоих Cursor'ов).
 
 Конвертация в памяти (без файловой системы):
 
@@ -247,22 +216,13 @@ let codex = convert::<_, codex::Codex>(&claude)?;
 codex::CodexStore::default_root().expect("home dir").save(&codex)?;  // resumable on disk
 ```
 
-Каноническая модель — `Transcript<Common>`: `Meta` + `Vec<Message>`, где
-`Message` содержит типизированные блоки `Block` (`Text`, `Thinking`,
-`ToolUse`, `ToolResult`, `Image`) и типизированный enum `Tool`.
+Каноническая модель — `Transcript<Common>`: `Meta` + `Vec<Message>`, где `Message` содержит типизированные блоки `Block` (`Text`, `Thinking`, `ToolUse`, `ToolResult`, `Image`) и типизированный enum `Tool`.
 
-Slash-команда, которую пользователь выполнил в harness, — это
-`Tool::Command` в пользовательском ходе, а то, что harness вывел в ответ, —
-парный `ToolResult`; поэтому `/release patch` читается как вызов, а не как та
-разметка, в которой harness случайно её записал. Канонический признак —
-ведущий `/`: ни одно имя инструмента, видимое модели, с него не начинается.
-Шаблонный текст, который harness каждый раз генерирует сам (примечание
-Claude Code о локальных командах), в модель не попадает.
+Slash-команды, которые пользователь выполнил в харнессе (`/release patch`), тоже канонические: вызов `Tool::Command` в пользовательском ходе, в паре с тем, что команда вывела в ответ, как `ToolResult`.
 
 ### Поиск (фича `search`, включена по умолчанию)
 
-`txcript::search` поддерживает нечёткий и подстроковый поиск по транскриптам
-через [nucleo](https://github.com/helix-editor/nucleo). Разовый поиск:
+`txcript::search` поддерживает нечёткий и подстроковый поиск по транскриптам через [nucleo](https://github.com/helix-editor/nucleo). Разовый поиск:
 
 ```rust
 use txcript::search::{Query, search};
@@ -275,8 +235,7 @@ for hit in hits {
 }
 ```
 
-Для поиска в стиле picker'а постройте `Index` один раз и запрашивайте его на
-каждое нажатие клавиши:
+Для поиска в стиле picker'а постройте `Index` один раз и запрашивайте его на каждое нажатие клавиши:
 
 ```rust
 use txcript::search::{DocKey, Index, Query};
@@ -286,31 +245,15 @@ index.insert(DocKey { harness, id }, &common);   // re-insert replaces; caller o
 let matches = index.query(&Query::fuzzy("srch")); // ranked docs, best lines as hits
 ```
 
-Пустой паттерн возвращает документы от новых к старым. Вывод инструментов по
-умолчанию исключён; чтобы включить его, используйте `Origin::ALL`.
-`Query.harnesses`, `Query.limit` и `Query.hits_per_doc` сужают результаты.
+Пустой паттерн возвращает документы от новых к старым. Вывод инструментов по умолчанию исключён; используйте `Origin::ALL`, чтобы включить его. `Query.harnesses`, `Query.limit` и `Query.hits_per_doc` сужают результаты.
 
 ### Текстовая проекция
 
-`txcript::text::to_text(&common)` — односторонняя, экономная по токенам
-проекция `Transcript<Common>` для использования в качестве контекста LLM. Она
-сохраняет сообщения, текст рассуждений и компактные вызовы и результаты
-инструментов, опуская нужные только для реплея данные: зашифрованные
-рассуждения, учёт использования токенов и встроенные байты изображений.
-`to_text_fragment(&common, &span)` рендерит `Span` тела в том же формате с
-линиями `── #N ──`, несущими порядковый номер (с 1) каждого сообщения в
-полной сессии — ту самую нумерацию, которую печатает `txcript view`.
+`txcript::text::to_text(&common)` — проекция, лежащая в основе [`txcript view`](#cli): односторонний, экономный по токенам рендеринг `Transcript<Common>` для использования в качестве контекста LLM. Она сохраняет сообщения, текст рассуждений и компактные вызовы/результаты инструментов; данные, нужные только для реплея (зашифрованные рассуждения, учёт использования, встроенные байты изображений), опускаются. `to_text_fragment(&common, &span)` рендерит `Span` тела, сохраняя порядковый номер каждого сообщения в полной сессии.
 
-## WASM-модуль (Bun / Node / браузеры)
+## npm-пакет
 
-Чистый кодек компилируется в WebAssembly; весь I/O выполняет JS-хост,
-обращаясь к модулю только за преобразованием. Слой `Store` (файловая система,
-SQLite, подпроцессы) остаётся нативным и исключён из WASM-сборки. npm-пакет
-поставляется с уже собранным wasm:
-
-```sh
-bun add txcript     # or: npm install txcript
-```
+npm-пакет поставляется с кодеком, собранным в WASM, для Bun, Node и браузеров. JS-хост владеет всем I/O и обращается к модулю только за преобразованием; слой `Store` (файловая система, SQLite, подпроцессы) остаётся нативным и исключён из WASM-сборки.
 
 ```ts
 import { convert, toCommon, fromCommon, harnesses } from "txcript";
@@ -325,17 +268,20 @@ writeFileSync("session.jsonl", convert(input, "codex", "claude_code"));
 const common = JSON.parse(toCommon(input, "codex"));   // { meta, messages }
 const pi = fromCommon(JSON.stringify(common), "pi");
 
-harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor","grok","amp","antigravity"]
+harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor","cursor_desktop","grok","amp","antigravity"]
 ```
 
-Текст на входе / текст на выходе: `input` — это нативный текст сессии harness
-(JSONL для claude_code/codex/pi/campfire, JSON из `opencode export` для
-opencode, JSON-экспорт `store.db` Cursor для cursor, JSON-бандл файлов
-каталога сессии для grok, JSON-документ треда — в форме
-`amp threads export` — для amp и JSON-дамп базы данных разговора —
-protobuf-блобы шагов в hex-кодировке — для antigravity); результат — нативный
-текст целевого формата. Неверные имена harness или неразбираемый ввод бросают
-JS-`Error`.
+Текст на входе / текст на выходе: `input` — это нативный текст сессии исходного харнесса, а результат — текст целевого. Неверные имена харнесса или неразбираемый ввод бросают JS-`Error`.
+
+| Harness | Текст сессии |
+|---|---|
+| `claude_code`, `codex`, `pi`, `campfire` | JSONL сессии |
+| `opencode` | JSON из `opencode export` |
+| `cursor` | JSON-экспорт `store.db` сессии |
+| `cursor_desktop` | JSON-дамп строк `state.vscdb` сессии |
+| `grok` | JSON-бандл файлов каталога сессии |
+| `amp` | JSON из `amp threads export` |
+| `antigravity` | JSON-дамп базы данных разговора, protobuf-блобы в hex-кодировке |
 
 Чтобы собрать wasm из исходников:
 
@@ -348,12 +294,7 @@ bun run build        # produces ./pkg
 
 ## Документация форматов
 
-Не все эти форматы транскриптов задокументированы их разработчиками. В
-[`docs/formats/`](docs/formats) есть по одному документу на каждый harness —
-где сессии лежат на диске, как их находит механизм обнаружения, разбор каждой
-части формата и его особенности — и каждое утверждение снабжено указанием
-источника: официальная документация, собственный открытый код сериализации
-harness (со ссылками, закреплёнными за коммитом) или реверс-инжиниринг.
+Не все эти форматы транскриптов задокументированы их разработчиками. В [`docs/formats/`](docs/formats) есть один документ на каждый харнесс, где описано, где сессии лежат на диске, как их находит механизм обнаружения, разбор каждой части формата и его особенности, и каждое утверждение снабжено указанием источника: официальная документация, собственный открытый код сериализации харнесса (со ссылками, закреплёнными за коммитом) или реверс-инжиниринг.
 
 ## Разработка
 
@@ -363,9 +304,7 @@ cargo test --no-default-features                    # without the SQLite store
 bun run build && bun examples/convert.ts <file> <from> <to>
 ```
 
-Бинарник живёт в отдельном workspace-крейте (`cli/`, пакет `txcript-cli`),
-поэтому его зависимости (clap) никогда не затрагивают потребителей
-библиотеки.
+Бинарник живёт в отдельном workspace-крейте (`cli/`, пакет `txcript-cli`), поэтому его зависимости (clap) никогда не затрагивают потребителей библиотеки.
 
 ## Лицензия
 
