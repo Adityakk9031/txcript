@@ -333,8 +333,19 @@ fn build_export(meta: &Meta, messages: &[Message]) -> Export {
         format!("ses_{}", meta.id.replace('-', ""))
     };
     let now = meta.timestamp.timestamp_millis();
+    // `opencode import` validates messages against its live schema, which
+    // requires an agent, a model, and (on assistant turns) a mode, a path,
+    // and the id of the user message that prompted the turn.
+    let model_id = |msg: &Message| {
+        msg.model
+            .clone()
+            .or_else(|| meta.model.clone())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
+    let cwd = meta.cwd.clone().unwrap_or_default();
 
     let mut out: Vec<MessageRecord> = Vec::new();
+    let mut last_user_msg_id: Option<String> = None;
     let mut idx = 0usize;
     while idx < messages.len() {
         let msg = &messages[idx];
@@ -353,6 +364,12 @@ fn build_export(meta: &Meta, messages: &[Message]) -> Export {
         match msg.role {
             Role::User => {
                 info.insert("role".into(), json!("user"));
+                info.insert("agent".into(), json!("build"));
+                info.insert(
+                    "model".into(),
+                    json!({ "providerID": "anthropic", "modelID": model_id(msg) }),
+                );
+                last_user_msg_id = Some(msg_id.clone());
                 for (j, block) in msg.content.iter().enumerate() {
                     if let Some(part) = user_part(block, &session_id, &msg_id, idx, j, msg_ms) {
                         parts.push(part);
@@ -361,10 +378,15 @@ fn build_export(meta: &Meta, messages: &[Message]) -> Export {
             }
             Role::Assistant => {
                 info.insert("role".into(), json!("assistant"));
-                if let Some(model) = msg.model.clone().or_else(|| meta.model.clone()) {
-                    info.insert("modelID".into(), json!(model));
-                    info.insert("providerID".into(), json!("anthropic"));
-                }
+                info.insert("modelID".into(), json!(model_id(msg)));
+                info.insert("providerID".into(), json!("anthropic"));
+                info.insert("mode".into(), json!("build"));
+                info.insert("agent".into(), json!("build"));
+                info.insert(
+                    "parentID".into(),
+                    json!(last_user_msg_id.clone().unwrap_or_else(|| msg_id.clone())),
+                );
+                info.insert("path".into(), json!({ "cwd": cwd, "root": cwd }));
                 info.insert("finish".into(), json!(finish_str(msg.stop_reason.as_ref())));
                 info.insert("cost".into(), json!(0.0));
                 info.insert("tokens".into(), tokens_value(msg.usage.as_ref()));
@@ -401,6 +423,9 @@ fn build_export(meta: &Meta, messages: &[Message]) -> Export {
     Export {
         info: json!({
             "id": session_id,
+            // `opencode import` requires a slug; derive it from the session
+            // id so re-imports stay stable.
+            "slug": format!("txcript-{}", &det_hex(&session_id, 0, 0)[..8]),
             "directory": meta.cwd.clone().unwrap_or_default(),
             "title": meta.title.clone().unwrap_or_default(),
             "version": meta.cli_version.clone().unwrap_or_default(),
@@ -629,9 +654,18 @@ fn parse_tokens(tokens: Option<&Value>) -> Option<Usage> {
     let input = tokens.get("input").and_then(Value::as_u64).unwrap_or(0);
     let output = tokens.get("output").and_then(Value::as_u64).unwrap_or(0);
     let cache = tokens.get("cache");
-    let cache_read = cache.and_then(|c| c.get("read")).and_then(Value::as_u64);
-    let cache_write = cache.and_then(|c| c.get("write")).and_then(Value::as_u64);
-    // An all-zero, cache-less token object means no usage was recorded.
+    // A zero cache count means "no cache activity", which is the same fact
+    // `None` records; collapsing them keeps the codec a fixpoint now that
+    // `tokens_value` must always write the cache object out.
+    let cache_read = cache
+        .and_then(|c| c.get("read"))
+        .and_then(Value::as_u64)
+        .filter(|&n| n != 0);
+    let cache_write = cache
+        .and_then(|c| c.get("write"))
+        .and_then(Value::as_u64)
+        .filter(|&n| n != 0);
+    // An all-zero token object means no usage was recorded.
     (input != 0 || output != 0 || cache_read.is_some() || cache_write.is_some()).then_some(Usage {
         input_tokens: input,
         output_tokens: output,
@@ -641,28 +675,17 @@ fn parse_tokens(tokens: Option<&Value>) -> Option<Usage> {
 }
 
 fn tokens_value(usage: Option<&Usage>) -> Value {
-    // Only emit cache counts that are actually present — writing a 0 would read
-    // back as `Some(0)` and a `None` cache wouldn't round-trip.
-    let mut cache = Map::new();
-    if let Some(u) = usage {
-        if let Some(read) = u.cache_read_input_tokens {
-            cache.insert("read".into(), json!(read));
-        }
-        if let Some(write) = u.cache_creation_input_tokens {
-            cache.insert("write".into(), json!(write));
-        }
-    }
-    let mut tokens = json!({
+    // `opencode import` requires the full tokens object, cache included;
+    // absent counts are written as 0 (and read back as `Some(0)`).
+    json!({
         "input": usage.map_or(0, |u| u.input_tokens),
         "output": usage.map_or(0, |u| u.output_tokens),
         "reasoning": 0,
-    });
-    if !cache.is_empty()
-        && let Value::Object(obj) = &mut tokens
-    {
-        obj.insert("cache".into(), Value::Object(cache));
-    }
-    tokens
+        "cache": {
+            "read": usage.and_then(|u| u.cache_read_input_tokens).unwrap_or(0),
+            "write": usage.and_then(|u| u.cache_creation_input_tokens).unwrap_or(0),
+        },
+    })
 }
 
 fn parse_finish(s: &str) -> StopReason {
@@ -1038,7 +1061,7 @@ mod store {
     fn session_row(conn: &Connection, id: &str) -> Result<(Meta, Value)> {
         let mut stmt = conn
             .prepare(
-                "SELECT directory, title, version, time_created, model \
+                "SELECT directory, title, version, time_created, model, slug, time_updated \
                  FROM session WHERE id = ?1",
             )
             .map_err(sqlite_err)?;
@@ -1050,10 +1073,12 @@ mod store {
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
                 ))
             })
             .map_err(sqlite_err)?;
-        let (directory, title, version, time_created, model_json) = row;
+        let (directory, title, version, time_created, model_json, slug, time_updated) = row;
         let timestamp = time_created
             .and_then(DateTime::from_timestamp_millis)
             .unwrap_or_else(Utc::now);
@@ -1068,10 +1093,14 @@ mod store {
         };
         let info = serde_json::json!({
             "id": id,
+            "slug": slug.unwrap_or_default(),
             "directory": directory.unwrap_or_default(),
             "title": title.unwrap_or_default(),
             "version": version.unwrap_or_default(),
-            "time": { "created": time_created.unwrap_or(0) },
+            "time": {
+                "created": time_created.unwrap_or(0),
+                "updated": time_updated.or(time_created).unwrap_or(0),
+            },
         });
         Ok((meta, info))
     }
@@ -1119,13 +1148,14 @@ mod store {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
                 "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, \
-                   version TEXT, time_created INTEGER, time_archived INTEGER, model TEXT);\
+                   version TEXT, time_created INTEGER, time_archived INTEGER, model TEXT, \
+                   slug TEXT, time_updated INTEGER);\
                  CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);\
                  CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT);",
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO session VALUES ('ses_1','/repo','Demo','1.15.0',1778834704515,NULL,'{\"id\":\"claude-opus-4-7\"}')",
+                "INSERT INTO session VALUES ('ses_1','/repo','Demo','1.15.0',1778834704515,NULL,'{\"id\":\"claude-opus-4-7\"}','clever-engine',1778834704516)",
                 [],
             )
             .unwrap();
@@ -1198,7 +1228,7 @@ mod store {
             let path = make_db();
             let conn = Connection::open(&path).unwrap();
             conn.execute(
-                "INSERT INTO session VALUES ('ses_2','/repo','Archived','1.15.0',1778834704600,1778834704999,NULL)",
+                "INSERT INTO session VALUES ('ses_2','/repo','Archived','1.15.0',1778834704600,1778834704999,NULL,'quiet-harbor',1778834704601)",
                 [],
             )
             .unwrap();
