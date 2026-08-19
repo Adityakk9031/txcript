@@ -211,7 +211,7 @@ Three layers, smallest to largest:
 - `TextCodec`: `from_text` / `to_text` to parse and render a harness's native session
   text, no I/O.
 - `Store`: discover/load/save against a real backend (session directories, or
-  SQLite DBs for OpenCode and Cursor).
+  SQLite DBs for OpenCode and both Cursors).
 
 Convert in memory (no filesystem):
 
@@ -313,12 +313,13 @@ writeFileSync("session.jsonl", convert(input, "codex", "claude_code"));
 const common = JSON.parse(toCommon(input, "codex"));   // { meta, messages }
 const pi = fromCommon(JSON.stringify(common), "pi");
 
-harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor","grok","amp","antigravity"]
+harnesses(); // ["claude_code","codex","opencode","pi","campfire","cursor","cursor_desktop","grok","amp","antigravity"]
 ```
 
 Text-in / text-out: `input` is a harness's native session text (JSONL for
 claude_code/codex/pi/campfire, the `opencode export` JSON for opencode, a
-JSON export of Cursor's `store.db` for cursor, a JSON bundle of the session
+JSON export of Cursor's `store.db` for cursor, a JSON dump of the session's
+`state.vscdb` rows for cursor_desktop, a JSON bundle of the session
 directory's files for grok, the `amp threads export` JSON
 document for amp, and a JSON dump of the conversation database with
 hex-encoded protobuf step blobs for antigravity); the result is

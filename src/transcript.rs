@@ -238,19 +238,21 @@ pub enum HarnessId {
     Pi,
     Campfire,
     Cursor,
+    CursorDesktop,
     Grok,
     Amp,
     Antigravity,
 }
 
 impl HarnessId {
-    pub const ALL: [HarnessId; 9] = [
+    pub const ALL: [HarnessId; 10] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::OpenCode,
         HarnessId::Pi,
         HarnessId::Campfire,
         HarnessId::Cursor,
+        HarnessId::CursorDesktop,
         HarnessId::Grok,
         HarnessId::Amp,
         HarnessId::Antigravity,
@@ -266,6 +268,7 @@ impl HarnessId {
             HarnessId::Pi => "pi",
             HarnessId::Campfire => "campfire",
             HarnessId::Cursor => "cursor",
+            HarnessId::CursorDesktop => "cursor_desktop",
             HarnessId::Grok => "grok",
             HarnessId::Amp => "amp",
             HarnessId::Antigravity => "antigravity",
@@ -291,6 +294,9 @@ impl FromStr for HarnessId {
             "pi" => Ok(HarnessId::Pi),
             "campfire" => Ok(HarnessId::Campfire),
             "cursor" | "cursor_cli" | "cursor-cli" | "cursorcli" => Ok(HarnessId::Cursor),
+            "cursor_desktop" | "cursor-desktop" | "cursordesktop" | "cursor_ide" | "cursor-ide" => {
+                Ok(HarnessId::CursorDesktop)
+            }
             "grok" | "grok_cli" | "grok-cli" | "grokcli" | "grok_build" | "grok-build" => {
                 Ok(HarnessId::Grok)
             }
