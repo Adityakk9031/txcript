@@ -324,7 +324,10 @@ fn foreign_tool_result_blocks_flatten_to_text() {
     // The foreign-tagged array flattens to a string…
     assert!(contents[0].is_string(), "got {:?}", contents[0]);
     // …while the wire's native block-array shape passes through untouched.
-    assert_eq!(contents[1], json!([{ "type": "text", "text": "native shape" }]));
+    assert_eq!(
+        contents[1],
+        json!([{ "type": "text", "text": "native shape" }])
+    );
 }
 
 /// `from_common` is a pure function: same input, identical output (deterministic
