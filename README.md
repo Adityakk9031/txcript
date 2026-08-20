@@ -314,6 +314,7 @@ Not all of these transcript formats are documented by their vendors. [`docs/form
 cargo test                                          # native suite
 cargo test --no-default-features                    # without the SQLite store
 bun run build && bun examples/convert.ts <file> <from> <to>
+git config core.hooksPath .githooks                 # pre-push runs the CI checks
 ```
 
 The binary lives in its own workspace crate (`cli/`, package `txcript-cli`) so its dependencies (clap) never touch library consumers.
