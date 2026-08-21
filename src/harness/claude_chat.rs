@@ -843,6 +843,7 @@ fn read_only_error() -> Error {
 #[cfg(feature = "claude_chat")]
 mod remote {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{OnceLock, mpsc};
     use std::thread;
     use std::time::Duration;
@@ -863,6 +864,13 @@ mod remote {
     const MAX_RESPONSE_BYTES: u64 = 128 * 1024 * 1024;
     const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
     const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+    const DISCOVERY_WARNING: &str = "warning: Claude Chat discovery enumerates the selected account's conversation list through an undocumented private claude.ai endpoint; Anthropic can observe or restrict this request";
+    const DISABLED_CREDENTIAL_ENV_VARS: [&str; 3] = [
+        "TXCRIPT_CLAUDE_CHAT_SESSION_KEY",
+        "TXCRIPT_CLAUDE_CHAT_CF_BM",
+        "TXCRIPT_CLAUDE_CHAT_CF_CLEARANCE",
+    ];
+    static DISCOVERY_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
     /// A stable reference to one remote conversation.
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -949,8 +957,8 @@ mod remote {
                             // browser's TLS, HTTP/2, and header profile is required by the
                             // edge in front of Claude's private read API.
                             .emulation(wreq_util::Profile::Chrome148)
-                            // Never let the manually supplied Claude cookie
-                            // follow a response to another origin.
+                            // Never let Claude Desktop's credential-bearing
+                            // cookie follow a response to another origin.
                             .redirect(wreq::redirect::Policy::none())
                             .timeout(Duration::from_secs(30))
                             .build()
@@ -1096,73 +1104,42 @@ mod remote {
     }
 
     impl ClaudeChatStore {
-        /// Build a store from explicit credentials. The production base URL
-        /// is fixed so a credential cannot be redirected to another host.
-        ///
-        /// # Errors
-        /// Returns an error when a cookie value or organization UUID is not
-        /// safe to place in a fixed-origin Claude request.
-        pub fn new(
-            session_key: impl Into<String>,
-            organization_uuid: Option<String>,
-        ) -> Result<Self> {
-            Self::build(
-                Credentials {
-                    session_key: session_key.into(),
-                    session_key_v3: None,
-                    session_key_lc: None,
-                    session_key_v3_lc: None,
-                    cf_bm: None,
-                    cf_clearance: None,
-                    routing_hint: None,
-                    last_active_org: None,
-                    anonymous_id: None,
-                    device_id: None,
-                    activity_session_id: None,
-                    client_platform: "web_claude_ai",
-                },
-                organization_uuid,
-                CLAUDE_BASE_URL.to_string(),
-            )
+        /// Warn once per process before Claude Chat discovery enumerates the
+        /// selected account's conversations through a private endpoint.
+        pub fn warn_discovery_risk() {
+            if !DISCOVERY_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
+                eprintln!("{DISCOVERY_WARNING}");
+            }
         }
 
-        /// Resolve the environment-backed store. An explicit session key wins;
-        /// Claude Desktop storage is read only for `AUTH=desktop`.
+        /// Resolve the explicitly opted-in Claude Desktop store. Supplying
+        /// credential material through environment variables is refused.
         ///
         /// # Errors
-        /// Returns an error for invalid environment values or when explicitly
-        /// requested Desktop credentials cannot be read safely.
+        /// Returns an error for disabled credential variables, unsupported
+        /// auth modes, or when Desktop credentials cannot be read safely.
         pub fn from_environment() -> Result<Option<Self>> {
+            let disabled = disabled_credential_variables(|name| std::env::var_os(name).is_some());
+            if !disabled.is_empty() {
+                return Err(Error::Remote {
+                    harness: ClaudeChat::NAME,
+                    detail: format!(
+                        "environment-supplied Claude credentials are disabled in V1; unset {} and use TXCRIPT_CLAUDE_CHAT_AUTH=desktop",
+                        disabled.join(", ")
+                    ),
+                });
+            }
             let organization_uuid = nonempty_env("TXCRIPT_CLAUDE_CHAT_ORGANIZATION_UUID");
-            let credentials = if let Some(session_key) =
-                nonempty_env("TXCRIPT_CLAUDE_CHAT_SESSION_KEY")
-            {
-                Credentials {
-                    session_key,
-                    session_key_v3: None,
-                    session_key_lc: None,
-                    session_key_v3_lc: None,
-                    cf_bm: nonempty_env("TXCRIPT_CLAUDE_CHAT_CF_BM"),
-                    cf_clearance: nonempty_env("TXCRIPT_CLAUDE_CHAT_CF_CLEARANCE"),
-                    routing_hint: None,
-                    last_active_org: None,
-                    anonymous_id: None,
-                    device_id: None,
-                    activity_session_id: None,
-                    client_platform: "web_claude_ai",
-                }
-            } else {
-                match nonempty_env("TXCRIPT_CLAUDE_CHAT_AUTH").as_deref() {
-                    None => return Ok(None),
-                    Some("desktop") => desktop_credentials()?,
-                    Some(other) => {
-                        return Err(Error::Remote {
-                            harness: ClaudeChat::NAME,
-                            detail: format!(
-                                "unsupported TXCRIPT_CLAUDE_CHAT_AUTH value `{other}`; use `desktop` or set TXCRIPT_CLAUDE_CHAT_SESSION_KEY"
-                            ),
-                        });
-                    }
+            let credentials = match nonempty_env("TXCRIPT_CLAUDE_CHAT_AUTH").as_deref() {
+                None => return Ok(None),
+                Some("desktop") => desktop_credentials()?,
+                Some(other) => {
+                    return Err(Error::Remote {
+                        harness: ClaudeChat::NAME,
+                        detail: format!(
+                            "unsupported TXCRIPT_CLAUDE_CHAT_AUTH value `{other}`; V1 supports only `desktop`"
+                        ),
+                    });
                 }
             };
             Self::build(credentials, organization_uuid, CLAUDE_BASE_URL.to_string()).map(Some)
@@ -1621,6 +1598,7 @@ mod remote {
         type Ref = ClaudeChatRef;
 
         fn discover(&self) -> Result<Vec<Discovered<Self::Ref>>> {
+            Self::warn_discovery_risk();
             let mut found = Vec::new();
             for organization in self.organizations()? {
                 found.extend(self.discover_organization(&organization)?);
@@ -1836,6 +1814,15 @@ mod remote {
             .filter(|value| !value.is_empty())
     }
 
+    fn disabled_credential_variables(
+        mut is_set: impl FnMut(&'static str) -> bool,
+    ) -> Vec<&'static str> {
+        DISABLED_CREDENTIAL_ENV_VARS
+            .into_iter()
+            .filter(|name| is_set(name))
+            .collect()
+    }
+
     fn html_data_attribute(html: &str, name: &str) -> Option<String> {
         ['"', '\''].into_iter().find_map(|quote| {
             let marker = format!("data-{name}={quote}");
@@ -1874,7 +1861,7 @@ mod remote {
     fn remote_error(response: &BrowserResponse) -> Error {
         let mut detail = match response.status {
             401 => {
-                "Claude rejected the session; refresh TXCRIPT_CLAUDE_CHAT_SESSION_KEY or sign in again before using TXCRIPT_CLAUDE_CHAT_AUTH=desktop".to_string()
+                "Claude rejected the Desktop session; sign in again in Claude Desktop, then retry with TXCRIPT_CLAUDE_CHAT_AUTH=desktop".to_string()
             }
             403 if response.cf_mitigated => {
                 "Cloudflare challenged the read even with Claude Desktop's browser profile; open Claude Desktop once, then retry"
@@ -1928,8 +1915,7 @@ mod remote {
     fn desktop_credentials() -> Result<Credentials> {
         Err(Error::Remote {
             harness: ClaudeChat::NAME,
-            detail: "Claude Desktop credential reuse is supported on macOS in V1; set TXCRIPT_CLAUDE_CHAT_SESSION_KEY on this platform"
-                .to_string(),
+            detail: "Claude Desktop credential reuse is supported only on macOS in V1".to_string(),
         })
     }
 
@@ -2093,7 +2079,7 @@ mod remote {
                 }
             }
             Err(desktop_error(
-                "macOS Keychain did not expose `Claude Safe Storage`; set TXCRIPT_CLAUDE_CHAT_SESSION_KEY instead",
+                "macOS Keychain did not expose `Claude Safe Storage`; open and sign in to Claude Desktop, then retry",
             ))
         }
 
@@ -2184,6 +2170,31 @@ mod remote {
         use super::*;
         use crate::common::{ArtifactSource, Block, Role};
         use crate::{Codec, Store};
+
+        #[test]
+        fn credential_environment_variables_are_explicitly_disabled() {
+            let found = disabled_credential_variables(|name| {
+                matches!(
+                    name,
+                    "TXCRIPT_CLAUDE_CHAT_SESSION_KEY" | "TXCRIPT_CLAUDE_CHAT_CF_CLEARANCE"
+                )
+            });
+            assert_eq!(
+                found,
+                [
+                    "TXCRIPT_CLAUDE_CHAT_SESSION_KEY",
+                    "TXCRIPT_CLAUDE_CHAT_CF_CLEARANCE"
+                ]
+            );
+        }
+
+        #[test]
+        fn discovery_warning_states_the_private_listing_risk() {
+            assert!(DISCOVERY_WARNING.starts_with("warning: Claude Chat discovery"));
+            assert!(DISCOVERY_WARNING.contains("conversation list"));
+            assert!(DISCOVERY_WARNING.contains("undocumented private"));
+            assert!(DISCOVERY_WARNING.contains("Anthropic can observe or restrict"));
+        }
 
         struct MockResponse {
             status: u16,
@@ -2539,7 +2550,8 @@ mod remote {
                     .unwrap();
             let error = store.discover().unwrap_err().to_string();
             handle.join().unwrap();
-            assert!(error.contains("rejected the session"));
+            assert!(error.contains("rejected the Desktop session"));
+            assert!(error.contains("sign in again in Claude Desktop"));
             assert!(!error.contains("secret-never-print"));
         }
 

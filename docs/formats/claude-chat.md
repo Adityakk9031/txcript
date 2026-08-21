@@ -12,33 +12,36 @@ the export ZIP, `conversations.json`, or an array of exported conversations.
 
 ## Access
 
-Use an explicit session cookie:
+On macOS, explicitly opt into reusing the signed-in Claude Desktop session:
 
 ```sh
-export TXCRIPT_CLAUDE_CHAT_SESSION_KEY='…'
-txcript list --from claude_chat
+TXCRIPT_CLAUDE_CHAT_AUTH=desktop txcript list --from claude_chat
 ```
 
 `TXCRIPT_CLAUDE_CHAT_ORGANIZATION_UUID` optionally restricts discovery to one
 organization. It also bypasses account-wide organization discovery if Claude
-rejects that private endpoint for the supplied session. `TXCRIPT_CLAUDE_CHAT_CF_BM` and
-`TXCRIPT_CLAUDE_CHAT_CF_CLEARANCE` can carry Cloudflare challenge cookies when
-the account requires them.
+rejects that private endpoint for the Desktop session.
 
-On macOS only, `TXCRIPT_CLAUDE_CHAT_AUTH=desktop` explicitly permits txcript to
+`TXCRIPT_CLAUDE_CHAT_AUTH=desktop` explicitly permits txcript to
 copy Claude Desktop's Chromium cookie database to a temporary directory, ask
 macOS Keychain for `Claude Safe Storage`, and decrypt its current Claude
 cookies. Expired Cloudflare state is discarded, and Desktop's `lastActiveOrg`
 selects the same organization currently active in the app.
-An explicit `TXCRIPT_CLAUDE_CHAT_SESSION_KEY` always wins. Secrets are used
-only in request headers and are never included in errors or debug output.
+The temporary copy is removed after credentials are read. Secrets are used only
+in request headers and are never included in errors or debug output.
+
+Environment-supplied credential material is explicitly disabled in V1.
+`TXCRIPT_CLAUDE_CHAT_SESSION_KEY`, `TXCRIPT_CLAUDE_CHAT_CF_BM`, and
+`TXCRIPT_CLAUDE_CHAT_CF_CLEARANCE` are rejected with guidance instead of being
+used or silently ignored. Non-macOS platforms therefore cannot access Claude
+Chat in V1.
 
 ## Remote store
 
 The current read path is:
 
 1. Select an explicitly configured organization, otherwise Claude Desktop's
-   active organization; an environment-only session falls back to
+   active organization; if neither is available, fall back to
    `GET /api/organizations`.
 2. Paginate `GET /api/organizations/{org}/chat_conversations_v2` with
    `limit`, `offset`, and `consistency=strong`.
@@ -54,7 +57,7 @@ The production origin is fixed to `https://claude.ai`; there is no base-URL
 override that could redirect credentials. Requests use a matching Chromium
 TLS, HTTP/2, and header profile because Claude's edge rejects generic HTTP
 clients even when their session cookie is valid. Redirects are disabled so a
-manually supplied Claude cookie cannot follow a response to another origin.
+Claude Desktop cookie cannot follow a response to another origin.
 Same-origin image and generated-file bytes are stored inside the native body
 under txcript's `$txcript_images` and `$txcript_files` keys. Images become
 base64 Common image blocks; generated files ride through Common on the
@@ -62,9 +65,12 @@ corresponding `local_resource` tool result. External attachment URLs are not
 fetched.
 
 Discovery returns each conversation's UUID, title, creation time, model, and
-an update-time fingerprint. Authentication failures and recognizable protocol
-drift are reported when `--from claude_chat` is explicit; an unconfigured
-Claude account contributes no sessions to an all-harness scan.
+an update-time fingerprint. Before it makes the listing request, txcript warns
+on stderr that discovery enumerates the selected account's conversation list
+through an undocumented private endpoint and that Anthropic can observe or
+restrict the request. Authentication failures and recognizable protocol drift
+are reported when `--from claude_chat` is explicit; an unconfigured Claude
+account contributes no sessions to an all-harness scan.
 
 ## Conversation shape
 

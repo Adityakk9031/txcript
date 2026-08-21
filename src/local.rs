@@ -221,7 +221,7 @@ fn discover_claude_chat_into(out: &mut Vec<Session>, explicit: bool) -> Result<(
         return if explicit {
             Err(Error::Remote {
                 harness: "claude_chat",
-                detail: "authentication is not configured; set TXCRIPT_CLAUDE_CHAT_SESSION_KEY or explicitly opt into macOS Claude Desktop with TXCRIPT_CLAUDE_CHAT_AUTH=desktop"
+                detail: "authentication is not configured; explicitly opt into the signed-in macOS Claude Desktop session with TXCRIPT_CLAUDE_CHAT_AUTH=desktop"
                     .to_string(),
             })
         } else {
