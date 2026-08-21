@@ -569,18 +569,12 @@ mod filter_tests {
     }
 
     #[test]
-    fn claude_chat_discovery_warning_covers_explicit_and_ambient_scans() {
-        assert!(should_warn_claude_chat_discovery(
-            Some(HarnessId::ClaudeChat),
-            None
-        ));
-        assert!(should_warn_claude_chat_discovery(None, Some("desktop")));
-        assert!(should_warn_claude_chat_discovery(
-            Some(HarnessId::Codex),
-            Some(" desktop ")
-        ));
-        assert!(!should_warn_claude_chat_discovery(None, None));
-        assert!(!should_warn_claude_chat_discovery(None, Some("disabled")));
+    fn claude_chat_discovery_warning_requires_explicit_source() {
+        assert!(should_warn_claude_chat_discovery(Some(
+            HarnessId::ClaudeChat
+        )));
+        assert!(!should_warn_claude_chat_discovery(None));
+        assert!(!should_warn_claude_chat_discovery(Some(HarnessId::Codex)));
     }
 }
 
@@ -1441,8 +1435,7 @@ fn resume_workdir(cwd: Option<&str>) -> Option<PathBuf> {
 }
 
 fn discover_with_spinner(from: Option<HarnessId>) -> Result<Vec<local::Session>, String> {
-    let auth = std::env::var("TXCRIPT_CLAUDE_CHAT_AUTH").ok();
-    if should_warn_claude_chat_discovery(from, auth.as_deref()) {
+    if should_warn_claude_chat_discovery(from) {
         txcript::harness::claude_chat::ClaudeChatStore::warn_discovery_risk();
     }
     let spinner = spin::Spinner::start("searching local sessions…");
@@ -1458,8 +1451,8 @@ fn discover_with_spinner(from: Option<HarnessId>) -> Result<Vec<local::Session>,
     Ok(sessions)
 }
 
-fn should_warn_claude_chat_discovery(from: Option<HarnessId>, auth: Option<&str>) -> bool {
-    from == Some(HarnessId::ClaudeChat) || auth.is_some_and(|value| value.trim() == "desktop")
+fn should_warn_claude_chat_discovery(from: Option<HarnessId>) -> bool {
+    from == Some(HarnessId::ClaudeChat)
 }
 
 /// Replace this process with the harness from `workdir` when given. On

@@ -12,21 +12,23 @@ the export ZIP, `conversations.json`, or an array of exported conversations.
 
 ## Access
 
-On macOS, explicitly opt into reusing the signed-in Claude Desktop session:
+On macOS, explicitly selecting Claude Chat reuses the signed-in Claude Desktop
+session automatically:
 
 ```sh
-TXCRIPT_CLAUDE_CHAT_AUTH=desktop txcript list --from claude_chat
+txcript list --from claude_chat
 ```
 
 `TXCRIPT_CLAUDE_CHAT_ORGANIZATION_UUID` optionally restricts discovery to one
 organization. It also bypasses account-wide organization discovery if Claude
 rejects that private endpoint for the Desktop session.
 
-`TXCRIPT_CLAUDE_CHAT_AUTH=desktop` explicitly permits txcript to
-copy Claude Desktop's Chromium cookie database to a temporary directory, ask
-macOS Keychain for `Claude Safe Storage`, and decrypt its current Claude
-cookies. Expired Cloudflare state is discarded, and Desktop's `lastActiveOrg`
-selects the same organization currently active in the app.
+The explicit `--from claude_chat` selection permits txcript to copy Claude
+Desktop's Chromium cookie database to a temporary directory, ask macOS
+Keychain for `Claude Safe Storage`, and decrypt its current Claude cookies.
+Expired Cloudflare state is discarded, and Desktop's `lastActiveOrg` selects
+the same organization currently active in the app. Aggregate discovery, such
+as `txcript list` without `--from`, does not contact Claude Chat.
 The temporary copy is removed after credentials are read. Secrets are used only
 in request headers and are never included in errors or debug output.
 
@@ -69,8 +71,8 @@ an update-time fingerprint. Before it makes the listing request, txcript warns
 on stderr that discovery enumerates the selected account's conversation list
 through an undocumented private endpoint and that Anthropic can observe or
 restrict the request. Authentication failures and recognizable protocol drift
-are reported when `--from claude_chat` is explicit; an unconfigured Claude
-account contributes no sessions to an all-harness scan.
+are reported when `--from claude_chat` is explicit. All-harness scans skip
+Claude Chat entirely so they cannot enumerate remote conversations by surprise.
 
 ## Conversation shape
 

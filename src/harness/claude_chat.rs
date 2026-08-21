@@ -1112,37 +1112,26 @@ mod remote {
             }
         }
 
-        /// Resolve the explicitly opted-in Claude Desktop store. Supplying
-        /// credential material through environment variables is refused.
+        /// Resolve the signed-in Claude Desktop store. Supplying credential
+        /// material through environment variables is refused.
         ///
         /// # Errors
-        /// Returns an error for disabled credential variables, unsupported
-        /// auth modes, or when Desktop credentials cannot be read safely.
-        pub fn from_environment() -> Result<Option<Self>> {
+        /// Returns an error for disabled credential variables or when Desktop
+        /// credentials cannot be read safely.
+        pub fn from_desktop() -> Result<Self> {
             let disabled = disabled_credential_variables(|name| std::env::var_os(name).is_some());
             if !disabled.is_empty() {
                 return Err(Error::Remote {
                     harness: ClaudeChat::NAME,
                     detail: format!(
-                        "environment-supplied Claude credentials are disabled in V1; unset {} and use TXCRIPT_CLAUDE_CHAT_AUTH=desktop",
+                        "environment-supplied Claude credentials are disabled in V1; unset {}; Claude Chat uses the signed-in Claude Desktop session automatically",
                         disabled.join(", ")
                     ),
                 });
             }
             let organization_uuid = nonempty_env("TXCRIPT_CLAUDE_CHAT_ORGANIZATION_UUID");
-            let credentials = match nonempty_env("TXCRIPT_CLAUDE_CHAT_AUTH").as_deref() {
-                None => return Ok(None),
-                Some("desktop") => desktop_credentials()?,
-                Some(other) => {
-                    return Err(Error::Remote {
-                        harness: ClaudeChat::NAME,
-                        detail: format!(
-                            "unsupported TXCRIPT_CLAUDE_CHAT_AUTH value `{other}`; V1 supports only `desktop`"
-                        ),
-                    });
-                }
-            };
-            Self::build(credentials, organization_uuid, CLAUDE_BASE_URL.to_string()).map(Some)
+            let credentials = desktop_credentials()?;
+            Self::build(credentials, organization_uuid, CLAUDE_BASE_URL.to_string())
         }
 
         fn build(
@@ -1861,7 +1850,8 @@ mod remote {
     fn remote_error(response: &BrowserResponse) -> Error {
         let mut detail = match response.status {
             401 => {
-                "Claude rejected the Desktop session; sign in again in Claude Desktop, then retry with TXCRIPT_CLAUDE_CHAT_AUTH=desktop".to_string()
+                "Claude rejected the Desktop session; sign in again in Claude Desktop, then retry"
+                    .to_string()
             }
             403 if response.cf_mitigated => {
                 "Cloudflare challenged the read even with Claude Desktop's browser profile; open Claude Desktop once, then retry"

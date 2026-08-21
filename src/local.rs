@@ -89,8 +89,8 @@ pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session>
         claude_code::ClaudeStore::default_root(),
         &mut out,
     );
-    on_store(HarnessId::ClaudeChat, out.len());
-    scan_claude_chat(&mut out);
+    // Claude Chat is deliberately excluded from aggregate discovery. Listing
+    // remote conversations requires an explicit Claude Chat source selection.
     on_store(HarnessId::Codex, out.len());
     scan(
         HarnessId::Codex,
@@ -176,17 +176,6 @@ pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session>
     out
 }
 
-fn scan_claude_chat(out: &mut Vec<Session>) {
-    #[cfg(feature = "claude_chat")]
-    {
-        // No credentials means no remote store. Aggregate discovery remains
-        // tolerant; explicit discovery below surfaces access failures.
-        let _ = discover_claude_chat_into(out, false);
-    }
-    #[cfg(not(feature = "claude_chat"))]
-    let _ = out;
-}
-
 /// Discover one harness, surfacing remote errors when Claude Chat is
 /// explicitly requested. Other harnesses retain the tolerant aggregate scan.
 ///
@@ -196,7 +185,7 @@ pub fn discover_harness(harness: HarnessId) -> Result<Vec<Session>> {
     #[cfg(feature = "claude_chat")]
     if harness == HarnessId::ClaudeChat {
         let mut out = Vec::new();
-        discover_claude_chat_into(&mut out, true)?;
+        discover_claude_chat_into(&mut out)?;
         out.sort_by_key(|session| std::cmp::Reverse(session.meta.timestamp));
         return Ok(out);
     }
@@ -216,18 +205,8 @@ pub fn discover_harness(harness: HarnessId) -> Result<Vec<Session>> {
 }
 
 #[cfg(feature = "claude_chat")]
-fn discover_claude_chat_into(out: &mut Vec<Session>, explicit: bool) -> Result<()> {
-    let Some(store) = claude_chat::ClaudeChatStore::from_environment()? else {
-        return if explicit {
-            Err(Error::Remote {
-                harness: "claude_chat",
-                detail: "authentication is not configured; explicitly opt into the signed-in macOS Claude Desktop session with TXCRIPT_CLAUDE_CHAT_AUTH=desktop"
-                    .to_string(),
-            })
-        } else {
-            Ok(())
-        };
-    };
+fn discover_claude_chat_into(out: &mut Vec<Session>) -> Result<()> {
+    let store = claude_chat::ClaudeChatStore::from_desktop()?;
     for discovered in store.discover()? {
         out.push(Session {
             harness: HarnessId::ClaudeChat,
@@ -278,7 +257,7 @@ impl Session {
             }
             #[cfg(feature = "claude_chat")]
             (HarnessId::ClaudeChat, Locator::Remote(reference)) => {
-                let store = required(claude_chat::ClaudeChatStore::from_environment()?)?;
+                let store = claude_chat::ClaudeChatStore::from_desktop()?;
                 claude_chat::ClaudeChat::to_common(&store.load(reference)?)
             }
             (HarnessId::Codex, Locator::Path(p)) => go(codex::CodexStore::default_root(), p),
@@ -328,7 +307,7 @@ impl Session {
             }
             #[cfg(feature = "claude_chat")]
             (HarnessId::ClaudeChat, Locator::Remote(reference)) => {
-                required(claude_chat::ClaudeChatStore::from_environment()?)?.delete(reference)
+                claude_chat::ClaudeChatStore::from_desktop()?.delete(reference)
             }
             (HarnessId::Codex, Locator::Path(p)) => go(codex::CodexStore::default_root(), p),
             (HarnessId::Pi, Locator::Path(p)) => go(pi::PiStore::default_root(), p),
@@ -392,7 +371,7 @@ pub fn fingerprints(sessions: &[Session]) -> Vec<String> {
         match harness {
             HarnessId::ClaudeCode => group.files(claude_code::ClaudeStore::default_root()),
             #[cfg(feature = "claude_chat")]
-            HarnessId::ClaudeChat => group.remote(claude_chat::ClaudeChatStore::from_environment()),
+            HarnessId::ClaudeChat => group.remote(claude_chat::ClaudeChatStore::from_desktop()),
             HarnessId::Codex => group.files(codex::CodexStore::default_root()),
             HarnessId::Pi => group.files(pi::PiStore::default_root()),
             HarnessId::Campfire => group.files(campfire::CampfireStore::default_root()),
@@ -453,7 +432,7 @@ impl Group<'_> {
     }
 
     #[cfg(feature = "claude_chat")]
-    fn remote(self, store: Result<Option<claude_chat::ClaudeChatStore>>) {
+    fn remote(self, store: Result<claude_chat::ClaudeChatStore>) {
         let refs: Vec<claude_chat::ClaudeChatRef> = self
             .at
             .iter()
@@ -461,7 +440,6 @@ impl Group<'_> {
             .collect();
         let by_ref = store
             .ok()
-            .flatten()
             .and_then(|store| store.fingerprints(&refs).ok())
             .unwrap_or_default();
         for &index in self.at {
