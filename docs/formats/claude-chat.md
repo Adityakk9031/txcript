@@ -28,7 +28,9 @@ Desktop's Chromium cookie database to a temporary directory, ask macOS
 Keychain for `Claude Safe Storage`, and decrypt its current Claude cookies.
 Expired Cloudflare state is discarded, and Desktop's `lastActiveOrg` selects
 the same organization currently active in the app. Aggregate discovery, such
-as `txcript list` without `--from`, does not contact Claude Chat.
+as `txcript list` without `--from`, does not contact Claude Chat. The MCP
+tools' `from` field is the same gate: omitted, they scan local harnesses only,
+and `list_sessions` refuses `claude_chat` outright.
 The temporary copy is removed after credentials are read. Secrets are used only
 in request headers and are never included in errors or debug output.
 

@@ -204,6 +204,20 @@ pub fn discover_harness(harness: HarnessId) -> Result<Vec<Session>> {
         .collect())
 }
 
+/// The sessions a `--from` selection names: every local harness when
+/// `from` is `None`, else that one harness. This is the only path that
+/// reaches Claude Chat, and only when it is named explicitly — an omitted
+/// `from` never contacts it.
+///
+/// # Errors
+/// When the explicitly selected live backend rejects access or changes shape.
+pub fn discover_scoped(from: Option<HarnessId>) -> Result<Vec<Session>> {
+    match from {
+        None => Ok(discover()),
+        Some(harness) => discover_harness(harness),
+    }
+}
+
 #[cfg(feature = "claude_chat")]
 fn discover_claude_chat_into(out: &mut Vec<Session>) -> Result<()> {
     let store = claude_chat::ClaudeChatStore::from_desktop()?;
@@ -869,6 +883,31 @@ fn mismatch(harness: HarnessId) -> Error {
     Error::Malformed {
         harness: "local",
         detail: format!("locator does not belong to {harness}"),
+    }
+}
+
+#[cfg(test)]
+mod claude_chat_gate_tests {
+    use super::{HarnessId, discover_scoped, discover_with};
+
+    #[test]
+    fn aggregate_discovery_never_reaches_claude_chat() {
+        let mut scanned = Vec::new();
+        let sessions = discover_with(|harness, _| scanned.push(harness));
+        assert!(!scanned.contains(&HarnessId::ClaudeChat));
+        assert!(sessions.iter().all(|s| s.harness != HarnessId::ClaudeChat));
+    }
+
+    #[test]
+    fn an_omitted_from_never_yields_claude_chat() {
+        let sessions = discover_scoped(None).unwrap_or_else(|e| panic!("{e}"));
+        assert!(sessions.iter().all(|s| s.harness != HarnessId::ClaudeChat));
+    }
+
+    #[test]
+    fn another_harness_as_from_never_yields_claude_chat() {
+        let sessions = discover_scoped(Some(HarnessId::Codex)).unwrap_or_else(|e| panic!("{e}"));
+        assert!(sessions.iter().all(|s| s.harness == HarnessId::Codex));
     }
 }
 
