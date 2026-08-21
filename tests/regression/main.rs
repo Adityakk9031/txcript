@@ -9,7 +9,10 @@
 use chrono::{DateTime, Utc};
 use txcript::common::{Block, Message, Meta, Role, Tool, ToolOutput};
 use txcript::harness::{claude_code, grok};
-use txcript::{Codec, Common, HarnessId, Store, TextCodec, Transcript};
+use txcript::{Codec, HarnessId, Store, TextCodec, Transcript};
+
+#[cfg(feature = "search")]
+use txcript::Common;
 
 fn ts(s: &str) -> DateTime<Utc> {
     s.parse().unwrap()

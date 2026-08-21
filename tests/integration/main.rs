@@ -8,6 +8,7 @@
 
 mod amp;
 mod antigravity;
+mod claude_chat;
 mod claude_code;
 mod codex;
 mod cowork;

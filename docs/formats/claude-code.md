@@ -108,6 +108,11 @@ A synthetic assistant line (real files add more envelope keys — `isSidechain`,
 - **Resume anchoring.** A leading `summary` line's `leafUuid` must name a real
   user/assistant line in the file, or Claude Code reports the whole session missing;
   txcript anchors generated summaries to the last real turn.
+- **Artifacts.** Claude Code records a published local file as an `Artifact`
+  tool call with `file_path` and `description`, followed by its tool result.
+  txcript maps that pair through Common's artifact block. When a Common
+  artifact carries inline bytes, the local writer materializes it beneath the
+  generated session before producing this native tool shape.
 - **Malformed input.** Invalid JSON lines are skipped; a known-type line whose body
   fails its schema degrades to `Record::Other` rather than failing the file. Title
   precedence is `custom-title` > `agent-name` > first `summary`; the newer `ai-title`

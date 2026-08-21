@@ -97,6 +97,10 @@ pub enum Block {
     },
     /// An inline image.
     Image { source: ImageSource },
+    /// A generated or attached file. Unlike an image, an artifact is kept as
+    /// a named file so target harnesses can expose it through their native
+    /// file or artifact mechanism.
+    Artifact { artifact: Artifact },
 }
 
 /// Why an assistant turn ended. `Other` keeps any harness-specific reason
@@ -141,6 +145,53 @@ pub struct ImageSource {
     pub media_type: String,
     /// The encoded bytes.
     pub data: String,
+}
+
+/// A named file carried by a conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifact {
+    /// Stable source identity when the harness supplies one.
+    pub id: String,
+    /// Human-facing filename or title.
+    pub name: String,
+    /// The artifact contents or a durable local path to them.
+    pub source: ArtifactSource,
+}
+
+impl Artifact {
+    /// A readable fallback for harnesses without a native artifact carrier.
+    #[must_use]
+    pub fn display_text(&self) -> String {
+        match &self.source {
+            ArtifactSource::Text { text, .. } => format!("[artifact: {}]\n{text}", self.name),
+            ArtifactSource::Base64 { .. } => format!("[artifact: {}]", self.name),
+            ArtifactSource::Path { path, .. } => format!("[artifact: {}] {path}", self.name),
+        }
+    }
+}
+
+/// Where an artifact's contents live.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ArtifactSource {
+    /// Textual content supplied inline by the source harness.
+    Text {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+    },
+    /// Binary content encoded as base64.
+    Base64 {
+        data: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+    },
+    /// A file already materialized on the local machine.
+    Path {
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+    },
 }
 
 /// The result payload of a tool call: text, or the harness's structured

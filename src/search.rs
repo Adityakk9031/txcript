@@ -909,6 +909,18 @@ fn extract(meta: &Meta, messages: &[Message]) -> Vec<Line> {
                 },
                 // Images carry no searchable text.
                 Block::Image { .. } => {}
+                Block::Artifact { artifact } => {
+                    push(m, b, Origin::Assistant, &artifact.name);
+                    match &artifact.source {
+                        crate::common::ArtifactSource::Text { text, .. } => {
+                            push(m, b, Origin::Assistant, text);
+                        }
+                        crate::common::ArtifactSource::Path { path, .. } => {
+                            push(m, b, Origin::Assistant, path);
+                        }
+                        crate::common::ArtifactSource::Base64 { .. } => {}
+                    }
+                }
             }
         }
     }

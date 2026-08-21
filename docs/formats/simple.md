@@ -195,6 +195,8 @@ Simple from a real harness drops nothing.
   carried so a round trip can replay them.
 - `image` blocks, Anthropic shape:
   `{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "<base64>"}}`.
+- `artifact` blocks carry a named generated file. Their `source` is one of
+  inline text, base64 bytes, or a local path; see the schema below.
 - `cli_version` at the top level: the version of whatever produced the
   session.
 
@@ -252,7 +254,17 @@ type Block =
   | { type: "tool_use"; name: string; input?: unknown; id?: string }
   // content: a string, or any JSON value. Rides on a "user" message.
   | { type: "tool_result"; content?: unknown; tool_use_id?: string; is_error?: boolean }
-  | { type: "image"; source: { type: "base64"; media_type: string; data: string } };
+  | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
+  | { type: "artifact"; artifact: Artifact };
+
+type Artifact = {
+  id: string;
+  name: string;
+  source:
+    | { type: "text"; text: string; media_type?: string }
+    | { type: "base64"; data: string; media_type?: string }
+    | { type: "path"; path: string; media_type?: string };
+};
 
 type StopReason =
   | "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "aborted" | "error"
@@ -310,7 +322,14 @@ type Block =
   | { type: "thinking"; text: string }
   | { type: "tool_use"; name: string; input?: unknown; id?: string }
   | { type: "tool_result"; content?: unknown; tool_use_id?: string; is_error?: boolean }
-  | { type: "image"; source: { type: "base64"; media_type: string; data: string } };
+  | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
+  | { type: "artifact"; artifact: {
+      id: string; name: string;
+      source:
+        | { type: "text"; text: string; media_type?: string }
+        | { type: "base64"; data: string; media_type?: string }
+        | { type: "path"; path: string; media_type?: string };
+    } };
 
 Rules:
 - Emit only fields you have; omit the rest entirely (never null).

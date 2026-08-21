@@ -21,6 +21,13 @@ pub enum Error {
         detail: String,
     },
 
+    /// A live harness backend rejected a request or changed its protocol.
+    #[error("{harness} remote access failed: {detail}")]
+    Remote {
+        harness: &'static str,
+        detail: String,
+    },
+
     /// Underlying I/O failure (reading a session file, writing a rollout).
     #[error(transparent)]
     Io(#[from] std::io::Error),

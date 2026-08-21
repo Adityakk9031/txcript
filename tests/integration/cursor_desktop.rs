@@ -10,13 +10,13 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use txcript::common;
-use txcript::harness::cursor_desktop::{
-    CursorDesktop, CursorDesktopStore, DesktopRow, DesktopSession,
-};
+use txcript::harness::cursor_desktop::{CursorDesktop, DesktopRow, DesktopSession};
 use txcript::{Codec, Common, TextCodec, Transcript};
 
 #[cfg(feature = "opencode")]
 use txcript::Store;
+#[cfg(feature = "opencode")]
+use txcript::harness::cursor_desktop::CursorDesktopStore;
 
 fn ts(s: &str) -> DateTime<Utc> {
     s.parse().unwrap()

@@ -707,7 +707,10 @@ fn rows_from_messages(session_id: &str, messages: &[Message]) -> Vec<Value> {
                             encrypted = encrypted.or_else(|| value_encrypted.clone());
                         }
                         Block::ToolUse { id, tool } => calls.push(tool_call_value(id, tool)),
-                        Block::Text { .. } | Block::Image { .. } | Block::ToolResult { .. } => {}
+                        Block::Text { .. }
+                        | Block::Image { .. }
+                        | Block::Artifact { .. }
+                        | Block::ToolResult { .. } => {}
                     }
                 }
                 let has_tools = !calls.is_empty();

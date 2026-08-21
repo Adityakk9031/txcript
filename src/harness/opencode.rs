@@ -474,6 +474,13 @@ fn user_part(
             );
             Some(base(p))
         }
+        Block::Artifact { artifact } => {
+            let mut p = Map::new();
+            p.insert("type".into(), json!("text"));
+            p.insert("text".into(), json!(artifact.display_text()));
+            p.insert("time".into(), json!({ "start": ms, "end": ms }));
+            Some(base(p))
+        }
         // Thinking and ToolUse never occur on user turns; a ToolResult is
         // folded into the preceding tool part by `assistant_part` and has no
         // user-part shape of its own.
@@ -502,6 +509,9 @@ fn assistant_part(
             "url": format!("data:{};{},{}", source.media_type, source.source_type, source.data),
             "time": time,
         }),
+        Block::Artifact { artifact } => {
+            json!({ "type": "text", "text": artifact.display_text(), "time": time })
+        }
         Block::ToolUse { id, tool } => {
             let (name, input) = tool.to_canonical();
             let (oc_name, oc_input) = denormalize_tool(&name, input);

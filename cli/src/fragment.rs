@@ -177,8 +177,11 @@ fn tool_pairs(body: &[Message]) -> Vec<(usize, usize)> {
                         pairs.push((use_idx, idx));
                     }
                 }
-                // Text, thinking, and image blocks carry no tool pairing.
-                Block::Text { .. } | Block::Thinking { .. } | Block::Image { .. } => {}
+                // Text, thinking, image, and artifact blocks carry no tool pairing.
+                Block::Text { .. }
+                | Block::Thinking { .. }
+                | Block::Image { .. }
+                | Block::Artifact { .. } => {}
             }
         }
     }

@@ -185,7 +185,7 @@ impl SessionServer {
     /// List local sessions newest-first, with the same harness and working
     /// directory filters as `txcript list`, paged by `limit`/`offset`.
     #[tool(
-        description = "List local coding-agent sessions newest-first. Optional `from` and `cwd` filters match the txcript CLI; omitted filters include all harnesses or directories. Optional `limit`/`offset` page the listing; the result carries the pre-paging `total`.",
+        description = "List local coding-agent sessions newest-first. Optional `from` and `cwd` filters match the txcript CLI; omitted filters include all harnesses or directories. Claude Chat is not listed here. Optional `limit`/`offset` page the listing; the result carries the pre-paging `total`.",
         annotations(title = "List sessions", read_only_hint = true)
     )]
     fn list_sessions(
@@ -193,6 +193,14 @@ impl SessionServer {
         Parameters(request): Parameters<ListSessionsRequest>,
     ) -> Result<Json<SessionList>, ErrorData> {
         let from = parse_from(request.from.as_deref())?;
+        // Enumerating a live claude.ai account is not offered over MCP; the
+        // refusal is explicit so an agent doesn't read "no sessions" as truth.
+        if from == Some(HarnessId::ClaudeChat) {
+            return Err(ErrorData::invalid_params(
+                "list_sessions does not list Claude Chat; use `txcript list --from claude_chat`",
+                None,
+            ));
+        }
         let cwd = request.cwd.as_deref().map(Path::new);
         let all: Vec<SessionSummary> = local::discover()
             .into_iter()
@@ -225,7 +233,8 @@ impl SessionServer {
     ) -> Result<Json<SearchResults>, ErrorData> {
         let from = parse_from(request.from.as_deref())?;
         let cwd = request.cwd.as_deref().map(Path::new);
-        let index = super::query::index_for(from, cwd, self.cache.as_deref());
+        let index = super::query::index_for(from, cwd, self.cache.as_deref())
+            .map_err(|error| ErrorData::internal_error(error, None))?;
         let mut query = Query::fuzzy(request.pattern);
         // Match the CLI's one-shot output bounds.
         query.limit = Some(20);
@@ -246,7 +255,7 @@ impl SessionServer {
         Parameters(request): Parameters<ReadSessionRequest>,
     ) -> Result<String, ErrorData> {
         let from = parse_from(request.from.as_deref())?;
-        let sessions = local::discover();
+        let sessions = discover_scoped(from)?;
         // A whole-input match (a title that itself contains `#12`) beats the
         // fragment interpretation, as everywhere else.
         let (src, span_req) = match crate::fragment::parse_ref(&request.id) {
@@ -361,6 +370,12 @@ impl ServerHandler for SessionServer {
     }
 }
 
+/// The same gate as the CLI's `--from`: Claude Chat is read only when the
+/// request names it; an omitted `from` scans local harnesses alone.
+fn discover_scoped(from: Option<HarnessId>) -> Result<Vec<local::Session>, ErrorData> {
+    local::discover_scoped(from).map_err(|error| ErrorData::internal_error(error.to_string(), None))
+}
+
 fn parse_from(from: Option<&str>) -> Result<Option<HarnessId>, ErrorData> {
     from.map(str::parse).transpose().map_err(|error| {
         ErrorData::invalid_params(
@@ -435,6 +450,20 @@ mod tests {
         assert_eq!(chunk_ranges(&[60, 60], 4, 100), [4..5, 5..6]);
         // Everything fitting the budget means one whole-span range.
         assert_eq!(chunk_ranges(&[10, 10], 0, 100), vec![0..2]);
+    }
+
+    #[test]
+    fn list_sessions_refuses_claude_chat() {
+        let error = SessionServer::new(None)
+            .list_sessions(Parameters(ListSessionsRequest {
+                from: Some("claude_chat".into()),
+                cwd: None,
+                limit: None,
+                offset: None,
+            }))
+            .err()
+            .unwrap_or_else(|| panic!("claude_chat listing is refused"));
+        assert!(error.message.contains("does not list Claude Chat"));
     }
 
     #[test]

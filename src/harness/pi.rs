@@ -319,6 +319,9 @@ fn pi_payloads_for(
                     Block::Image { source } => content.push(json!({
                         "type": "image", "data": source.data, "mimeType": source.media_type,
                     })),
+                    Block::Artifact { artifact } => {
+                        content.push(json!({"type": "text", "text": artifact.display_text()}));
+                    }
                     Block::ToolResult {
                         tool_use_id,
                         content: result,
@@ -352,6 +355,9 @@ fn pi_payloads_for(
                     Block::Text { text } => content.push(json!({"type": "text", "text": text})),
                     Block::Thinking { text, .. } => {
                         content.push(json!({"type": "thinking", "thinking": text}));
+                    }
+                    Block::Artifact { artifact } => {
+                        content.push(json!({"type": "text", "text": artifact.display_text()}));
                     }
                     Block::ToolUse { id, tool } => {
                         let (pi_name, pi_input) = denormalize_tool(tool);
