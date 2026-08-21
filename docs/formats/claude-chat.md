@@ -67,12 +67,13 @@ corresponding `local_resource` tool result. External attachment URLs are not
 fetched.
 
 Discovery returns each conversation's UUID, title, creation time, model, and
-an update-time fingerprint. Before it makes the listing request, txcript warns
-on stderr that discovery enumerates the selected account's conversation list
-through an undocumented private endpoint and that Anthropic can observe or
-restrict the request. Authentication failures and recognizable protocol drift
-are reported when `--from claude_chat` is explicit. All-harness scans skip
-Claude Chat entirely so they cannot enumerate remote conversations by surprise.
+an update-time fingerprint. Direct Rust calls to
+`ClaudeChatStore::discover()` produce a compile-time warning that discovery
+enumerates the selected account's conversation list through an undocumented
+private endpoint Anthropic can observe or restrict. Authentication failures
+and recognizable protocol drift are reported when `--from claude_chat` is
+explicit. All-harness scans skip Claude Chat entirely so they cannot enumerate
+remote conversations by surprise.
 
 ## Conversation shape
 

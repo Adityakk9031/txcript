@@ -207,7 +207,7 @@ pub fn discover_harness(harness: HarnessId) -> Result<Vec<Session>> {
 #[cfg(feature = "claude_chat")]
 fn discover_claude_chat_into(out: &mut Vec<Session>) -> Result<()> {
     let store = claude_chat::ClaudeChatStore::from_desktop()?;
-    for discovered in store.discover()? {
+    for discovered in Store::discover(&store)? {
         out.push(Session {
             harness: HarnessId::ClaudeChat,
             meta: discovered.meta,

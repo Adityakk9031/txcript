@@ -843,7 +843,6 @@ fn read_only_error() -> Error {
 #[cfg(feature = "claude_chat")]
 mod remote {
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{OnceLock, mpsc};
     use std::thread;
     use std::time::Duration;
@@ -864,13 +863,11 @@ mod remote {
     const MAX_RESPONSE_BYTES: u64 = 128 * 1024 * 1024;
     const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
     const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
-    const DISCOVERY_WARNING: &str = "warning: Claude Chat discovery enumerates the selected account's conversation list through an undocumented private claude.ai endpoint; Anthropic can observe or restrict this request";
     const DISABLED_CREDENTIAL_ENV_VARS: [&str; 3] = [
         "TXCRIPT_CLAUDE_CHAT_SESSION_KEY",
         "TXCRIPT_CLAUDE_CHAT_CF_BM",
         "TXCRIPT_CLAUDE_CHAT_CF_CLEARANCE",
     ];
-    static DISCOVERY_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
     /// A stable reference to one remote conversation.
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1104,12 +1101,30 @@ mod remote {
     }
 
     impl ClaudeChatStore {
-        /// Warn once per process before Claude Chat discovery enumerates the
-        /// selected account's conversations through a private endpoint.
-        pub fn warn_discovery_risk() {
-            if !DISCOVERY_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
-                eprintln!("{DISCOVERY_WARNING}");
-            }
+        /// Enumerate the selected account's Claude Chat conversations.
+        ///
+        /// Direct calls intentionally produce a compile-time warning because
+        /// this uses an undocumented private endpoint that Anthropic can
+        /// observe or restrict. Generic store consumers may call
+        /// [`Store::discover`] explicitly after making their own consent
+        /// boundary visible to users.
+        ///
+        /// ```compile_fail
+        /// #![deny(deprecated)]
+        /// use txcript::harness::claude_chat::ClaudeChatStore;
+        /// fn discover(store: &ClaudeChatStore) {
+        ///     let _ = store.discover();
+        /// }
+        /// ```
+        ///
+        /// # Errors
+        /// When authentication fails, Claude rejects the request, or its
+        /// private response format changes.
+        #[deprecated(
+            note = "Claude Chat discovery enumerates the selected account's conversation list through an undocumented private claude.ai endpoint that Anthropic can observe or restrict"
+        )]
+        pub fn discover(&self) -> Result<Vec<Discovered<ClaudeChatRef>>> {
+            <Self as Store>::discover(self)
         }
 
         /// Resolve the signed-in Claude Desktop store. Supplying credential
@@ -1587,7 +1602,6 @@ mod remote {
         type Ref = ClaudeChatRef;
 
         fn discover(&self) -> Result<Vec<Discovered<Self::Ref>>> {
-            Self::warn_discovery_risk();
             let mut found = Vec::new();
             for organization in self.organizations()? {
                 found.extend(self.discover_organization(&organization)?);
@@ -2178,14 +2192,6 @@ mod remote {
             );
         }
 
-        #[test]
-        fn discovery_warning_states_the_private_listing_risk() {
-            assert!(DISCOVERY_WARNING.starts_with("warning: Claude Chat discovery"));
-            assert!(DISCOVERY_WARNING.contains("conversation list"));
-            assert!(DISCOVERY_WARNING.contains("undocumented private"));
-            assert!(DISCOVERY_WARNING.contains("Anthropic can observe or restrict"));
-        }
-
         struct MockResponse {
             status: u16,
             content_type: &'static str,
@@ -2300,7 +2306,7 @@ mod remote {
             let store =
                 ClaudeChatStore::for_test("test-session-key", Some(organization.into()), base)
                     .unwrap();
-            let found = store.discover().unwrap();
+            let found = Store::discover(&store).unwrap();
             handle.join().unwrap();
 
             assert_eq!(found.len(), 2);
@@ -2351,7 +2357,7 @@ mod remote {
                 })),
             ]);
             let store = ClaudeChatStore::for_test("test-session-key", None, base).unwrap();
-            let found = store.discover().unwrap();
+            let found = Store::discover(&store).unwrap();
             handle.join().unwrap();
 
             assert_eq!(found.len(), 1);
@@ -2379,7 +2385,7 @@ mod remote {
             }))]);
             let mut store = ClaudeChatStore::for_test("test-session-key", None, base).unwrap();
             store.active_organization_uuid = Some(organization.to_string());
-            let found = store.discover().unwrap();
+            let found = Store::discover(&store).unwrap();
             handle.join().unwrap();
 
             assert_eq!(found.len(), 1);
@@ -2538,7 +2544,7 @@ mod remote {
             let store =
                 ClaudeChatStore::for_test("secret-never-print", Some(organization.into()), base)
                     .unwrap();
-            let error = store.discover().unwrap_err().to_string();
+            let error = Store::discover(&store).unwrap_err().to_string();
             handle.join().unwrap();
             assert!(error.contains("rejected the Desktop session"));
             assert!(error.contains("sign in again in Claude Desktop"));
@@ -2556,7 +2562,7 @@ mod remote {
             let store =
                 ClaudeChatStore::for_test("secret-never-print", Some(organization.into()), base)
                     .unwrap();
-            let error = store.discover().unwrap_err().to_string();
+            let error = Store::discover(&store).unwrap_err().to_string();
             handle.join().unwrap();
 
             assert!(error.contains("Invalid authorization for organization"));
@@ -2574,7 +2580,7 @@ mod remote {
             let store =
                 ClaudeChatStore::for_test("secret-never-print", Some(organization.into()), base)
                     .unwrap();
-            let error = store.discover().unwrap_err().to_string();
+            let error = Store::discover(&store).unwrap_err().to_string();
             handle.join().unwrap();
 
             assert!(error.contains("Cloudflare challenged"));
@@ -2605,7 +2611,7 @@ mod remote {
             let store =
                 ClaudeChatStore::for_test("test-session-key", Some(organization.into()), base)
                     .unwrap();
-            let error = store.discover().unwrap_err().to_string();
+            let error = Store::discover(&store).unwrap_err().to_string();
             handle.join().unwrap();
             assert!(error.contains("private web API changed"));
             assert!(error.contains("array `data`"));

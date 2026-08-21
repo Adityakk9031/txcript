@@ -567,15 +567,6 @@ mod filter_tests {
             Some(repo)
         ));
     }
-
-    #[test]
-    fn claude_chat_discovery_warning_requires_explicit_source() {
-        assert!(should_warn_claude_chat_discovery(Some(
-            HarnessId::ClaudeChat
-        )));
-        assert!(!should_warn_claude_chat_discovery(None));
-        assert!(!should_warn_claude_chat_discovery(Some(HarnessId::Codex)));
-    }
 }
 
 #[cfg(test)]
@@ -1435,9 +1426,6 @@ fn resume_workdir(cwd: Option<&str>) -> Option<PathBuf> {
 }
 
 fn discover_with_spinner(from: Option<HarnessId>) -> Result<Vec<local::Session>, String> {
-    if should_warn_claude_chat_discovery(from) {
-        txcript::harness::claude_chat::ClaudeChatStore::warn_discovery_risk();
-    }
     let spinner = spin::Spinner::start("searching local sessions…");
     let sessions = if let Some(HarnessId::ClaudeChat) = from {
         spinner.set("reading Claude Chat…".to_string());
@@ -1449,10 +1437,6 @@ fn discover_with_spinner(from: Option<HarnessId>) -> Result<Vec<local::Session>,
     };
     spinner.finish();
     Ok(sessions)
-}
-
-fn should_warn_claude_chat_discovery(from: Option<HarnessId>) -> bool {
-    from == Some(HarnessId::ClaudeChat)
 }
 
 /// Replace this process with the harness from `workdir` when given. On
