@@ -1919,6 +1919,252 @@ mod remote {
             .map(String::from)
     }
 
+    #[cfg(target_os = "macos")]
+    fn desktop_credentials() -> Result<Credentials> {
+        macos::read_desktop_credentials()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn desktop_credentials() -> Result<Credentials> {
+        Err(Error::Remote {
+            harness: ClaudeChat::NAME,
+            detail: "Claude Desktop credential reuse is supported on macOS in V1; set TXCRIPT_CLAUDE_CHAT_SESSION_KEY on this platform"
+                .to_string(),
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    mod macos {
+        use std::collections::HashMap;
+        use std::fs;
+        use std::path::{Path, PathBuf};
+        use std::process::Command;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        use aes::Aes128;
+        use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+        use cbc::Decryptor;
+        use pbkdf2::pbkdf2_hmac;
+        use rusqlite::{Connection, OpenFlags};
+        use sha1::Sha1;
+        use sha2::{Digest, Sha256};
+
+        use super::{Credentials, validate_cookie};
+        use crate::error::{Error, Result};
+        use crate::harness::{claude_chat::ClaudeChat, home_dir};
+        use crate::transcript::Harness;
+
+        type Aes128CbcDec = Decryptor<Aes128>;
+
+        pub(super) fn read_desktop_credentials() -> Result<Credentials> {
+            let home = home_dir().ok_or_else(|| desktop_error("home directory is unavailable"))?;
+            let support = home.join("Library/Application Support/Claude");
+            let cookie_path = [support.join("Cookies"), support.join("Network/Cookies")]
+                .into_iter()
+                .find(|path| path.is_file())
+                .ok_or_else(|| desktop_error("Claude Desktop cookie database was not found"))?;
+            let copy = CookieCopy::new(&cookie_path)?;
+            let connection =
+                Connection::open_with_flags(&copy.database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .map_err(|error| {
+                        desktop_error(&format!("could not open Claude Desktop cookies: {error}"))
+                    })?;
+            let mut statement = connection
+                .prepare(
+                    "SELECT host_key, name, value, encrypted_value, expires_utc FROM cookies \
+                     WHERE host_key LIKE '%claude.ai%' AND name IN (\
+                         'sessionKey', 'sessionKeyV3', 'sessionKeyLC', 'sessionKeyV3LC', \
+                         '__cf_bm', 'cf_clearance', \
+                         'routingHint', 'lastActiveOrg', 'ajs_anonymous_id', \
+                         'anthropic-device-id', 'activitySessionId'\
+                     ) \
+                     ORDER BY last_access_utc DESC",
+                )
+                .map_err(|error| {
+                    desktop_error(&format!("Claude Desktop cookie schema changed: {error}"))
+                })?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })
+                .map_err(|error| {
+                    desktop_error(&format!("could not read Claude Desktop cookies: {error}"))
+                })?;
+            let mut raw = Vec::new();
+            for row in rows {
+                raw.push(row.map_err(|error| {
+                    desktop_error(&format!("could not read a Claude Desktop cookie: {error}"))
+                })?);
+            }
+            let now = chromium_time_now()?;
+            raw.retain(|(_, _, _, _, expires)| cookie_is_current(*expires, now));
+            let needs_key = raw
+                .iter()
+                .any(|(_, _, value, encrypted, _)| value.is_empty() && !encrypted.is_empty());
+            let password = if needs_key {
+                Some(keychain_password()?)
+            } else {
+                None
+            };
+            let mut cookies = HashMap::new();
+            for (host, name, value, encrypted, _) in raw {
+                if cookies.contains_key(&name) {
+                    continue;
+                }
+                let plaintext = if !value.is_empty() {
+                    value
+                } else if let Some(password) = password.as_deref() {
+                    decrypt_cookie(&host, &encrypted, password)?
+                } else {
+                    continue;
+                };
+                validate_cookie(&name, &plaintext)?;
+                cookies.insert(name, plaintext);
+            }
+            let session_key_v3 = cookies.remove("sessionKeyV3");
+            let session_key = cookies
+                .remove("sessionKey")
+                .or_else(|| session_key_v3.clone())
+                .ok_or_else(|| {
+                    desktop_error("Claude Desktop has no current readable claude.ai session cookie")
+                })?;
+            Ok(Credentials {
+                session_key,
+                session_key_v3,
+                session_key_lc: cookies.remove("sessionKeyLC"),
+                session_key_v3_lc: cookies.remove("sessionKeyV3LC"),
+                cf_bm: cookies.remove("__cf_bm"),
+                cf_clearance: cookies.remove("cf_clearance"),
+                routing_hint: cookies.remove("routingHint"),
+                last_active_org: cookies.remove("lastActiveOrg"),
+                anonymous_id: cookies.remove("ajs_anonymous_id"),
+                device_id: cookies.remove("anthropic-device-id"),
+                activity_session_id: cookies.remove("activitySessionId"),
+                // Txcript reuses Desktop's cookie but is still a web client;
+                // claiming Electron's privileged platform would be false and
+                // is rejected by Claude's bootstrap authorization.
+                client_platform: "web_claude_ai",
+            })
+        }
+
+        fn chromium_time_now() -> Result<i64> {
+            const WINDOWS_TO_UNIX_EPOCH_MICROS: u128 = 11_644_473_600_000_000;
+            let unix_micros = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| desktop_error(&format!("system clock is invalid: {error}")))?
+                .as_micros();
+            i64::try_from(unix_micros.saturating_add(WINDOWS_TO_UNIX_EPOCH_MICROS))
+                .map_err(|_| desktop_error("system clock is outside Chromium's supported range"))
+        }
+
+        pub(super) const fn cookie_is_current(expires: i64, now: i64) -> bool {
+            expires == 0 || expires > now
+        }
+
+        fn keychain_password() -> Result<String> {
+            for args in [
+                vec![
+                    "find-generic-password",
+                    "-w",
+                    "-s",
+                    "Claude Safe Storage",
+                    "-a",
+                    "Claude",
+                ],
+                vec!["find-generic-password", "-w", "-s", "Claude Safe Storage"],
+            ] {
+                let output = Command::new("/usr/bin/security")
+                    .args(args)
+                    .output()
+                    .map_err(|error| {
+                        desktop_error(&format!("could not query macOS Keychain: {error}"))
+                    })?;
+                if output.status.success()
+                    && let Ok(value) = String::from_utf8(output.stdout)
+                    && !value.trim().is_empty()
+                {
+                    return Ok(value.trim_end().to_string());
+                }
+            }
+            Err(desktop_error(
+                "macOS Keychain did not expose `Claude Safe Storage`; set TXCRIPT_CLAUDE_CHAT_SESSION_KEY instead",
+            ))
+        }
+
+        fn decrypt_cookie(host: &str, encrypted: &[u8], password: &str) -> Result<String> {
+            let ciphertext = encrypted.strip_prefix(b"v10").ok_or_else(|| {
+                desktop_error("Claude Desktop uses an unsupported cookie encryption version")
+            })?;
+            let mut key = [0_u8; 16];
+            pbkdf2_hmac::<Sha1>(password.as_bytes(), b"saltysalt", 1003, &mut key);
+            let plaintext = Aes128CbcDec::new(&key.into(), &[b' '; 16].into())
+                .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+                .map_err(|_| desktop_error("Claude Desktop cookie decryption failed"))?;
+            let host_digest = Sha256::digest(host.as_bytes());
+            let plaintext = if plaintext.starts_with(host_digest.as_slice()) {
+                // Chromium database version 24+ prefixes the plaintext with
+                // SHA-256(host_key); older databases do not.
+                &plaintext[host_digest.len()..]
+            } else {
+                plaintext.as_slice()
+            };
+            let value = std::str::from_utf8(plaintext)
+                .map_err(|_| desktop_error(&format!("decrypted cookie for {host} is not UTF-8")))?;
+            Ok(value.to_string())
+        }
+
+        struct CookieCopy {
+            directory: PathBuf,
+            database: PathBuf,
+        }
+
+        impl CookieCopy {
+            fn new(source: &Path) -> Result<Self> {
+                let directory = std::env::temp_dir().join(format!(
+                    "txcript-claude-cookies-{}-{}",
+                    std::process::id(),
+                    uuid::Uuid::new_v4()
+                ));
+                fs::create_dir(&directory).map_err(Error::from)?;
+                let database = directory.join("Cookies");
+                if let Err(error) = fs::copy(source, &database) {
+                    let _ = fs::remove_dir_all(&directory);
+                    return Err(Error::from(error));
+                }
+                for suffix in ["-wal", "-shm"] {
+                    let source_sidecar = PathBuf::from(format!("{}{suffix}", source.display()));
+                    if source_sidecar.is_file() {
+                        let _ =
+                            fs::copy(source_sidecar, directory.join(format!("Cookies{suffix}")));
+                    }
+                }
+                Ok(Self {
+                    directory,
+                    database,
+                })
+            }
+        }
+
+        impl Drop for CookieCopy {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.directory);
+            }
+        }
+
+        fn desktop_error(detail: &str) -> Error {
+            Error::Remote {
+                harness: ClaudeChat::NAME,
+                detail: format!("Claude Desktop authentication failed: {detail}"),
+            }
+        }
+    }
+
     #[cfg(test)]
     #[allow(
         clippy::expect_used,
@@ -2436,252 +2682,6 @@ mod remote {
             assert!(super::macos::cookie_is_current(101, 100));
             assert!(!super::macos::cookie_is_current(100, 100));
             assert!(!super::macos::cookie_is_current(99, 100));
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn desktop_credentials() -> Result<Credentials> {
-        macos::read_desktop_credentials()
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn desktop_credentials() -> Result<Credentials> {
-        Err(Error::Remote {
-            harness: ClaudeChat::NAME,
-            detail: "Claude Desktop credential reuse is supported on macOS in V1; set TXCRIPT_CLAUDE_CHAT_SESSION_KEY on this platform"
-                .to_string(),
-        })
-    }
-
-    #[cfg(target_os = "macos")]
-    mod macos {
-        use std::collections::HashMap;
-        use std::fs;
-        use std::path::{Path, PathBuf};
-        use std::process::Command;
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        use aes::Aes128;
-        use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
-        use cbc::Decryptor;
-        use pbkdf2::pbkdf2_hmac;
-        use rusqlite::{Connection, OpenFlags};
-        use sha1::Sha1;
-        use sha2::{Digest, Sha256};
-
-        use super::{Credentials, validate_cookie};
-        use crate::error::{Error, Result};
-        use crate::harness::{claude_chat::ClaudeChat, home_dir};
-        use crate::transcript::Harness;
-
-        type Aes128CbcDec = Decryptor<Aes128>;
-
-        pub(super) fn read_desktop_credentials() -> Result<Credentials> {
-            let home = home_dir().ok_or_else(|| desktop_error("home directory is unavailable"))?;
-            let support = home.join("Library/Application Support/Claude");
-            let cookie_path = [support.join("Cookies"), support.join("Network/Cookies")]
-                .into_iter()
-                .find(|path| path.is_file())
-                .ok_or_else(|| desktop_error("Claude Desktop cookie database was not found"))?;
-            let copy = CookieCopy::new(&cookie_path)?;
-            let connection =
-                Connection::open_with_flags(&copy.database, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                    .map_err(|error| {
-                        desktop_error(&format!("could not open Claude Desktop cookies: {error}"))
-                    })?;
-            let mut statement = connection
-                .prepare(
-                    "SELECT host_key, name, value, encrypted_value, expires_utc FROM cookies \
-                     WHERE host_key LIKE '%claude.ai%' AND name IN (\
-                         'sessionKey', 'sessionKeyV3', 'sessionKeyLC', 'sessionKeyV3LC', \
-                         '__cf_bm', 'cf_clearance', \
-                         'routingHint', 'lastActiveOrg', 'ajs_anonymous_id', \
-                         'anthropic-device-id', 'activitySessionId'\
-                     ) \
-                     ORDER BY last_access_utc DESC",
-                )
-                .map_err(|error| {
-                    desktop_error(&format!("Claude Desktop cookie schema changed: {error}"))
-                })?;
-            let rows = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Vec<u8>>(3)?,
-                        row.get::<_, i64>(4)?,
-                    ))
-                })
-                .map_err(|error| {
-                    desktop_error(&format!("could not read Claude Desktop cookies: {error}"))
-                })?;
-            let mut raw = Vec::new();
-            for row in rows {
-                raw.push(row.map_err(|error| {
-                    desktop_error(&format!("could not read a Claude Desktop cookie: {error}"))
-                })?);
-            }
-            let now = chromium_time_now()?;
-            raw.retain(|(_, _, _, _, expires)| cookie_is_current(*expires, now));
-            let needs_key = raw
-                .iter()
-                .any(|(_, _, value, encrypted, _)| value.is_empty() && !encrypted.is_empty());
-            let password = if needs_key {
-                Some(keychain_password()?)
-            } else {
-                None
-            };
-            let mut cookies = HashMap::new();
-            for (host, name, value, encrypted, _) in raw {
-                if cookies.contains_key(&name) {
-                    continue;
-                }
-                let plaintext = if !value.is_empty() {
-                    value
-                } else if let Some(password) = password.as_deref() {
-                    decrypt_cookie(&host, &encrypted, password)?
-                } else {
-                    continue;
-                };
-                validate_cookie(&name, &plaintext)?;
-                cookies.insert(name, plaintext);
-            }
-            let session_key_v3 = cookies.remove("sessionKeyV3");
-            let session_key = cookies
-                .remove("sessionKey")
-                .or_else(|| session_key_v3.clone())
-                .ok_or_else(|| {
-                    desktop_error("Claude Desktop has no current readable claude.ai session cookie")
-                })?;
-            Ok(Credentials {
-                session_key,
-                session_key_v3,
-                session_key_lc: cookies.remove("sessionKeyLC"),
-                session_key_v3_lc: cookies.remove("sessionKeyV3LC"),
-                cf_bm: cookies.remove("__cf_bm"),
-                cf_clearance: cookies.remove("cf_clearance"),
-                routing_hint: cookies.remove("routingHint"),
-                last_active_org: cookies.remove("lastActiveOrg"),
-                anonymous_id: cookies.remove("ajs_anonymous_id"),
-                device_id: cookies.remove("anthropic-device-id"),
-                activity_session_id: cookies.remove("activitySessionId"),
-                // Txcript reuses Desktop's cookie but is still a web client;
-                // claiming Electron's privileged platform would be false and
-                // is rejected by Claude's bootstrap authorization.
-                client_platform: "web_claude_ai",
-            })
-        }
-
-        fn chromium_time_now() -> Result<i64> {
-            const WINDOWS_TO_UNIX_EPOCH_MICROS: u128 = 11_644_473_600_000_000;
-            let unix_micros = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|error| desktop_error(&format!("system clock is invalid: {error}")))?
-                .as_micros();
-            i64::try_from(unix_micros.saturating_add(WINDOWS_TO_UNIX_EPOCH_MICROS))
-                .map_err(|_| desktop_error("system clock is outside Chromium's supported range"))
-        }
-
-        pub(super) const fn cookie_is_current(expires: i64, now: i64) -> bool {
-            expires == 0 || expires > now
-        }
-
-        fn keychain_password() -> Result<String> {
-            for args in [
-                vec![
-                    "find-generic-password",
-                    "-w",
-                    "-s",
-                    "Claude Safe Storage",
-                    "-a",
-                    "Claude",
-                ],
-                vec!["find-generic-password", "-w", "-s", "Claude Safe Storage"],
-            ] {
-                let output = Command::new("/usr/bin/security")
-                    .args(args)
-                    .output()
-                    .map_err(|error| {
-                        desktop_error(&format!("could not query macOS Keychain: {error}"))
-                    })?;
-                if output.status.success()
-                    && let Ok(value) = String::from_utf8(output.stdout)
-                    && !value.trim().is_empty()
-                {
-                    return Ok(value.trim_end().to_string());
-                }
-            }
-            Err(desktop_error(
-                "macOS Keychain did not expose `Claude Safe Storage`; set TXCRIPT_CLAUDE_CHAT_SESSION_KEY instead",
-            ))
-        }
-
-        fn decrypt_cookie(host: &str, encrypted: &[u8], password: &str) -> Result<String> {
-            let ciphertext = encrypted.strip_prefix(b"v10").ok_or_else(|| {
-                desktop_error("Claude Desktop uses an unsupported cookie encryption version")
-            })?;
-            let mut key = [0_u8; 16];
-            pbkdf2_hmac::<Sha1>(password.as_bytes(), b"saltysalt", 1003, &mut key);
-            let plaintext = Aes128CbcDec::new(&key.into(), &[b' '; 16].into())
-                .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
-                .map_err(|_| desktop_error("Claude Desktop cookie decryption failed"))?;
-            let host_digest = Sha256::digest(host.as_bytes());
-            let plaintext = if plaintext.starts_with(host_digest.as_slice()) {
-                // Chromium database version 24+ prefixes the plaintext with
-                // SHA-256(host_key); older databases do not.
-                &plaintext[host_digest.len()..]
-            } else {
-                plaintext.as_slice()
-            };
-            let value = std::str::from_utf8(plaintext)
-                .map_err(|_| desktop_error(&format!("decrypted cookie for {host} is not UTF-8")))?;
-            Ok(value.to_string())
-        }
-
-        struct CookieCopy {
-            directory: PathBuf,
-            database: PathBuf,
-        }
-
-        impl CookieCopy {
-            fn new(source: &Path) -> Result<Self> {
-                let directory = std::env::temp_dir().join(format!(
-                    "txcript-claude-cookies-{}-{}",
-                    std::process::id(),
-                    uuid::Uuid::new_v4()
-                ));
-                fs::create_dir(&directory).map_err(Error::from)?;
-                let database = directory.join("Cookies");
-                if let Err(error) = fs::copy(source, &database) {
-                    let _ = fs::remove_dir_all(&directory);
-                    return Err(Error::from(error));
-                }
-                for suffix in ["-wal", "-shm"] {
-                    let source_sidecar = PathBuf::from(format!("{}{suffix}", source.display()));
-                    if source_sidecar.is_file() {
-                        let _ =
-                            fs::copy(source_sidecar, directory.join(format!("Cookies{suffix}")));
-                    }
-                }
-                Ok(Self {
-                    directory,
-                    database,
-                })
-            }
-        }
-
-        impl Drop for CookieCopy {
-            fn drop(&mut self) {
-                let _ = fs::remove_dir_all(&self.directory);
-            }
-        }
-
-        fn desktop_error(detail: &str) -> Error {
-            Error::Remote {
-                harness: ClaudeChat::NAME,
-                detail: format!("Claude Desktop authentication failed: {detail}"),
-            }
         }
     }
 }
