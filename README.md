@@ -138,6 +138,9 @@ txcript continue <file|->[#range]        # continue a Simple document instead:
     --with <harness> [...]                #   a file, or stdin (`-`), from any agent
 txcript view <id>[#range]                # print a session as compact text
     [--from <harness>]                    #   scope the id lookup to one harness
+txcript export <id>[#range]              # write a session as a Simple document
+    [--from <harness>]                    #   scope the id lookup to one harness
+    [--out <file>]                        #   write to <file> instead of stdout
 ```
 
 `continue` writes the session where the target harness keeps its sessions, then launches that harness on it, handing over the terminal:
@@ -155,6 +158,15 @@ txcript view <id>[#range]                # print a session as compact text
 - `abc#-10`: start through message 10
 
 `continue` accepts the same suffix and continues just those messages as a new session. A range that would cut a tool call away from its result is refused, and the error suggests the nearest valid range.
+
+`export` writes the session as a [Simple](docs/formats/simple.md) document, to stdout or `--out <file>`. The document is the full rendering of the canonical model — everything `continue` carries between harnesses — detached from any harness's store, so it moves between machines as a file:
+
+```sh
+txcript export 0dc114bf --out session.json       # on this machine
+txcript continue ./session.json --with claude_code   # on the other one
+```
+
+The recorded working directory is kept when it exists on the importing machine and otherwise replaced by the directory `continue` runs in. `export` accepts the same `#range` suffix and `--from` scope as `view`.
 
 ### Search
 

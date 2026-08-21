@@ -121,6 +121,9 @@ txcript continue <id>[#range]            # continue <id>, then launch its harnes
     [--no-resume]                         #   write the session but don't launch
 txcript view <id>[#range]                # print a session as compact text
     [--from <harness>]                    #   scope the id lookup to one harness
+txcript export <id>[#range]              # write a session as a Simple document
+    [--from <harness>]                    #   scope the id lookup to one harness
+    [--out <file>]                        #   write to <file> instead of stdout
 ```
 
 `continue` scrive la sessione dove l'harness di destinazione conserva le proprie sessioni, poi lo lancia su di essa, cedendogli il terminale:
@@ -137,6 +140,15 @@ txcript view <id>[#range]                # print a session as compact text
 - `abc#-10`: dall'inizio al messaggio 10
 
 `continue` accetta lo stesso suffisso e continua solo quei messaggi come nuova sessione. Un intervallo che separerebbe una chiamata a uno strumento dal suo risultato viene rifiutato, e l'errore suggerisce l'intervallo valido più vicino.
+
+`export` scrive la sessione come documento [Simple](../formats/simple.md), su stdout o in `--out <file>`. Il documento è il rendering completo del modello canonico — tutto ciò che `continue` porta con sé tra harness — indipendente da dove un harness conserva le proprie sessioni, così si sposta da una macchina all'altra come file:
+
+```sh
+txcript export 0dc114bf --out session.json       # on this machine
+txcript continue ./session.json --with claude_code   # on the other one
+```
+
+La working directory registrata viene mantenuta quando esiste sulla macchina di importazione, altrimenti viene sostituita dalla directory in cui `continue` viene eseguito. `export` accetta lo stesso suffisso `#range` e lo stesso ambito `--from` di `view`.
 
 ### Ricerca
 

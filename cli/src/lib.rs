@@ -49,6 +49,7 @@ use txcript::harness::{amp, simple};
 use txcript::{Codec, Common, HarnessId, TextCodec, Transcript, local};
 
 pub mod cache;
+mod export;
 pub mod fragment;
 #[cfg(feature = "mcp")]
 pub mod mcp;
@@ -96,7 +97,7 @@ pub enum Command {
     },
 }
 
-/// The session commands — `list`, `continue`, `view`, `query` — as one clap
+/// The session commands — `list`, `continue`, `view`, `export`, `query` — as one clap
 /// [`Subcommand`]. Usable on its own, or flattened into a larger command
 /// enum with `#[command(flatten)]` and dispatched through [`run_session`].
 #[derive(Subcommand)]
@@ -176,6 +177,25 @@ pub enum SessionCommand {
         /// Only look for the session in this harness
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         from: Option<HarnessId>,
+    },
+    /// Write a session as a Simple interchange document
+    ///
+    /// The document is the full-fidelity Simple rendering of the canonical
+    /// model (docs/formats/simple.md), detached from any harness's store.
+    /// Move it to another machine and `continue <file> --with <harness>`
+    /// picks the session up there; a `#range` exports just those messages.
+    Export {
+        /// Session id (any unambiguous prefix) or its exact title, with an
+        /// optional `#range` of 1-based inclusive message numbers
+        /// (`abc#5-12`, `#7`, `#5-`, `#-10`)
+        #[arg(value_hint = clap::ValueHint::Other)]
+        source: String,
+        /// Only look for the session in this harness
+        #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
+        from: Option<HarnessId>,
+        /// Write the document to this file instead of stdout
+        #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
+        out: Option<PathBuf>,
     },
     /// Search session content; without a pattern, open an fzf-style picker
     ///
@@ -316,6 +336,9 @@ pub fn run_session(command: SessionCommand, options: &Options) -> Result<ExitCod
             no_resume,
         } => cmd_continue(&id, with, from, out.as_ref(), no_resume),
         SessionCommand::View { source, from } => view::cmd_view(&source, from),
+        SessionCommand::Export { source, from, out } => {
+            export::cmd_export(&source, from, out.as_deref())
+        }
         SessionCommand::Query {
             pattern,
             with,

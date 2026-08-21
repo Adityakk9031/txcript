@@ -121,6 +121,9 @@ txcript continue <id>[#range]            # continue <id>, then launch its harnes
     [--no-resume]                         #   write the session but don't launch
 txcript view <id>[#range]                # print a session as compact text
     [--from <harness>]                    #   scope the id lookup to one harness
+txcript export <id>[#range]              # write a session as a Simple document
+    [--from <harness>]                    #   scope the id lookup to one harness
+    [--out <file>]                        #   write to <file> instead of stdout
 ```
 
 `continue` 會把工作階段寫到目標 harness 存放工作階段的位置，然後啟動該 harness 並把終端機交給它：
@@ -137,6 +140,15 @@ txcript view <id>[#range]                # print a session as compact text
 - `abc#-10`：從開頭到第 10 則
 
 `continue` 接受同樣的後綴，只把這些訊息作為新的工作階段接續。會把工具呼叫與其結果拆開的範圍會被拒絕，錯誤訊息會建議最接近的有效範圍。
+
+`export` 會把工作階段寫為 [Simple](../formats/simple.md) 文件，輸出到 stdout 或 `--out <file>`。此文件是標準模型的完整呈現——`continue` 在 harness 之間攜帶的一切——脫離了任何 harness 存放工作階段的位置，因此可以作為一個檔案從一台機器移到另一台機器：
+
+```sh
+txcript export 0dc114bf --out session.json       # on this machine
+txcript continue ./session.json --with claude_code   # on the other one
+```
+
+已記錄的工作目錄，如果在匯入端的機器上存在就會保留，否則會被 `continue` 執行所在的目錄取代。`export` 接受與 `view` 相同的 `#range` 後綴與 `--from` 範圍。
 
 ### 搜尋
 
