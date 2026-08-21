@@ -4,8 +4,11 @@
 
 use chrono::{TimeZone, Utc};
 use txcript::common::{Block, Message, Meta, Role};
-use txcript::harness::{campfire, claude_code, codex, cursor, grok, pi};
+use txcript::harness::{campfire, claude_code, codex, grok, pi};
 use txcript::{Codec, Common, Store, Transcript};
+
+#[cfg(feature = "opencode")]
+use txcript::harness::cursor;
 
 fn small_common(id: &str) -> Transcript<Common> {
     let meta = Meta {

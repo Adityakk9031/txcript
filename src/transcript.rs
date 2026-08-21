@@ -233,6 +233,7 @@ pub struct Saved<R> {
 #[serde(rename_all = "snake_case")]
 pub enum HarnessId {
     ClaudeCode,
+    ClaudeChat,
     Codex,
     OpenCode,
     Pi,
@@ -248,8 +249,9 @@ pub enum HarnessId {
 }
 
 impl HarnessId {
-    pub const ALL: [HarnessId; 13] = [
+    pub const ALL: [HarnessId; 14] = [
         HarnessId::ClaudeCode,
+        HarnessId::ClaudeChat,
         HarnessId::Codex,
         HarnessId::OpenCode,
         HarnessId::Pi,
@@ -269,6 +271,7 @@ impl HarnessId {
     pub const fn as_str(self) -> &'static str {
         match self {
             HarnessId::ClaudeCode => "claude_code",
+            HarnessId::ClaudeChat => "claude_chat",
             HarnessId::Codex => "codex",
             HarnessId::OpenCode => "opencode",
             HarnessId::Pi => "pi",
@@ -298,6 +301,9 @@ impl FromStr for HarnessId {
         // Accept a few friendly aliases alongside the canonical names.
         match s.trim().to_ascii_lowercase().as_str() {
             "claude" | "claude_code" | "claude-code" | "claudecode" => Ok(HarnessId::ClaudeCode),
+            "claude_chat" | "claude-chat" | "claude_web" | "claude-web" => {
+                Ok(HarnessId::ClaudeChat)
+            }
             "codex" => Ok(HarnessId::Codex),
             "opencode" | "open_code" | "open-code" => Ok(HarnessId::OpenCode),
             "pi" => Ok(HarnessId::Pi),

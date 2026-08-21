@@ -18,17 +18,21 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
 use chrono::{DateTime, Utc};
 
-use crate::common::Meta;
+use crate::common::{ArtifactSource, Block, Meta};
 use crate::harness::{amp, antigravity, campfire, claude_code, codex, cowork, cursor, grok, pi};
+
+#[cfg(feature = "claude_chat")]
+use crate::harness::claude_chat;
 
 #[cfg(feature = "hermes")]
 use crate::harness::hermes;
 
 #[cfg(feature = "opencode")]
 use crate::harness::cursor_desktop;
-use crate::{Codec, Common, Error, HarnessId, Result, Store, Transcript};
+use crate::{Codec, Common, Error, Harness, HarnessId, Result, Store, Transcript};
 
 #[cfg(feature = "opencode")]
 use crate::harness::opencode;
@@ -47,6 +51,8 @@ pub struct Session {
 
 enum Locator {
     Path(PathBuf),
+    #[cfg(feature = "claude_chat")]
+    Remote(claude_chat::ClaudeChatRef),
     #[cfg(any(feature = "opencode", feature = "hermes"))]
     Id(String),
 }
@@ -83,6 +89,8 @@ pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session>
         claude_code::ClaudeStore::default_root(),
         &mut out,
     );
+    on_store(HarnessId::ClaudeChat, out.len());
+    scan_claude_chat(&mut out);
     on_store(HarnessId::Codex, out.len());
     scan(
         HarnessId::Codex,
@@ -168,6 +176,69 @@ pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session>
     out
 }
 
+fn scan_claude_chat(out: &mut Vec<Session>) {
+    #[cfg(feature = "claude_chat")]
+    {
+        // No credentials means no remote store. Aggregate discovery remains
+        // tolerant; explicit discovery below surfaces access failures.
+        let _ = discover_claude_chat_into(out, false);
+    }
+    #[cfg(not(feature = "claude_chat"))]
+    let _ = out;
+}
+
+/// Discover one harness, surfacing remote errors when Claude Chat is
+/// explicitly requested. Other harnesses retain the tolerant aggregate scan.
+///
+/// # Errors
+/// When the explicitly selected live backend rejects access or changes shape.
+pub fn discover_harness(harness: HarnessId) -> Result<Vec<Session>> {
+    #[cfg(feature = "claude_chat")]
+    if harness == HarnessId::ClaudeChat {
+        let mut out = Vec::new();
+        discover_claude_chat_into(&mut out, true)?;
+        out.sort_by_key(|session| std::cmp::Reverse(session.meta.timestamp));
+        return Ok(out);
+    }
+    #[cfg(not(feature = "claude_chat"))]
+    if harness == HarnessId::ClaudeChat {
+        return Err(Error::Remote {
+            harness: "claude_chat",
+            detail:
+                "live Claude Chat support was not compiled in (enable the `claude_chat` feature)"
+                    .to_string(),
+        });
+    }
+    Ok(discover()
+        .into_iter()
+        .filter(|session| session.harness == harness)
+        .collect())
+}
+
+#[cfg(feature = "claude_chat")]
+fn discover_claude_chat_into(out: &mut Vec<Session>, explicit: bool) -> Result<()> {
+    let Some(store) = claude_chat::ClaudeChatStore::from_environment()? else {
+        return if explicit {
+            Err(Error::Remote {
+                harness: "claude_chat",
+                detail: "authentication is not configured; set TXCRIPT_CLAUDE_CHAT_SESSION_KEY or explicitly opt into macOS Claude Desktop with TXCRIPT_CLAUDE_CHAT_AUTH=desktop"
+                    .to_string(),
+            })
+        } else {
+            Ok(())
+        };
+    };
+    for discovered in store.discover()? {
+        out.push(Session {
+            harness: HarnessId::ClaudeChat,
+            meta: discovered.meta,
+            updated_at: discovered.reference.updated_at,
+            locator: Locator::Remote(discovered.reference),
+        });
+    }
+    Ok(())
+}
+
 fn file_mtime(path: &Path) -> Option<DateTime<Utc>> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     Some(DateTime::<Utc>::from(modified))
@@ -179,6 +250,10 @@ impl Session {
     pub fn location(&self) -> String {
         match &self.locator {
             Locator::Path(p) => p.display().to_string(),
+            #[cfg(feature = "claude_chat")]
+            Locator::Remote(reference) => {
+                format!("https://claude.ai/chat/{}", reference.conversation_uuid)
+            }
             #[cfg(feature = "opencode")]
             Locator::Id(id) => format!("{} db session {id}", self.harness),
         }
@@ -200,6 +275,11 @@ impl Session {
         match (&self.harness, &self.locator) {
             (HarnessId::ClaudeCode, Locator::Path(p)) => {
                 go(claude_code::ClaudeStore::default_root(), p)
+            }
+            #[cfg(feature = "claude_chat")]
+            (HarnessId::ClaudeChat, Locator::Remote(reference)) => {
+                let store = required(claude_chat::ClaudeChatStore::from_environment()?)?;
+                claude_chat::ClaudeChat::to_common(&store.load(reference)?)
             }
             (HarnessId::Codex, Locator::Path(p)) => go(codex::CodexStore::default_root(), p),
             (HarnessId::Pi, Locator::Path(p)) => go(pi::PiStore::default_root(), p),
@@ -245,6 +325,10 @@ impl Session {
         match (&self.harness, &self.locator) {
             (HarnessId::ClaudeCode, Locator::Path(p)) => {
                 go(claude_code::ClaudeStore::default_root(), p)
+            }
+            #[cfg(feature = "claude_chat")]
+            (HarnessId::ClaudeChat, Locator::Remote(reference)) => {
+                required(claude_chat::ClaudeChatStore::from_environment()?)?.delete(reference)
             }
             (HarnessId::Codex, Locator::Path(p)) => go(codex::CodexStore::default_root(), p),
             (HarnessId::Pi, Locator::Path(p)) => go(pi::PiStore::default_root(), p),
@@ -307,6 +391,8 @@ pub fn fingerprints(sessions: &[Session]) -> Vec<String> {
         };
         match harness {
             HarnessId::ClaudeCode => group.files(claude_code::ClaudeStore::default_root()),
+            #[cfg(feature = "claude_chat")]
+            HarnessId::ClaudeChat => group.remote(claude_chat::ClaudeChatStore::from_environment()),
             HarnessId::Codex => group.files(codex::CodexStore::default_root()),
             HarnessId::Pi => group.files(pi::PiStore::default_root()),
             HarnessId::Campfire => group.files(campfire::CampfireStore::default_root()),
@@ -366,6 +452,25 @@ impl Group<'_> {
         }
     }
 
+    #[cfg(feature = "claude_chat")]
+    fn remote(self, store: Result<Option<claude_chat::ClaudeChatStore>>) {
+        let refs: Vec<claude_chat::ClaudeChatRef> = self
+            .at
+            .iter()
+            .filter_map(|&index| self.sessions[index].remote().cloned())
+            .collect();
+        let by_ref = store
+            .ok()
+            .flatten()
+            .and_then(|store| store.fingerprints(&refs).ok())
+            .unwrap_or_default();
+        for &index in self.at {
+            if let Some(reference) = self.sessions[index].remote() {
+                self.out[index] = by_ref.get(&reference.key()).cloned().unwrap_or_default();
+            }
+        }
+    }
+
     #[cfg(any(feature = "opencode", feature = "hermes"))]
     fn ids<S>(self, store: Option<S>)
     where
@@ -395,6 +500,18 @@ impl Session {
     fn path(&self) -> Option<&PathBuf> {
         match &self.locator {
             Locator::Path(p) => Some(p),
+            #[cfg(feature = "claude_chat")]
+            Locator::Remote(_) => None,
+            #[cfg(any(feature = "opencode", feature = "hermes"))]
+            Locator::Id(_) => None,
+        }
+    }
+
+    #[cfg(feature = "claude_chat")]
+    fn remote(&self) -> Option<&claude_chat::ClaudeChatRef> {
+        match &self.locator {
+            Locator::Remote(reference) => Some(reference),
+            Locator::Path(_) => None,
             #[cfg(any(feature = "opencode", feature = "hermes"))]
             Locator::Id(_) => None,
         }
@@ -406,6 +523,8 @@ impl Session {
         match &self.locator {
             Locator::Id(id) => Some(id),
             Locator::Path(_) => None,
+            #[cfg(feature = "claude_chat")]
+            Locator::Remote(_) => None,
         }
     }
 }
@@ -458,13 +577,15 @@ pub fn write(
     }
 
     match target {
-        HarnessId::ClaudeCode => go(
-            claude_code::ClaudeStore::default_root(),
-            claude_code::ClaudeStore::new,
-            root,
-            common,
-            |s| s.root,
-        ),
+        HarnessId::ClaudeCode => write_claude_code(common, root),
+        // Like Amp, Claude Chat is server-authoritative and has no import.
+        // Its additional in-place-resume refusal lives in the CLI because
+        // that path deliberately bypasses `write` for existing sessions.
+        HarnessId::ClaudeChat => Err(Error::Unconvertible {
+            harness: "claude_chat",
+            detail: "Claude Chat is a live read-only source; sessions can be pulled out and converted into another harness, but never continued into Claude"
+                .to_string(),
+        }),
         HarnessId::Codex => go(
             codex::CodexStore::default_root(),
             codex::CodexStore::new,
@@ -560,6 +681,106 @@ pub fn write(
     }
 }
 
+fn write_claude_code(common: &Transcript<Common>, root: Option<&Path>) -> Result<Written> {
+    let store = match root {
+        Some(dir) => claude_code::ClaudeStore::new(dir.to_path_buf()),
+        None => required(claude_code::ClaudeStore::default_root())?,
+    };
+    let prepared = materialize_artifacts_for_claude_code(common, &store.root)?;
+    let native = claude_code::ClaudeCode::from_common(&prepared)?;
+    let saved = store.save(&native)?;
+    Ok(Written {
+        id: saved.id,
+        location: saved.reference.display().to_string(),
+    })
+}
+
+fn materialize_artifacts_for_claude_code(
+    common: &Transcript<Common>,
+    projects_root: &Path,
+) -> Result<Transcript<Common>> {
+    const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
+
+    crate::harness::checked_id_component(claude_code::ClaudeCode::NAME, &common.meta.id)?;
+    let artifact_root = projects_root
+        .join(claude_code::encode_project_dir(
+            common.meta.cwd.as_deref().unwrap_or_default(),
+        ))
+        .join(&common.meta.id)
+        .join("artifacts");
+    let mut prepared = common.clone();
+    for (message_index, message) in prepared.body.iter_mut().enumerate() {
+        for (block_index, block) in message.content.iter_mut().enumerate() {
+            let Block::Artifact { artifact } = block else {
+                continue;
+            };
+            let (bytes, media_type) = match &artifact.source {
+                ArtifactSource::Path { .. } => continue,
+                ArtifactSource::Text { text, media_type } => {
+                    if text.len() > MAX_ARTIFACT_BYTES {
+                        return Err(artifact_error("artifact exceeds the size limit"));
+                    }
+                    (text.as_bytes().to_vec(), media_type.clone())
+                }
+                ArtifactSource::Base64 { data, media_type } => {
+                    let max_encoded = MAX_ARTIFACT_BYTES
+                        .saturating_mul(4)
+                        .saturating_div(3)
+                        .saturating_add(4);
+                    if data.len() > max_encoded {
+                        return Err(artifact_error("artifact exceeds the size limit"));
+                    }
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(data)
+                        .map_err(|_| artifact_error("artifact contains invalid base64"))?;
+                    if bytes.len() > MAX_ARTIFACT_BYTES {
+                        return Err(artifact_error("artifact exceeds the size limit"));
+                    }
+                    (bytes, media_type.clone())
+                }
+            };
+            let directory = artifact_root.join(format!("{message_index}-{block_index}"));
+            std::fs::create_dir_all(&directory)?;
+            let path = directory.join(safe_artifact_name(&artifact.name));
+            std::fs::write(&path, bytes)?;
+            let path = std::path::absolute(&path).unwrap_or(path);
+            artifact.source = ArtifactSource::Path {
+                path: path.to_string_lossy().into_owned(),
+                media_type,
+            };
+        }
+    }
+    Ok(prepared)
+}
+
+fn safe_artifact_name(name: &str) -> String {
+    let mut safe = String::new();
+    for character in name.trim().chars() {
+        let character =
+            if character.is_control() || matches!(character, '/' | '\\' | '`' | ':' | '\0') {
+                '_'
+            } else {
+                character
+            };
+        if safe.len().saturating_add(character.len_utf8()) > 180 {
+            break;
+        }
+        safe.push(character);
+    }
+    if safe.is_empty() || matches!(safe.as_str(), "." | "..") {
+        "artifact".to_string()
+    } else {
+        safe
+    }
+}
+
+fn artifact_error(detail: &str) -> Error {
+    Error::Malformed {
+        harness: claude_code::ClaudeCode::NAME,
+        detail: detail.to_string(),
+    }
+}
+
 #[cfg(feature = "opencode")]
 fn write_cursor_desktop(common: &Transcript<Common>, root: Option<&Path>) -> Result<Written> {
     let store = match root {
@@ -619,6 +840,8 @@ pub fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
         let id = id.to_string();
         match harness {
             HarnessId::ClaudeCode => ("claude".into(), vec!["--resume".into(), id]),
+            // Source-only harnesses: the CLI refuses before this fallback.
+            HarnessId::ClaudeChat | HarnessId::Simple => ("txcript".into(), Vec::new()),
             HarnessId::Codex => ("codex".into(), vec!["resume".into(), id]),
             HarnessId::OpenCode => ("opencode".into(), vec!["--session".into(), id]),
             HarnessId::Pi => ("pi".into(), vec!["--session".into(), id]),
@@ -637,9 +860,6 @@ pub fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
                 ("open".into(), vec!["-a".into(), "Claude".into()])
             }
             HarnessId::Cowork => ("Claude".into(), Vec::new()),
-            // Unreachable in practice: Simple sessions are neither discovered
-            // nor written, so nothing resumes one. There is no native app.
-            HarnessId::Simple => ("txcript".into(), Vec::new()),
         }
     })
 }

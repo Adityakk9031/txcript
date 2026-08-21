@@ -13,7 +13,7 @@ use txcript::{HarnessId, Span, text};
 use crate::fragment;
 
 pub fn cmd_view(source: &str, from: Option<HarnessId>) -> Result<ExitCode, String> {
-    let sessions = super::discover_with_spinner();
+    let sessions = super::discover_with_spinner(from)?;
     // A whole-input match (a title that itself contains `#12`) beats the
     // fragment interpretation.
     let (src, request) = match fragment::parse_ref(source) {
@@ -22,9 +22,13 @@ pub fn cmd_view(source: &str, from: Option<HarnessId>) -> Result<ExitCode, Strin
     };
 
     let session = super::find_session(&sessions, from, src)?.ok_or_else(|| {
-        let scope = from.map_or(String::new(), |h| format!(" {h}"));
+        let (origin, scope) = if from == Some(HarnessId::ClaudeChat) {
+            ("Claude Chat", String::new())
+        } else {
+            ("local", from.map_or(String::new(), |h| format!(" {h}")))
+        };
         format!(
-            "no local{scope} session matches `{src}` (try `{} list`)",
+            "no {origin}{scope} session matches `{src}` (try `{} list`)",
             crate::program()
         )
     })?;

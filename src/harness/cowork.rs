@@ -179,7 +179,8 @@ fn body_from_messages(meta: &Meta, messages: &[Message]) -> (Meta, CoworkSession
                 Block::Thinking { .. }
                 | Block::ToolUse { .. }
                 | Block::ToolResult { .. }
-                | Block::Image { .. } => None,
+                | Block::Image { .. }
+                | Block::Artifact { .. } => None,
             })
         });
 

@@ -229,6 +229,9 @@ fn signature(t: &Transcript<Common>) -> Vec<String> {
                     format!("result:{}:{is_error}:{text}", renumber(tool_use_id))
                 }
                 Block::Image { source } => format!("image:{}", source.media_type),
+                Block::Artifact { artifact } => {
+                    format!("artifact:{}:{}", artifact.id, artifact.display_text())
+                }
             };
             out.push(format!("{role}/{desc}"));
         }

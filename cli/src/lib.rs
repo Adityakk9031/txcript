@@ -54,7 +54,7 @@ pub mod fragment;
 pub mod mcp;
 mod view;
 
-pub const HARNESSES: &str = "harnesses: claude_code, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, hermes, \
+pub const HARNESSES: &str = "harnesses: claude_code, claude_chat, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, hermes, \
      amp, antigravity, simple, cowork";
 
 /// The `txcript` binary's command line.
@@ -305,7 +305,7 @@ pub fn run_session(command: SessionCommand, options: &Options) -> Result<ExitCod
             since,
             until,
         } => {
-            cmd_list(from, cwd.as_deref(), limit, since, until);
+            cmd_list(from, cwd.as_deref(), limit, since, until)?;
             Ok(ExitCode::SUCCESS)
         }
         SessionCommand::Continue {
@@ -620,14 +620,39 @@ mod when_tests {
 
 #[cfg(test)]
 mod stamp_tests {
-    use super::stamp_live_cwd;
+    use super::{HarnessId, stamp_live_cwd};
 
     #[test]
-    fn dead_cwds_rehome_to_the_current_directory_except_for_exports() {
+    fn unavailable_cwds_rehome_to_the_current_directory_except_for_exports() {
+        let current = std::env::current_dir().unwrap();
+
+        // Claude Chat and other remote/document sources have no local cwd.
+        // A live Claude Code import must still land under a project shard,
+        // rather than directly in `~/.claude/projects`, where `--resume`
+        // cannot find it.
+        for cwd in [None, Some(String::new())] {
+            let mut copy = super::identity_tests::transcript();
+            copy.meta.cwd = cwd;
+            stamp_live_cwd(&mut copy, None);
+            assert_eq!(copy.meta.cwd.as_deref(), current.to_str());
+
+            // Exercise the actual Claude Code writer: the session must be a
+            // child of an encoded project directory, never a JSONL file at
+            // the projects root like the broken live import was.
+            let root = tempfile::tempdir().unwrap();
+            let written =
+                txcript::local::write(HarnessId::ClaudeCode, &copy, Some(root.path())).unwrap();
+            let reference = std::path::PathBuf::from(written.location.trim_matches('"'));
+            assert_ne!(reference.parent(), Some(root.path()));
+            assert_eq!(
+                reference.parent().and_then(std::path::Path::parent),
+                Some(root.path())
+            );
+        }
+
         let mut copy = super::identity_tests::transcript();
         copy.meta.cwd = Some("/no/such/dir/txcript-test".into());
         stamp_live_cwd(&mut copy, None);
-        let current = std::env::current_dir().unwrap();
         assert_eq!(copy.meta.cwd.as_deref(), current.to_str());
 
         // A cwd that still exists is kept.
@@ -641,6 +666,11 @@ mod stamp_tests {
         copy.meta.cwd = Some("/no/such/dir/txcript-test".into());
         stamp_live_cwd(&mut copy, Some(std::path::Path::new("/tmp/x")));
         assert_eq!(copy.meta.cwd.as_deref(), Some("/no/such/dir/txcript-test"));
+
+        let mut copy = super::identity_tests::transcript();
+        copy.meta.cwd = None;
+        stamp_live_cwd(&mut copy, Some(std::path::Path::new("/tmp/x")));
+        assert_eq!(copy.meta.cwd, None);
     }
 }
 
@@ -663,7 +693,7 @@ mod scrub_tests {
 
 #[cfg(test)]
 mod identity_tests {
-    use super::{Common, HarnessId, Transcript, fresh_identity};
+    use super::{Common, HarnessId, Transcript, ensure_resumable_source, fresh_identity};
     use txcript::common::Meta;
 
     pub(crate) fn transcript() -> Transcript<Common> {
@@ -713,6 +743,18 @@ mod identity_tests {
         assert_eq!(copy.meta.id, id);
         assert_eq!(copy.meta.timestamp, ts);
     }
+
+    #[test]
+    fn claude_chat_is_refused_even_for_an_in_place_continue() {
+        let error =
+            ensure_resumable_source(HarnessId::ClaudeChat, HarnessId::ClaudeChat).unwrap_err();
+        assert!(error.contains("pull-only"));
+    }
+
+    #[test]
+    fn claude_chat_as_a_target_uses_the_normal_write_boundary() {
+        assert!(ensure_resumable_source(HarnessId::Codex, HarnessId::ClaudeChat).is_ok());
+    }
 }
 
 fn cmd_list(
@@ -721,8 +763,8 @@ fn cmd_list(
     limit: Option<usize>,
     since: Option<chrono::DateTime<chrono::Utc>>,
     until: Option<chrono::DateTime<chrono::Utc>>,
-) {
-    let sessions = discover_with_spinner();
+) -> Result<(), String> {
+    let sessions = discover_with_spinner(from)?;
     let listed: Vec<_> = sessions
         .iter()
         .filter(|s| {
@@ -739,6 +781,9 @@ fn cmd_list(
             _ => " in that time range".to_string(),
         };
         match from {
+            Some(HarnessId::ClaudeChat) => {
+                println!("no Claude Chat sessions found{scope}{when}");
+            }
             Some(h) => println!("no local {h} sessions found{scope}{when}"),
             None => println!("no local sessions found{scope}{when}"),
         }
@@ -753,7 +798,7 @@ fn cmd_list(
             "HARNESS", "WHEN", "ID"
         );
         if writeln!(out, "{}", style::dim(&header, color)).is_err() {
-            return;
+            return Ok(());
         }
         for s in listed {
             let label = s
@@ -772,10 +817,11 @@ fn cmd_list(
                 truncate(&style::scrub(&label), 60)
             );
             if writeln!(out, "{row}").is_err() {
-                return;
+                return Ok(());
             }
         }
     }
+    Ok(())
 }
 
 /// ANSI styling for the printing commands: colors reach a terminal, plain
@@ -829,19 +875,20 @@ mod style {
 
     const fn color(h: HarnessId) -> &'static str {
         match h {
-            HarnessId::ClaudeCode => "\x1b[33m",    // yellow
-            HarnessId::Codex => "\x1b[36m",         // cyan
-            HarnessId::OpenCode => "\x1b[32m",      // green
-            HarnessId::Pi => "\x1b[35m",            // magenta
-            HarnessId::Campfire => "\x1b[91m",      // bright red
-            HarnessId::Cursor => "\x1b[34m",        // blue
-            HarnessId::CursorDesktop => "\x1b[96m", // bright cyan
-            HarnessId::Grok => "\x1b[37m",          // white
-            HarnessId::Hermes => "\x1b[93m",        // bright yellow
-            HarnessId::Amp => "\x1b[95m",           // bright magenta
-            HarnessId::Antigravity => "\x1b[94m",   // bright blue
-            HarnessId::Simple => "\x1b[92m",        // bright green
-            HarnessId::Cowork => "\x1b[38;5;208m",  // orange
+            HarnessId::ClaudeCode => "\x1b[33m",       // yellow
+            HarnessId::ClaudeChat => "\x1b[38;5;214m", // amber
+            HarnessId::Codex => "\x1b[36m",            // cyan
+            HarnessId::OpenCode => "\x1b[32m",         // green
+            HarnessId::Pi => "\x1b[35m",               // magenta
+            HarnessId::Campfire => "\x1b[91m",         // bright red
+            HarnessId::Cursor => "\x1b[34m",           // blue
+            HarnessId::CursorDesktop => "\x1b[96m",    // bright cyan
+            HarnessId::Grok => "\x1b[37m",             // white
+            HarnessId::Hermes => "\x1b[93m",           // bright yellow
+            HarnessId::Amp => "\x1b[95m",              // bright magenta
+            HarnessId::Antigravity => "\x1b[94m",      // bright blue
+            HarnessId::Simple => "\x1b[92m",           // bright green
+            HarnessId::Cowork => "\x1b[38;5;208m",     // orange
         }
     }
 }
@@ -876,7 +923,7 @@ fn cmd_continue(
 
     // Locate the session by id (exact or unambiguous prefix) or exact title,
     // optionally scoped to one harness.
-    let sessions = discover_with_spinner();
+    let sessions = discover_with_spinner(from)?;
     // A whole-input match (a title that itself contains `#12`) beats the
     // fragment interpretation.
     let (src, request) = match fragment::parse_ref(id) {
@@ -1004,15 +1051,9 @@ fn continue_document(
         // carry at all. The target store still needs a file name.
         copy.meta.id = uuid::Uuid::new_v4().to_string();
     }
-    // A document without a recorded cwd continues *here*: the target stores
-    // shard by cwd, and "the directory the user ran txcript in" is the only
-    // sensible home for a transcript that never had one.
-    if out.is_none()
-        && copy.meta.cwd.as_deref().unwrap_or("").is_empty()
-        && let Ok(current) = std::env::current_dir()
-    {
-        copy.meta.cwd = Some(current.to_string_lossy().into_owned());
-    }
+    // A document without a usable recorded cwd continues *here*: the target
+    // stores shard by cwd, and "the directory the user ran txcript in" is the
+    // only sensible home for a transcript that never had one.
     stamp_live_cwd(&mut copy, out);
     let resume_id = write_and_report(HarnessId::Simple, target, &copy, out)?;
     // Stdin was consumed by the document; hand the launched harness the
@@ -1185,6 +1226,7 @@ fn continue_session(
     resume: bool,
 ) -> Result<ExitCode, String> {
     let target = with.unwrap_or(found.harness);
+    ensure_resumable_source(found.harness, target)?;
     let in_place = span_req.is_none() && target == found.harness && out.is_none();
 
     let resume_id = match (span_req, in_place) {
@@ -1206,6 +1248,17 @@ fn continue_session(
     };
 
     launch(target, &resume_id, found.meta.cwd.as_deref(), resume)
+}
+
+fn ensure_resumable_source(source: HarnessId, target: HarnessId) -> Result<(), String> {
+    if source == HarnessId::ClaudeChat && target == HarnessId::ClaudeChat {
+        Err(
+            "Claude Chat is pull-only: choose another --with harness; txcript never continues conversations in Claude"
+                .to_string(),
+        )
+    } else {
+        Ok(())
+    }
 }
 
 /// Give a to-be-written copy its own identity.
@@ -1238,21 +1291,21 @@ fn fresh_identity(
     common.meta.timestamp = chrono::Utc::now();
 }
 
-/// Re-home a live-store copy whose recorded cwd no longer exists. The stores
-/// shard by `meta.cwd`, so a copy filed under a dead directory would be
-/// invisible to the harness, which `launch` starts from the fallback
-/// (current) directory in that case. `--out` exports keep the recorded cwd —
-/// they're faithful exports, and no harness reads them in place.
+/// Give a live-store copy a usable cwd, re-homing one that is missing, empty,
+/// or no longer exists. The stores shard by `meta.cwd`, so a copy filed under
+/// the store root or a dead directory would be invisible to a harness launched
+/// from the current project. `--out` exports keep the recorded cwd — they're
+/// faithful exports, and no harness reads them in place.
 fn stamp_live_cwd(common: &mut Transcript<Common>, out: Option<&std::path::Path>) {
     if out.is_some() {
         return;
     }
-    let dead = common
+    let unavailable = common
         .meta
         .cwd
         .as_deref()
-        .is_some_and(|c| !c.is_empty() && !std::path::Path::new(c).is_dir());
-    if dead && let Ok(current) = std::env::current_dir() {
+        .is_none_or(|c| c.is_empty() || !std::path::Path::new(c).is_dir());
+    if unavailable && let Ok(current) = std::env::current_dir() {
         common.meta.cwd = Some(current.to_string_lossy().into_owned());
     }
 }
@@ -1372,13 +1425,18 @@ fn resume_workdir(cwd: Option<&str>) -> Option<PathBuf> {
     })
 }
 
-fn discover_with_spinner() -> Vec<local::Session> {
+fn discover_with_spinner(from: Option<HarnessId>) -> Result<Vec<local::Session>, String> {
     let spinner = spin::Spinner::start("searching local sessions…");
-    let sessions = local::discover_with(|harness, count| {
-        spinner.set(format!("scanning {harness}… ({count} found)"));
-    });
+    let sessions = if let Some(HarnessId::ClaudeChat) = from {
+        spinner.set("reading Claude Chat…".to_string());
+        local::discover_harness(HarnessId::ClaudeChat).map_err(|error| error.to_string())?
+    } else {
+        local::discover_with(|harness, count| {
+            spinner.set(format!("scanning {harness}… ({count} found)"));
+        })
+    };
     spinner.finish();
-    sessions
+    Ok(sessions)
 }
 
 /// Replace this process with the harness from `workdir` when given. On
@@ -1645,8 +1703,8 @@ mod query {
         from: Option<HarnessId>,
         cwd: Option<&Path>,
         cache: Option<&Path>,
-    ) -> Index {
-        build_index(from, cwd, cache).0
+    ) -> Result<Index, String> {
+        build_index(from, cwd, cache).map(|(index, _)| index)
     }
 
     pub(super) fn cmd_query(
@@ -1656,7 +1714,7 @@ mod query {
         cwd: Option<&Path>,
         cache: Option<&Path>,
     ) -> Result<std::process::ExitCode, String> {
-        let (index, sessions) = build_index(from, cwd, cache);
+        let (index, sessions) = build_index(from, cwd, cache)?;
         match pattern {
             Some(pattern) => {
                 if with.is_some() {
@@ -1693,13 +1751,16 @@ mod query {
     /// cache instead of parsed, and the cache is brought up to date
     /// afterwards. A cache that can't be opened is reported on stderr and
     /// skipped: the index is built the stateless way.
-    #[must_use]
+    ///
+    /// # Errors
+    /// Returns an error when an explicitly selected live store cannot be
+    /// discovered or read.
     pub fn build_index(
         from: Option<HarnessId>,
         cwd: Option<&Path>,
         cache: Option<&Path>,
-    ) -> (Index, Sessions) {
-        let found = super::discover_with_spinner();
+    ) -> Result<(Index, Sessions), String> {
+        let found = super::discover_with_spinner(from)?;
         let spinner = super::spin::Spinner::start("indexing…");
         let mut cache = cache.and_then(|path| match super::cache::Cache::open(path) {
             Ok(cache) => Some(cache),
@@ -1820,7 +1881,7 @@ mod query {
             .filter_map(|(session, &ok)| ok.then(|| (doc_key(&session), session)))
             .collect();
         spinner.finish();
-        (index, sessions)
+        Ok((index, sessions))
     }
 
     /// Print ranked hits for a pattern, colorized when stdout is a terminal.

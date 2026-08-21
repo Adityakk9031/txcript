@@ -567,6 +567,15 @@ fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str) {
                     "image_url": format!("data:{};{},{}", source.media_type, source.source_type, source.data),
                 }));
             }
+            Block::Artifact { artifact } => {
+                let text = artifact.display_text();
+                let kind = match msg.role {
+                    Role::Assistant => "output_text",
+                    Role::User => "input_text",
+                };
+                message_content.push(json!({ "type": kind, "text": text }));
+                text_chunks.push(text);
+            }
             Block::Thinking { text, .. } => {
                 lines.push(meta_line_str(
                     ts,

@@ -786,6 +786,9 @@ fn body_from_messages(meta: &Meta, messages: &[Message]) -> GrokSession {
                         // natively carries a Grok-generated description we
                         // cannot synthesize.
                         Block::Image { source } => prompt_images.push(source),
+                        Block::Artifact { artifact } => {
+                            prompt_texts.push(artifact.display_text());
+                        }
                         Block::ToolResult {
                             tool_use_id,
                             content,
@@ -881,6 +884,7 @@ fn push_assistant(
                 updates.thought(msg.timestamp, text);
             }
             Block::Text { text } => texts.push(text.clone()),
+            Block::Artifact { artifact } => texts.push(artifact.display_text()),
             Block::ToolUse { id, tool } => {
                 let (name, input) = denormalize_tool(tool);
                 let arguments = match &input {

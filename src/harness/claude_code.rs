@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::common::{Block, ImageSource, Message, Meta, Role, StopReason, Tool, ToolOutput, Usage};
+use crate::common::{
+    Artifact, ArtifactSource, Block, ImageSource, Message, Meta, Role, StopReason, Tool,
+    ToolOutput, Usage,
+};
 use crate::error::{Error, Result};
 use crate::harness::jsonl;
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
@@ -220,6 +223,8 @@ pub(crate) fn records_to_messages(records: &[Record], fallback_ts: DateTime<Utc>
 /// the `sessionId` stamped on every line (a fresh UUID when empty). Shared
 /// with harnesses that embed Claude Code's JSONL (Cowork).
 pub(crate) fn messages_to_records(meta: &Meta, messages: &[Message]) -> Vec<Record> {
+    let lowered = lower_artifact_messages(messages);
+    let messages = lowered.as_slice();
     let session_id = if meta.id.is_empty() {
         Uuid::new_v4().to_string()
     } else {
@@ -314,6 +319,62 @@ pub(crate) fn messages_to_records(meta: &Meta, messages: &[Message]) -> Vec<Reco
     }
 
     records
+}
+
+/// Claude Code's native artifact is a normal `Artifact` tool call followed
+/// by a tool result. Lower path-backed Common artifacts into that observed
+/// shape while leaving the rest of the serializer unchanged.
+fn lower_artifact_messages(messages: &[Message]) -> Vec<Message> {
+    let mut lowered = Vec::with_capacity(messages.len());
+    for message in messages {
+        let mut message = message.clone();
+        let mut results = Vec::new();
+        if message.role == Role::Assistant {
+            for block in &mut message.content {
+                let Block::Artifact { artifact } = block else {
+                    continue;
+                };
+                let ArtifactSource::Path { path, .. } = &artifact.source else {
+                    continue;
+                };
+                let path = path.clone();
+                let id = artifact.id.clone();
+                let name = artifact.name.clone();
+                let input = serde_json::json!({
+                    "file_path": path,
+                    "description": name,
+                });
+                *block = Block::ToolUse {
+                    id: id.clone(),
+                    tool: Tool::Raw {
+                        tool_name: "Artifact".to_string(),
+                        input,
+                    },
+                };
+                results.push(Block::ToolResult {
+                    tool_use_id: id,
+                    content: ToolOutput::Text(format!("Artifact available locally at {path}")),
+                    is_error: false,
+                });
+            }
+        }
+        let timestamp = message.timestamp;
+        if !results.is_empty() {
+            message.stop_reason = Some(StopReason::ToolUse);
+        }
+        lowered.push(message);
+        if !results.is_empty() {
+            lowered.push(Message {
+                role: Role::User,
+                content: results,
+                timestamp,
+                model: None,
+                stop_reason: None,
+                usage: None,
+            });
+        }
+    }
+    lowered
 }
 
 impl TextCodec for ClaudeCode {
@@ -846,6 +907,32 @@ fn parse_block(v: &Value) -> Option<Block> {
             let id = v.get("id")?.as_str()?.to_string();
             let name = v.get("name")?.as_str()?;
             let input = v.get("input").cloned().unwrap_or(Value::Object(Map::new()));
+            if name == "Artifact" {
+                let path = input.get("file_path")?.as_str()?.to_string();
+                let artifact_name = input
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                    .map_or_else(
+                        || {
+                            path.rsplit(['/', '\\'])
+                                .next()
+                                .unwrap_or("artifact")
+                                .to_string()
+                        },
+                        String::from,
+                    );
+                return Some(Block::Artifact {
+                    artifact: Artifact {
+                        id,
+                        name: artifact_name,
+                        source: ArtifactSource::Path {
+                            path,
+                            media_type: None,
+                        },
+                    },
+                });
+            }
             Some(Block::ToolUse {
                 id,
                 tool: Tool::from_canonical(name, input),
@@ -867,6 +954,38 @@ fn parse_block(v: &Value) -> Option<Block> {
                         .to_string(),
                     media_type: source.get("media_type")?.as_str()?.to_string(),
                     data: source.get("data")?.as_str()?.to_string(),
+                },
+            })
+        }
+        "document" => {
+            let source = v.get("source")?;
+            let source_type = source.get("type").and_then(Value::as_str)?;
+            let data = source.get("data")?.as_str()?.to_string();
+            let media_type = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .map(String::from);
+            let artifact_source = if source_type == "text" {
+                ArtifactSource::Text {
+                    text: data,
+                    media_type,
+                }
+            } else {
+                ArtifactSource::Base64 { data, media_type }
+            };
+            Some(Block::Artifact {
+                artifact: Artifact {
+                    id: v
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    name: v
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("document")
+                        .to_string(),
+                    source: artifact_source,
                 },
             })
         }
@@ -919,6 +1038,33 @@ fn serialize_block(block: &Block) -> Value {
                 "data": source.data,
             },
         }),
+        Block::Artifact { artifact } => match &artifact.source {
+            ArtifactSource::Path { path, .. } => serde_json::json!({
+                "type": "tool_use",
+                "id": artifact.id,
+                "name": "Artifact",
+                "input": {
+                    "file_path": path,
+                    "description": artifact.name,
+                },
+            }),
+            ArtifactSource::Text { text, media_type } => serde_json::json!({
+                "type": "document",
+                "source": {
+                    "type": "text",
+                    "media_type": media_type.as_deref().unwrap_or("text/plain"),
+                    "data": text,
+                },
+            }),
+            ArtifactSource::Base64 { data, media_type } => serde_json::json!({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type.as_deref().unwrap_or("application/octet-stream"),
+                    "data": data,
+                },
+            }),
+        },
     }
 }
 

@@ -54,6 +54,9 @@ fn signature(t: &Transcript<Common>) -> Vec<String> {
                     format!("result:{tool_use_id}:{is_error}:{text}")
                 }
                 common::Block::Image { source } => format!("image:{}", source.media_type),
+                common::Block::Artifact { artifact } => {
+                    format!("artifact:{}:{}", artifact.id, artifact.display_text())
+                }
             };
             out.push(format!("{role}/{desc}"));
         }

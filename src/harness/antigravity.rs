@@ -970,7 +970,8 @@ fn db_from_messages(meta: &Meta, messages: &[Message]) -> AntigravityDb {
             Block::Text { .. }
             | Block::Thinking { .. }
             | Block::ToolUse { .. }
-            | Block::Image { .. } => None,
+            | Block::Image { .. }
+            | Block::Artifact { .. } => None,
         })
         .collect();
     let known_uses: std::collections::HashSet<String> = messages
@@ -982,7 +983,8 @@ fn db_from_messages(meta: &Meta, messages: &[Message]) -> AntigravityDb {
             Block::Text { .. }
             | Block::Thinking { .. }
             | Block::ToolResult { .. }
-            | Block::Image { .. } => None,
+            | Block::Image { .. }
+            | Block::Artifact { .. } => None,
         })
         .collect();
 
@@ -1064,6 +1066,7 @@ fn user_message_text(blocks: &[Block], orphan_text: &str) -> String {
             Block::Thinking { text, .. } if !text.trim().is_empty() => {
                 Some(text.trim().to_string())
             }
+            Block::Artifact { artifact } => Some(artifact.display_text()),
             // Images ride their own payload field; results ride tool steps.
             Block::Text { .. }
             | Block::Thinking { .. }
@@ -1087,7 +1090,8 @@ fn user_images(blocks: &[Block]) -> Vec<&ImageSource> {
             Block::Text { .. }
             | Block::Thinking { .. }
             | Block::ToolUse { .. }
-            | Block::ToolResult { .. } => None,
+            | Block::ToolResult { .. }
+            | Block::Artifact { .. } => None,
         })
         .collect()
 }
@@ -1114,7 +1118,8 @@ fn orphan_result_text(blocks: &[Block], known_uses: &std::collections::HashSet<S
             Block::Text { .. }
             | Block::Thinking { .. }
             | Block::ToolUse { .. }
-            | Block::Image { .. } => None,
+            | Block::Image { .. }
+            | Block::Artifact { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -1269,6 +1274,7 @@ fn planner_step(
         .filter_map(|block| match block {
             Block::Text { text } if !text.trim().is_empty() => Some(text.trim().to_string()),
             Block::Image { source } => Some(format!("[image: {}]", source.media_type)),
+            Block::Artifact { artifact } => Some(artifact.display_text()),
             // Thinking and tool calls have their own slots; results ride
             // tool steps.
             Block::Text { .. }
@@ -1288,7 +1294,8 @@ fn planner_step(
         | Block::Thinking { .. }
         | Block::ToolUse { .. }
         | Block::ToolResult { .. }
-        | Block::Image { .. } => None,
+        | Block::Image { .. }
+        | Block::Artifact { .. } => None,
     });
     if let Some((thinking, signature)) = thinking {
         pb_string(&mut body, 3, &thinking);

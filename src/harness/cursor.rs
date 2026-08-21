@@ -630,7 +630,8 @@ fn cursor_tool_results(messages: &[Message]) -> HashMap<String, CursorStateToolR
             Block::Text { .. }
             | Block::Thinking { .. }
             | Block::ToolUse { .. }
-            | Block::Image { .. } => None,
+            | Block::Image { .. }
+            | Block::Artifact { .. } => None,
         })
         .collect()
 }
@@ -645,7 +646,8 @@ fn cursor_tool_use_ids(messages: &[Message]) -> HashSet<String> {
             Block::Text { .. }
             | Block::Thinking { .. }
             | Block::ToolResult { .. }
-            | Block::Image { .. } => None,
+            | Block::Image { .. }
+            | Block::Artifact { .. } => None,
         })
         .collect()
 }
@@ -656,6 +658,7 @@ fn user_state_text(blocks: &[Block]) -> String {
         .filter_map(|block| match block {
             Block::Text { text } => Some(text.trim().to_string()),
             Block::Image { source } => Some(format!("[image: {}]", source.media_type)),
+            Block::Artifact { artifact } => Some(artifact.display_text()),
             Block::Thinking { text, .. } if !text.trim().is_empty() => {
                 Some(text.trim().to_string())
             }
@@ -689,6 +692,9 @@ fn assistant_state_steps(
                 "[image: {}]",
                 source.media_type
             ))),
+            Block::Artifact { artifact } => {
+                Some(CursorStateStep::Assistant(artifact.display_text()))
+            }
             // Empty text/thinking is no step; results render with their calls.
             Block::Text { .. } | Block::Thinking { .. } | Block::ToolResult { .. } => None,
         })
@@ -722,7 +728,8 @@ fn orphan_tool_result_state_text(blocks: &[Block], known_tool_uses: &HashSet<Str
             Block::Text { .. }
             | Block::Thinking { .. }
             | Block::ToolUse { .. }
-            | Block::Image { .. } => None,
+            | Block::Image { .. }
+            | Block::Artifact { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -1352,6 +1359,7 @@ fn serialize_user_block(block: &Block) -> Value {
                 Block::Thinking { text, .. } => text.clone(),
                 Block::ToolUse { tool, .. } => format!("{tool:?}"),
                 Block::ToolResult { content, .. } => tool_output_text(content),
+                Block::Artifact { artifact } => artifact.display_text(),
                 Block::Text { .. } | Block::Image { .. } => String::new(),
             };
             json!({"type": "text", "text": text})
@@ -1391,6 +1399,9 @@ fn serialize_assistant_block(
             }))
         }
         Block::Image { source } => Some(serialize_image(source)),
+        Block::Artifact { artifact } => {
+            Some(json!({"type": "text", "text": artifact.display_text()}))
+        }
         // Cursor carries results in tool-role messages, not assistant blocks.
         Block::ToolResult { .. } => None,
     }
@@ -1488,7 +1499,8 @@ fn meta_from_db(db: &CursorDb, db_path: Option<&Path>) -> Meta {
                     | Block::Thinking { .. }
                     | Block::ToolUse { .. }
                     | Block::ToolResult { .. }
-                    | Block::Image { .. } => None,
+                    | Block::Image { .. }
+                    | Block::Artifact { .. } => None,
                 });
         }
     }
@@ -1605,7 +1617,8 @@ fn write_session_files(session_dir: &Path, body: &CursorDb, meta: &Meta, _id: &s
             | Block::Thinking { .. }
             | Block::ToolUse { .. }
             | Block::ToolResult { .. }
-            | Block::Image { .. } => None,
+            | Block::Image { .. }
+            | Block::Artifact { .. } => None,
         })
         .collect::<Vec<_>>();
     fs::write(

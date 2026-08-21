@@ -225,7 +225,8 @@ impl SessionServer {
     ) -> Result<Json<SearchResults>, ErrorData> {
         let from = parse_from(request.from.as_deref())?;
         let cwd = request.cwd.as_deref().map(Path::new);
-        let index = super::query::index_for(from, cwd, self.cache.as_deref());
+        let index = super::query::index_for(from, cwd, self.cache.as_deref())
+            .map_err(|error| ErrorData::internal_error(error, None))?;
         let mut query = Query::fuzzy(request.pattern);
         // Match the CLI's one-shot output bounds.
         query.limit = Some(20);

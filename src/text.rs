@@ -128,6 +128,18 @@ fn blocks<'a>(
                 &format!("image {} omitted", one_line(&source.media_type)),
                 "",
             ),
+            Block::Artifact { artifact } => {
+                let location = match &artifact.source {
+                    crate::common::ArtifactSource::Path { path, .. } => path.as_str(),
+                    crate::common::ArtifactSource::Text { text, .. } => text.as_str(),
+                    crate::common::ArtifactSource::Base64 { .. } => "binary data omitted",
+                };
+                section(
+                    out,
+                    &format!("artifact {}", one_line(&artifact.name)),
+                    location,
+                );
+            }
         }
     }
 }

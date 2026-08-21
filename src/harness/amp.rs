@@ -458,6 +458,9 @@ fn user_value(msg: &Message, index: usize) -> Value {
                     "mediaType": source.media_type,
                 },
             })),
+            Block::Artifact { artifact } => {
+                Some(json!({ "type": "text", "text": artifact.display_text() }))
+            }
             Block::ToolResult {
                 tool_use_id,
                 content,
@@ -540,6 +543,9 @@ fn assistant_value(msg: &Message, index: usize, meta: &Meta) -> Value {
                     "mediaType": source.media_type,
                 },
             })),
+            Block::Artifact { artifact } => {
+                Some(json!({ "type": "text", "text": artifact.display_text() }))
+            }
             // A ToolResult never occurs on assistant turns in the canonical
             // model; there is nothing of it to render.
             Block::ToolResult { .. } => None,

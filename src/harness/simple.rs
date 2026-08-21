@@ -5,7 +5,7 @@
 //! level (all optional), and a `messages` array of `{role, content, …}`
 //! objects whose block shapes follow the Anthropic Messages API convention.
 //! `content` is a plain string or an array of `text` / `thinking` /
-//! `tool_use` / `tool_result` / `image` blocks. Almost everything is
+//! `tool_use` / `tool_result` / `image` / `artifact` blocks. Almost everything is
 //! optional: missing tool ids are synthesized deterministically and id-less
 //! results pair FIFO with preceding unpaired calls; missing timestamps
 //! inherit the nearest preceding message's, then the session's. The format
@@ -40,7 +40,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use crate::common::{Block, ImageSource, Message, Meta, Role, StopReason, Tool, ToolOutput, Usage};
+use crate::common::{
+    Artifact, Block, ImageSource, Message, Meta, Role, StopReason, Tool, ToolOutput, Usage,
+};
 use crate::error::{Error, Result};
 use crate::transcript::{Codec, Common, Harness, TextCodec, Transcript};
 
@@ -244,6 +246,9 @@ fn block_to_common(
         "image" => ImageSource::deserialize(block.get("source")?)
             .ok()
             .map(|source| Block::Image { source }),
+        "artifact" => Artifact::deserialize(block.get("artifact")?)
+            .ok()
+            .map(|artifact| Block::Artifact { artifact }),
         _ => None,
     }
 }
@@ -329,6 +334,9 @@ fn block_to_value(block: &Block) -> Value {
             "media_type": source.media_type,
             "data": source.data,
         }}),
+        Block::Artifact { artifact } => {
+            json!({"type": "artifact", "artifact": artifact})
+        }
     }
 }
 
