@@ -1602,6 +1602,9 @@ mod remote {
         type Ref = ClaudeChatRef;
 
         fn discover(&self) -> Result<Vec<Discovered<Self::Ref>>> {
+            eprintln!(
+                "warning: Claude Chat discovery enumerates the selected account's conversation list through an undocumented private claude.ai endpoint that Anthropic can observe or restrict"
+            );
             let mut found = Vec::new();
             for organization in self.organizations()? {
                 found.extend(self.discover_organization(&organization)?);
