@@ -185,6 +185,8 @@ source <(txcript completion bash)               # bash, ad hoc
 txcript completion fish > ~/.config/fish/completions/txcript.fish
 ```
 
+From a checkout, `cli/prep.sh` installs the binary and wires the completions into `~/.zshrc` and `~/.bashrc`; it also offers to bind ctrl+shift+r to `txcript query --cwd .`, a session picker scoped to the current folder (`--picker` / `--no-picker` skip the prompt).
+
 ## Rust crate
 
 ```toml

@@ -54,7 +54,7 @@ pub mod fragment;
 pub mod mcp;
 mod view;
 
-const HARNESSES: &str = "harnesses: claude_code, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, hermes, \
+pub const HARNESSES: &str = "harnesses: claude_code, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, hermes, \
      amp, antigravity, simple, cowork";
 
 /// The `txcript` binary's command line.
@@ -1312,6 +1312,11 @@ fn launch_via(
             return print_resume_command(&bin, &args);
         };
         Some(tty)
+    } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        // Shell widgets run the picker with `< /dev/tty`, and that alias is
+        // dead input for kqueue-based TUIs on macOS (see [`tty_stdin`]).
+        // Re-point stdin at the real device; inherit when it can't be found.
+        real_tty()
     } else {
         None
     };
@@ -1410,17 +1415,24 @@ fn handoff(
 /// process has no controlling terminal.
 #[cfg(unix)]
 fn tty_stdin() -> Option<std::fs::File> {
-    let open_rw = |path: &std::path::Path| {
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .ok()
-    };
-    resolved_tty_path()
-        .as_deref()
-        .and_then(open_rw)
-        .or_else(|| open_rw(std::path::Path::new("/dev/tty")))
+    real_tty().or_else(|| open_tty_rw(std::path::Path::new("/dev/tty")))
+}
+
+/// The controlling terminal by its real device path (see [`tty_stdin`]),
+/// or `None` when it can't be resolved — callers that already hold some
+/// terminal on stdin keep it in that case.
+#[cfg(unix)]
+fn real_tty() -> Option<std::fs::File> {
+    resolved_tty_path().as_deref().and_then(open_tty_rw)
+}
+
+#[cfg(unix)]
+fn open_tty_rw(path: &std::path::Path) -> Option<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .ok()
 }
 
 #[cfg(windows)]
@@ -1430,6 +1442,12 @@ fn tty_stdin() -> Option<std::fs::File> {
         .write(true)
         .open("CONIN$")
         .ok()
+}
+
+/// Windows consoles have no alias-device problem; inherit stdin as is.
+#[cfg(windows)]
+fn real_tty() -> Option<std::fs::File> {
+    None
 }
 
 /// The real device path of the terminal on stderr (or stdout): fstat the
