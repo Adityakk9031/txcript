@@ -121,6 +121,9 @@ txcript continue <id>[#range]            # continue <id>, then launch its harnes
     [--no-resume]                         #   write the session but don't launch
 txcript view <id>[#range]                # print a session as compact text
     [--from <harness>]                    #   scope the id lookup to one harness
+txcript export <id>[#range]              # write a session as a Simple document
+    [--from <harness>]                    #   scope the id lookup to one harness
+    [--out <file>]                        #   write to <file> instead of stdout
 ```
 
 `continue` はセッションをターゲットハーネスがセッションを保存している場所に書き出し、続けてそのハーネスを起動してターミナルを引き渡します:
@@ -137,6 +140,15 @@ txcript view <id>[#range]                # print a session as compact text
 - `abc#-10`: 先頭からメッセージ 10 まで
 
 `continue` も同じサフィックスを受け付け、その範囲のメッセージだけを新しいセッションとして続行します。ツール呼び出しをその結果から切り離してしまう範囲は拒否され、エラーには最も近い有効な範囲が提案されます。
+
+`export` はセッションを [Simple](../formats/simple.md) ドキュメントとして、stdout または `--out <file>` に書き出します。このドキュメントは正準モデルの完全なレンダリング — `continue` がハーネス間で運ぶものすべて — であり、どのハーネスの保存場所からも切り離されているため、1 つのファイルとしてマシン間を移動できます:
+
+```sh
+txcript export 0dc114bf --out session.json       # on this machine
+txcript continue ./session.json --with claude_code   # on the other one
+```
+
+記録された作業ディレクトリは、インポート先のマシンに存在すればそれを保持し、存在しなければ `continue` の実行ディレクトリに置き換えられます。`export` は `view` と同じ `#range` サフィックスと `--from` スコープを受け付けます。
 
 ### 検索
 

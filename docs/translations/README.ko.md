@@ -121,6 +121,9 @@ txcript continue <id>[#range]            # continue <id>, then launch its harnes
     [--no-resume]                         #   write the session but don't launch
 txcript view <id>[#range]                # print a session as compact text
     [--from <harness>]                    #   scope the id lookup to one harness
+txcript export <id>[#range]              # write a session as a Simple document
+    [--from <harness>]                    #   scope the id lookup to one harness
+    [--out <file>]                        #   write to <file> instead of stdout
 ```
 
 `continue`는 대상 하네스가 세션을 보관하는 위치에 세션을 기록한 다음, 그 하네스를 실행하며 터미널을 넘깁니다:
@@ -137,6 +140,15 @@ txcript view <id>[#range]                # print a session as compact text
 - `abc#-10`: 처음부터 메시지 10까지
 
 `continue`도 같은 접미사를 받아 해당 메시지들만 새 세션으로 이어갑니다. 도구 호출을 그 결과와 갈라놓는 범위는 거부되며, 오류 메시지가 가장 가까운 유효한 범위를 제안합니다.
+
+`export`는 세션을 [Simple](../formats/simple.md) 문서로, stdout 또는 `--out <file>`에 기록합니다. 이 문서는 정준 모델의 완전한 렌더링 — `continue`가 하네스 사이에서 옮기는 모든 것 — 이며, 어떤 하네스가 세션을 보관하는 위치와도 분리되어 있어 파일 하나로 이 머신에서 저 머신으로 옮길 수 있습니다:
+
+```sh
+txcript export 0dc114bf --out session.json       # on this machine
+txcript continue ./session.json --with claude_code   # on the other one
+```
+
+기록된 작업 디렉터리는 가져오는 머신에 존재하면 그대로 유지되고, 그렇지 않으면 `continue`가 실행되는 디렉터리로 대체됩니다. `export`는 `view`와 같은 `#range` 접미사와 `--from` 범위를 받습니다.
 
 ### 검색
 

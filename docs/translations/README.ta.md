@@ -121,6 +121,9 @@ txcript continue <id>[#range]            # continue <id>, then launch its harnes
     [--no-resume]                         #   write the session but don't launch
 txcript view <id>[#range]                # print a session as compact text
     [--from <harness>]                    #   scope the id lookup to one harness
+txcript export <id>[#range]              # write a session as a Simple document
+    [--from <harness>]                    #   scope the id lookup to one harness
+    [--out <file>]                        #   write to <file> instead of stdout
 ```
 
 `continue` டார்கெட் ஹார்னெஸ் தன் செஷன்களை வைக்கும் இடத்திலேயே செஷனை எழுதி, பிறகு அதன் மீது அந்த ஹார்னெஸை launch செய்து டெர்மினலை ஒப்படைக்கிறது:
@@ -137,6 +140,15 @@ txcript view <id>[#range]                # print a session as compact text
 - `abc#-10`: தொடக்கம் முதல் மெசேஜ் 10 வரை
 
 `continue`-க்கும் இதே suffix பொருந்தும்; அந்த மெசேஜ்கள் மட்டும் புதிய செஷனாகத் தொடரும். ஒரு டூல் காலை அதன் ரிசல்ட்டிலிருந்து பிரிக்கும் range நிராகரிக்கப்படும்; error-இல் அருகிலுள்ள செல்லுபடியான range பரிந்துரைக்கப்படும்.
+
+`export` செஷனை [Simple](../formats/simple.md) document ஆக, stdout-இல் அல்லது `--out <file>`-இல் எழுதுகிறது. இந்த document, canonical மாடலின் முழு rendering — `continue` ஒரு ஹார்னெஸிலிருந்து இன்னொரு ஹார்னெஸுக்கு கொண்டு போகும் எல்லாமே — ஆகும்; இது எந்த ஹார்னெஸும் தன் செஷன்களை வைக்கும் இடத்திலிருந்தும் தனியாக இருக்கும், அதனால் இது ஒரு மெஷினிலிருந்து இன்னொரு மெஷினுக்கு ஒரு file ஆக நகரும்:
+
+```sh
+txcript export 0dc114bf --out session.json       # on this machine
+txcript continue ./session.json --with claude_code   # on the other one
+```
+
+இம்போர்ட் செய்யும் மெஷினில் பதிவு செய்யப்பட்ட working directory இருந்தால் அது அப்படியே வைக்கப்படும்; இல்லையென்றால் `continue` ரன் ஆகும் directory-ஆல் மாற்றப்படும். `export`-க்கும் `view` போலவே அதே `#range` suffix-உம் `--from` scope-உம் பொருந்தும்.
 
 ### தேடல்
 

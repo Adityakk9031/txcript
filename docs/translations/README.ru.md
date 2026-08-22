@@ -121,6 +121,9 @@ txcript continue <id>[#range]            # continue <id>, then launch its harnes
     [--no-resume]                         #   write the session but don't launch
 txcript view <id>[#range]                # print a session as compact text
     [--from <harness>]                    #   scope the id lookup to one harness
+txcript export <id>[#range]              # write a session as a Simple document
+    [--from <harness>]                    #   scope the id lookup to one harness
+    [--out <file>]                        #   write to <file> instead of stdout
 ```
 
 `continue` записывает сессию туда, где целевой харнесс хранит свои сессии, а затем запускает этот харнесс на ней, передавая ему терминал:
@@ -137,6 +140,15 @@ txcript view <id>[#range]                # print a session as compact text
 - `abc#-10`: с начала по сообщение 10
 
 `continue` принимает тот же суффикс и продолжает только эти сообщения как новую сессию. Диапазон, отрезающий вызов инструмента от его результата, отклоняется, а в ошибке предлагается ближайший допустимый диапазон.
+
+`export` записывает сессию как документ [Simple](../formats/simple.md) в stdout или в `--out <file>`. Документ — это полное представление канонической модели — всё, что `continue` переносит между харнессами — отделённое от хранилища любого харнесса, поэтому он перемещается с одной машины на другую как файл:
+
+```sh
+txcript export 0dc114bf --out session.json       # on this machine
+txcript continue ./session.json --with claude_code   # on the other one
+```
+
+Записанный рабочий каталог сохраняется, если он существует на импортирующей машине, а иначе заменяется каталогом, в котором запускается `continue`. `export` принимает тот же суффикс `#range` и ту же область `--from`, что и `view`.
 
 ### Поиск
 

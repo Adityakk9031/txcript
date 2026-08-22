@@ -49,10 +49,14 @@ harness's own store, and launches that harness on it. From that moment the
 conversation lives in the target harness; the source document is never
 modified.
 
-Simple is an interchange *input*: sessions are continued from Simple
-documents, not written into them, so `--with simple` is refused. (The codec
-itself is symmetric — the library and WASM APIs can render Simple text —
-but txcript manages no location to write such a document to.)
+A session txcript already knows is handed out the same way: `txcript export
+<id>` writes it as a Simple document, to stdout or `--out <file>`. Copy the
+file to another machine and `continue` it there.
+
+Simple has no store: `--with simple` is refused because txcript manages no
+location to continue a session into. `export` is the way out — it renders
+the document through the same symmetric codec the library and WASM APIs
+expose, and leaves where it goes to you.
 
 ## The format, level by level
 

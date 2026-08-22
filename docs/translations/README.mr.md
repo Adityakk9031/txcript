@@ -121,6 +121,9 @@ txcript continue <id>[#range]            # continue <id>, then launch its harnes
     [--no-resume]                         #   write the session but don't launch
 txcript view <id>[#range]                # print a session as compact text
     [--from <harness>]                    #   scope the id lookup to one harness
+txcript export <id>[#range]              # write a session as a Simple document
+    [--from <harness>]                    #   scope the id lookup to one harness
+    [--out <file>]                        #   write to <file> instead of stdout
 ```
 
 `continue` टार्गेट हार्नेस जिथे सेशन्स ठेवतो तिथे सेशन लिहिते, आणि मग त्या सेशनवर तो हार्नेस लाँच करून टर्मिनल त्याच्या हवाली करते:
@@ -137,6 +140,15 @@ txcript view <id>[#range]                # print a session as compact text
 - `abc#-10`: सुरुवातीपासून मेसेज 10 पर्यंत
 
 `continue` ला हाच suffix चालतो, आणि तेवढेच मेसेज नवीन सेशन म्हणून पुढे चालू होतात. टूल कॉलला त्याच्या रिझल्टपासून तोडणारी रेंज नाकारली जाते, आणि एररमध्ये सर्वात जवळची वैध रेंज सुचवली जाते.
+
+`export` सेशनला [Simple](../formats/simple.md) डॉक्युमेंट म्हणून, stdout वर किंवा `--out <file>` मध्ये लिहिते. हा डॉक्युमेंट canonical मॉडेलचं पूर्ण रेंडरिंग आहे — `continue` हार्नेसेसमध्ये जे काही घेऊन जातो ते सगळं — आणि कोणताही हार्नेस त्याची सेशन्स जिथे ठेवतो तिथून तो वेगळा असतो, त्यामुळे तो एका मशीनवरून दुसऱ्या मशीनवर एक फाइल म्हणून नेता येतो:
+
+```sh
+txcript export 0dc114bf --out session.json       # on this machine
+txcript continue ./session.json --with claude_code   # on the other one
+```
+
+इम्पोर्ट करणाऱ्या मशीनवर रेकॉर्ड केलेली working directory अस्तित्वात असेल तर ती तशीच ठेवली जाते, नाहीतर `continue` ज्या डिरेक्टरीत चालते तिने बदलली जाते. `export` ला `view` सारखाच `#range` suffix आणि `--from` scope चालतो.
 
 ### शोध
 

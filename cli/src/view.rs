@@ -8,11 +8,17 @@
 
 use std::process::ExitCode;
 
-use txcript::{HarnessId, Span, text};
+use txcript::{Common, HarnessId, Span, Transcript, text};
 
 use crate::fragment;
 
-pub fn cmd_view(source: &str, from: Option<HarnessId>) -> Result<ExitCode, String> {
+/// Resolve a `view`/`export` source — a session id or exact title, with
+/// an optional `#range` — to the session's canonical transcript and the
+/// parsed range request, if any.
+pub fn load_source(
+    source: &str,
+    from: Option<HarnessId>,
+) -> Result<(Transcript<Common>, Option<fragment::SpanReq>), String> {
     let sessions = super::discover_with_spinner(from)?;
     // A whole-input match (a title that itself contains `#12`) beats the
     // fragment interpretation.
@@ -35,6 +41,11 @@ pub fn cmd_view(source: &str, from: Option<HarnessId>) -> Result<ExitCode, Strin
     let common = session
         .read()
         .map_err(|e| format!("reading session `{src}`: {e}"))?;
+    Ok((common, request))
+}
+
+pub fn cmd_view(source: &str, from: Option<HarnessId>) -> Result<ExitCode, String> {
+    let (common, request) = load_source(source, from)?;
 
     let total = common.body.len();
     let span = match &request {
