@@ -136,9 +136,8 @@ txcript continue <id>[#range]            # continue <id>, then launch its harnes
     [--no-resume]                         #   write the session but don't launch
 txcript continue <file|->[#range]        # continue a Simple document instead:
     --with <harness> [...]                #   a file, or stdin (`-`), from any agent
-txcript view <id>[#range]                # view a session; compact text when piped
+txcript view <id>[#range]                # print a session as compact text
     [--from <harness>]                    #   scope the id lookup to one harness
-    [--no-pager]                          #   print the terminal view directly
 txcript export <id>[#range]              # write a session as a Simple document
     [--from <harness>]                    #   scope the id lookup to one harness
     [--out <file>]                        #   write to <file> instead of stdout
@@ -151,9 +150,7 @@ txcript export <id>[#range]              # write a session as a Simple document
 - A [Simple](docs/formats/simple.md) document instead of an id — `txcript continue ./run.json --with claude_code`, or `my-agent | txcript continue - --with claude_code` — brings any agent's transcript in the same way; `--with` is required since a document has no harness of its own.
 - The launch command is per-harness and overridable: set `TRANSCRIPT_<HARNESS>_RESUME_CMD` to a `{id}` template, e.g. `TRANSCRIPT_CODEX_RESUME_CMD="codex resume {id}"`.
 
-`view` is human-facing when stdout is a terminal: it adds readable section headings, color, pretty-printed tool data, and opens the result in `$TXCRIPT_PAGER`, `$PAGER`, or `less`. `--no-pager` keeps the human presentation but writes it directly to the terminal. In a pipe or redirect, `view` follows Unix conventions instead: no pager or color, and the existing compact text projection is written to stdout for `grep`, `sed`, `awk`, files, or an LLM prompt.
-
-Both presentations number each message. `#range` selects messages by those printed ordinals, 1-based and inclusive:
+`view` prints the session as compact text, each message numbered by a `── #N ──` rule. `#range` selects messages by those printed ordinals, 1-based and inclusive:
 
 - `abc#7`: message 7 only
 - `abc#5-12`: messages 5 through 12
