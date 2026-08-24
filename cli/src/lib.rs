@@ -15,8 +15,9 @@
 //! txcript continue <file|->[#range]     # continue a Simple document (file, or stdin
 //!     --with <harness> [...]                #   for `-`) into <harness>; see
 //!                                           #   docs/formats/simple.md
-//! txcript view <id>[#range]             # print a session as compact text
+//! txcript view <id>[#range]             # view a session; compact text when piped
 //!     [--from <harness>]                    #   scope the id lookup to one harness
+//!     [--no-pager]                          #   print the terminal view directly
 //! txcript query '<pattern>'             # one-shot search, print ranked hits
 //! txcript query                         # fzf-style picker; Enter continues
 //!     [--from <harness>]                    #   search only <harness> (default: all)
@@ -51,8 +52,10 @@ use txcript::{Codec, Common, HarnessId, TextCodec, Transcript, local};
 pub mod cache;
 mod export;
 pub mod fragment;
+mod graphics;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+mod pager;
 mod view;
 
 pub const HARNESSES: &str = "harnesses: claude_code, claude_chat, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, hermes, \
@@ -161,12 +164,16 @@ pub enum SessionCommand {
         #[arg(long)]
         no_resume: bool,
     },
-    /// Print a session as compact text
+    /// View a session in the terminal or print compact text to a pipe
     ///
-    /// Prints the same token-conscious projection the MCP server serves,
-    /// numbered `── #N ──` per message, so a printed ordinal can be fed
-    /// straight back as a `#range`. Output is colorless and pager-free —
-    /// it pipes cleanly into pbcopy or an LLM prompt.
+    /// A terminal gets a readable, colored presentation in a pager with
+    /// controls: `u`, `a`, `t`, `r` hide or show user messages, assistant
+    /// messages, tool calls, and reasoning; `]` and `[` jump between
+    /// messages; `/` searches what is shown. Set `TXCRIPT_PAGER` to use an
+    /// external pager command instead. A pipe or redirect gets the same
+    /// compact, colorless text projection the MCP server serves. Both
+    /// number messages so a printed ordinal can be fed straight back as a
+    /// `#range`.
     View {
         /// Session id (any unambiguous prefix) or its exact title, with an
         /// optional `#range` of 1-based inclusive message numbers
@@ -177,6 +184,9 @@ pub enum SessionCommand {
         /// Only look for the session in this harness
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         from: Option<HarnessId>,
+        /// Print the human-facing view directly instead of opening a pager
+        #[arg(long)]
+        no_pager: bool,
     },
     /// Write a session as a Simple interchange document
     ///
@@ -335,7 +345,11 @@ pub fn run_session(command: SessionCommand, options: &Options) -> Result<ExitCod
             out,
             no_resume,
         } => cmd_continue(&id, with, from, out.as_ref(), no_resume),
-        SessionCommand::View { source, from } => view::cmd_view(&source, from),
+        SessionCommand::View {
+            source,
+            from,
+            no_pager,
+        } => view::cmd_view(&source, from, no_pager),
         SessionCommand::Export { source, from, out } => {
             export::cmd_export(&source, from, out.as_deref())
         }
