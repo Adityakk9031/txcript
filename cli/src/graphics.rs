@@ -385,18 +385,23 @@ pub struct Cells {
 
 /// The terminal's answer to the support query and, if the window size did
 /// not carry pixels, to the cell-size report.
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Answer {
     supported: bool,
     cell: Option<(u32, u32)>,
 }
 
+#[cfg(unix)]
 const QUERY: &[u8] = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
+#[cfg(unix)]
 const CELL_SIZE_QUERY: &[u8] = b"\x1b[16t";
+#[cfg(unix)]
 const DEVICE_ATTRIBUTES: &[u8] = b"\x1b[c";
 
 /// The graphics reply (`ESC _ G i=31;OK ESC \`) and cell-size report
 /// (`CSI 6 ; height ; width t`) in what the terminal sent back.
+#[cfg(unix)]
 fn parse_answer(reply: &[u8]) -> Answer {
     let supported = reply
         .windows(b"\x1b_Gi=31;OK".len())
@@ -418,6 +423,7 @@ fn parse_answer(reply: &[u8]) -> Answer {
 
 /// Whether the terminal has answered the device attributes request, which
 /// always comes last.
+#[cfg(unix)]
 fn answer_complete(reply: &[u8]) -> bool {
     reply
         .windows(3)
@@ -654,6 +660,7 @@ mod tests {
         rows: 40,
     };
 
+    #[cfg(unix)]
     #[test]
     fn support_needs_the_graphics_reply_before_device_attributes() {
         let yes = parse_answer(b"\x1b_Gi=31;OK\x1b\\\x1b[?62;22c");
@@ -666,6 +673,7 @@ mod tests {
         assert!(!answer_complete(b"\x1b_Gi=31;OK\x1b\\"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn cell_size_report_is_parsed_when_present() {
         let answer = parse_answer(b"\x1b_Gi=31;OK\x1b\\\x1b[6;24;11t\x1b[?62c");
