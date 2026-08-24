@@ -58,7 +58,7 @@ pub mod mcp;
 mod pager;
 mod view;
 
-pub const HARNESSES: &str = "harnesses: claude_code, claude_chat, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, hermes, \
+pub const HARNESSES: &str = "harnesses: claude_code, claude_chat, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, fx, hermes, \
      amp, antigravity, simple, cowork";
 
 /// The `txcript` binary's command line.
@@ -921,6 +921,7 @@ mod style {
             HarnessId::Cursor => "\x1b[34m",           // blue
             HarnessId::CursorDesktop => "\x1b[96m",    // bright cyan
             HarnessId::Grok => "\x1b[37m",             // white
+            HarnessId::Fx => "\x1b[38;5;39m",          // azure
             HarnessId::Hermes => "\x1b[93m",           // bright yellow
             HarnessId::Amp => "\x1b[95m",              // bright magenta
             HarnessId::Antigravity => "\x1b[94m",      // bright blue

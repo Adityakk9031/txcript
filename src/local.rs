@@ -22,7 +22,9 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 
 use crate::common::{ArtifactSource, Block, Meta};
-use crate::harness::{amp, antigravity, campfire, claude_code, codex, cowork, cursor, grok, pi};
+use crate::harness::{
+    amp, antigravity, campfire, claude_code, codex, cowork, cursor, fx, grok, pi,
+};
 
 #[cfg(feature = "claude_chat")]
 use crate::harness::claude_chat;
@@ -113,6 +115,8 @@ pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session>
     );
     on_store(HarnessId::Grok, out.len());
     scan(HarnessId::Grok, grok::GrokStore::default_root(), &mut out);
+    on_store(HarnessId::Fx, out.len());
+    scan(HarnessId::Fx, fx::FxStore::default_root(), &mut out);
     on_store(HarnessId::Amp, out.len());
     scan(HarnessId::Amp, amp::AmpStore::default_root(), &mut out);
     on_store(HarnessId::Antigravity, out.len());
@@ -281,6 +285,7 @@ impl Session {
             }
             (HarnessId::Cursor, Locator::Path(p)) => go(cursor::CursorStore::default_root(), p),
             (HarnessId::Grok, Locator::Path(p)) => go(grok::GrokStore::default_root(), p),
+            (HarnessId::Fx, Locator::Path(p)) => go(fx::FxStore::default_root(), p),
             (HarnessId::Amp, Locator::Path(p)) => go(amp::AmpStore::default_root(), p),
             (HarnessId::Antigravity, Locator::Path(p)) => {
                 go(antigravity::AntigravityStore::default_root(), p)
@@ -330,6 +335,7 @@ impl Session {
             }
             (HarnessId::Cursor, Locator::Path(p)) => go(cursor::CursorStore::default_root(), p),
             (HarnessId::Grok, Locator::Path(p)) => go(grok::GrokStore::default_root(), p),
+            (HarnessId::Fx, Locator::Path(p)) => go(fx::FxStore::default_root(), p),
             (HarnessId::Amp, Locator::Path(p)) => go(amp::AmpStore::default_root(), p),
             (HarnessId::Antigravity, Locator::Path(p)) => {
                 go(antigravity::AntigravityStore::default_root(), p)
@@ -391,6 +397,7 @@ pub fn fingerprints(sessions: &[Session]) -> Vec<String> {
             HarnessId::Campfire => group.files(campfire::CampfireStore::default_root()),
             HarnessId::Cursor => group.files(cursor::CursorStore::default_root()),
             HarnessId::Grok => group.files(grok::GrokStore::default_root()),
+            HarnessId::Fx => group.files(fx::FxStore::default_root()),
             HarnessId::Amp => group.files(amp::AmpStore::default_root()),
             HarnessId::Antigravity => group.files(antigravity::AntigravityStore::default_root()),
             HarnessId::Cowork => group.files(cowork::CoworkStore::default_root()),
@@ -609,6 +616,13 @@ pub fn write(
         HarnessId::Grok => go(
             grok::GrokStore::default_root(),
             grok::GrokStore::new,
+            root,
+            common,
+            |s| s.sessions_dir,
+        ),
+        HarnessId::Fx => go(
+            fx::FxStore::default_root(),
+            fx::FxStore::new,
             root,
             common,
             |s| s.sessions_dir,
@@ -843,6 +857,7 @@ pub fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
             // the session is in the Agents sidebar.
             HarnessId::CursorDesktop => ("cursor".into(), Vec::new()),
             HarnessId::Grok => ("grok".into(), vec!["--resume".into(), id]),
+            HarnessId::Fx => ("fx".into(), vec!["--resume".into(), id]),
             HarnessId::Hermes => ("hermes".into(), vec!["--resume".into(), id]),
             HarnessId::Amp => ("amp".into(), vec!["threads".into(), "continue".into(), id]),
             HarnessId::Antigravity => ("agy".into(), vec![format!("--conversation={id}")]),

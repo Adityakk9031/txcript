@@ -18,8 +18,8 @@ use proptest::test_runner::TestCaseError;
 use serde_json::json;
 use txcript::common::{Block, Message, Meta, Role, Tool, ToolOutput};
 use txcript::harness::{
-    amp, antigravity, campfire, claude_code, codex, cowork, cursor, cursor_desktop, grok, hermes,
-    opencode, pi, simple,
+    amp, antigravity, campfire, claude_code, codex, cowork, cursor, cursor_desktop, fx, grok,
+    hermes, opencode, pi, simple,
 };
 use txcript::{Codec, Common, Transcript};
 
@@ -265,6 +265,7 @@ proptest! {
         assert_fixpoint::<cursor::Cursor>("cursor", &common)?;
         assert_fixpoint::<cursor_desktop::CursorDesktop>("cursor_desktop", &common)?;
         assert_fixpoint::<grok::Grok>("grok", &common)?;
+        assert_fixpoint::<fx::Fx>("fx", &common)?;
         assert_fixpoint::<hermes::Hermes>("hermes", &common)?;
         assert_fixpoint::<amp::Amp>("amp", &common)?;
         assert_fixpoint::<antigravity::Antigravity>("antigravity", &common)?;

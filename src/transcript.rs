@@ -241,6 +241,7 @@ pub enum HarnessId {
     Cursor,
     CursorDesktop,
     Grok,
+    Fx,
     Hermes,
     Amp,
     Antigravity,
@@ -249,7 +250,7 @@ pub enum HarnessId {
 }
 
 impl HarnessId {
-    pub const ALL: [HarnessId; 14] = [
+    pub const ALL: [HarnessId; 15] = [
         HarnessId::ClaudeCode,
         HarnessId::ClaudeChat,
         HarnessId::Codex,
@@ -259,6 +260,7 @@ impl HarnessId {
         HarnessId::Cursor,
         HarnessId::CursorDesktop,
         HarnessId::Grok,
+        HarnessId::Fx,
         HarnessId::Hermes,
         HarnessId::Amp,
         HarnessId::Antigravity,
@@ -279,6 +281,7 @@ impl HarnessId {
             HarnessId::Cursor => "cursor",
             HarnessId::CursorDesktop => "cursor_desktop",
             HarnessId::Grok => "grok",
+            HarnessId::Fx => "fx",
             HarnessId::Hermes => "hermes",
             HarnessId::Amp => "amp",
             HarnessId::Antigravity => "antigravity",
@@ -315,6 +318,7 @@ impl FromStr for HarnessId {
             "grok" | "grok_cli" | "grok-cli" | "grokcli" | "grok_build" | "grok-build" => {
                 Ok(HarnessId::Grok)
             }
+            "fx" | "fx_cli" | "fx-cli" | "fxcli" | "vercel_fx" | "vercel-fx" => Ok(HarnessId::Fx),
             "hermes" | "hermes_agent" | "hermes-agent" | "hermesagent" => Ok(HarnessId::Hermes),
             "amp" | "ampcode" | "amp_code" | "amp-code" => Ok(HarnessId::Amp),
             "antigravity" | "agy" | "antigravity_cli" | "antigravity-cli" | "anti-gravity" => {
