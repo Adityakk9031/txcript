@@ -55,6 +55,7 @@ pub mod fragment;
 mod graphics;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+mod pager;
 mod view;
 
 pub const HARNESSES: &str = "harnesses: claude_code, claude_chat, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, hermes, \
@@ -165,10 +166,14 @@ pub enum SessionCommand {
     },
     /// View a session in the terminal or print compact text to a pipe
     ///
-    /// A terminal gets a readable, colored presentation through a pager. A
-    /// pipe or redirect gets the same compact, colorless text projection the
-    /// MCP server serves. Both number messages so a printed ordinal can be
-    /// fed straight back as a `#range`.
+    /// A terminal gets a readable, colored presentation in a pager with
+    /// controls: `u`, `a`, `t`, `r` hide or show user messages, assistant
+    /// messages, tool calls, and reasoning; `]` and `[` jump between
+    /// messages; `/` searches what is shown. Set `TXCRIPT_PAGER` to use an
+    /// external pager command instead. A pipe or redirect gets the same
+    /// compact, colorless text projection the MCP server serves. Both
+    /// number messages so a printed ordinal can be fed straight back as a
+    /// `#range`.
     View {
         /// Session id (any unambiguous prefix) or its exact title, with an
         /// optional `#range` of 1-based inclusive message numbers
