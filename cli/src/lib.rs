@@ -52,6 +52,7 @@ use txcript::{Codec, Common, HarnessId, TextCodec, Transcript, local};
 pub mod cache;
 mod export;
 pub mod fragment;
+mod graphics;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 mod view;

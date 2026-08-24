@@ -26,9 +26,12 @@ default = ["mcp"]
 mcp = ["dep:rmcp", "dep:schemars", "dep:tokio"]
 
 [dependencies]
+base64 = "0.22.1"
 chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive", "env", "wrap_help"] }
 clap_complete = "4.6.7"
+flate2 = "1.1.9"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 rmcp = { version = "2.2.0", default-features = false, features = ["macros", "server", "transport-io"], optional = true }
 # Bundled SQLite is already in the graph through txcript's stores.
 rusqlite = { version = "0.40.1", features = ["bundled"] }
@@ -40,6 +43,11 @@ tokio = { version = "1.48.0", features = ["io-std", "macros", "rt"], optional = 
 txcript = { version = "0.10.0", path = "..", features = ["opencode", "search"] }
 # v7 for codex rollouts, v4 for every other harness — see `fresh_identity`.
 uuid = { version = "1.23.4", features = ["v4", "v7"] }
+
+# Terminal geometry and the raw-mode graphics query behind inline images in
+# `view`; already in the graph through terminal_size.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["termios"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
