@@ -35,6 +35,9 @@ pub fn load_source(
     source: &str,
     from: Option<HarnessId>,
 ) -> Result<(Transcript<Common>, Option<fragment::SpanReq>), String> {
+    if let Some(loaded) = super::load_direct_claude_chat(source, from) {
+        return loaded;
+    }
     let sessions = super::discover_with_spinner(from)?;
     // A whole-input match (a title that itself contains `#12`) beats the
     // fragment interpretation.
