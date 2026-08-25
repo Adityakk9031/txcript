@@ -97,7 +97,7 @@ harness = false
 required-features = ["search"]
 
 [features]
-default = ["opencode", "hermes", "claude_chat", "search"]
+default = ["opencode", "hermes", "claude_chat", "chatgpt", "search"]
 # The OpenCode harness store reads OpenCode's SQLite database. The OpenCode
 # codec itself is always available; only the on-disk store needs rusqlite.
 opencode = ["dep:rusqlite"]
@@ -118,6 +118,15 @@ claude_chat = [
     "dep:pbkdf2",
     "dep:sha1",
     "dep:sha2",
+]
+# ChatGPT is a live, read-only remote store. Its codec remains available
+# featureless; the feature adds read-only Codex login reuse and
+# browser-compatible HTTPS access to ChatGPT's private read endpoints.
+chatgpt = [
+    "dep:futures-util",
+    "dep:tokio",
+    "dep:wreq",
+    "dep:wreq-util",
 ]
 # Fuzzy/substring search over transcripts (`txcript::search`). nucleo-matcher
 # is pure Rust (helix's matcher) and compiles to wasm32; combine with `wasm`

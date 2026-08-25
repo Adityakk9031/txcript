@@ -46,7 +46,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use txcript::harness::{amp, claude_chat, simple};
+use txcript::harness::{amp, chatgpt, claude_chat, simple};
 use txcript::{Codec, Common, HarnessId, Store, TextCodec, Transcript, local};
 
 pub mod cache;
@@ -58,7 +58,7 @@ pub mod mcp;
 mod pager;
 mod view;
 
-pub const HARNESSES: &str = "harnesses: claude_code, claude_chat, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, fx, hermes, \
+pub const HARNESSES: &str = "harnesses: claude_code, claude_chat, chatgpt, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, fx, hermes, \
      amp, antigravity, simple, cowork";
 
 /// The `txcript` binary's command line.
@@ -468,6 +468,25 @@ pub(crate) fn load_direct_claude_chat(
     })())
 }
 
+/// An exact `ChatGPT` conversation UUID can be loaded without enumerating the
+/// account. Titles and id prefixes still require explicit live discovery.
+pub(crate) fn load_direct_chatgpt(source: &str, from: Option<HarnessId>) -> Option<LoadedSession> {
+    if from != Some(HarnessId::ChatGpt) {
+        return None;
+    }
+    let (id, request) = fragment::parse_ref(source);
+    let conversation_id = uuid::Uuid::parse_str(id).ok()?.to_string();
+    Some((|| {
+        let store = chatgpt::ChatGptStore::from_codex().map_err(|error| error.to_string())?;
+        let reference = store
+            .conversation_ref(conversation_id)
+            .map_err(|error| error.to_string())?;
+        let native = store.load(&reference).map_err(|error| error.to_string())?;
+        let common = chatgpt::ChatGpt::to_common(&native).map_err(|error| error.to_string())?;
+        Ok((common, request))
+    })())
+}
+
 /// Positions of the first occurrence of each distinct id starting with
 /// `prefix`. Claude Code writes a session resumed from another cwd under the
 /// same id in a second store; those copies collapse to the first (newest —
@@ -818,6 +837,12 @@ mod identity_tests {
     fn claude_chat_as_a_target_uses_the_normal_write_boundary() {
         assert!(ensure_resumable_source(HarnessId::Codex, HarnessId::ClaudeChat).is_ok());
     }
+
+    #[test]
+    fn chatgpt_is_refused_even_for_an_in_place_continue() {
+        let error = ensure_resumable_source(HarnessId::ChatGpt, HarnessId::ChatGpt).unwrap_err();
+        assert!(error.contains("pull-only"));
+    }
 }
 
 fn cmd_list(
@@ -846,6 +871,9 @@ fn cmd_list(
         match from {
             Some(HarnessId::ClaudeChat) => {
                 println!("no Claude Chat sessions found{scope}{when}");
+            }
+            Some(HarnessId::ChatGpt) => {
+                println!("no ChatGPT sessions found{scope}{when}");
             }
             Some(h) => println!("no local {h} sessions found{scope}{when}"),
             None => println!("no local sessions found{scope}{when}"),
@@ -940,6 +968,7 @@ mod style {
         match h {
             HarnessId::ClaudeCode => "\x1b[33m",       // yellow
             HarnessId::ClaudeChat => "\x1b[38;5;214m", // amber
+            HarnessId::ChatGpt => "\x1b[38;5;71m",     // OpenAI green
             HarnessId::Codex => "\x1b[36m",            // cyan
             HarnessId::OpenCode => "\x1b[32m",         // green
             HarnessId::Pi => "\x1b[35m",               // magenta
@@ -989,8 +1018,22 @@ fn cmd_continue(
         let target = with.unwrap_or(HarnessId::ClaudeChat);
         ensure_resumable_source(HarnessId::ClaudeChat, target)?;
         let (common, request) = loaded?;
-        return continue_loaded_claude_chat(
+        return continue_loaded_remote(
             common,
+            HarnessId::ClaudeChat,
+            target,
+            request.as_ref(),
+            out.map(PathBuf::as_path),
+            out.is_none() && !no_resume,
+        );
+    }
+    if let Some(loaded) = load_direct_chatgpt(id, from) {
+        let target = with.unwrap_or(HarnessId::ChatGpt);
+        ensure_resumable_source(HarnessId::ChatGpt, target)?;
+        let (common, request) = loaded?;
+        return continue_loaded_remote(
+            common,
+            HarnessId::ChatGpt,
             target,
             request.as_ref(),
             out.map(PathBuf::as_path),
@@ -1327,8 +1370,9 @@ fn continue_session(
     launch(target, &resume_id, found.meta.cwd.as_deref(), resume)
 }
 
-fn continue_loaded_claude_chat(
+fn continue_loaded_remote(
     common: Transcript<Common>,
+    source: HarnessId,
     target: HarnessId,
     span_req: Option<&fragment::SpanReq>,
     out: Option<&std::path::Path>,
@@ -1341,7 +1385,7 @@ fn continue_loaded_claude_chat(
     };
     fresh_identity(&mut copy, target, out);
     stamp_live_cwd(&mut copy, out);
-    let resume_id = write_and_report(HarnessId::ClaudeChat, target, &copy, out)?;
+    let resume_id = write_and_report(source, target, &copy, out)?;
     launch(target, &resume_id, cwd.as_deref(), resume)
 }
 
@@ -1349,6 +1393,11 @@ fn ensure_resumable_source(source: HarnessId, target: HarnessId) -> Result<(), S
     if source == HarnessId::ClaudeChat && target == HarnessId::ClaudeChat {
         Err(
             "Claude Chat is pull-only: choose another --with harness; txcript never continues conversations in Claude"
+                .to_string(),
+        )
+    } else if source == HarnessId::ChatGpt && target == HarnessId::ChatGpt {
+        Err(
+            "ChatGPT is pull-only: choose another --with harness; txcript never continues conversations in ChatGPT"
                 .to_string(),
         )
     } else {
@@ -1522,9 +1571,10 @@ fn resume_workdir(cwd: Option<&str>) -> Option<PathBuf> {
 
 fn discover_with_spinner(from: Option<HarnessId>) -> Result<Vec<local::Session>, String> {
     let spinner = spin::Spinner::start("searching local sessions…");
-    let sessions = if let Some(HarnessId::ClaudeChat) = from {
-        spinner.set("reading Claude Chat…".to_string());
-        local::discover_harness(HarnessId::ClaudeChat).map_err(|error| error.to_string())?
+    let sessions = if matches!(from, Some(HarnessId::ClaudeChat | HarnessId::ChatGpt)) {
+        let harness = from.unwrap_or(HarnessId::ClaudeChat);
+        spinner.set(format!("reading {harness}…"));
+        local::discover_harness(harness).map_err(|error| error.to_string())?
     } else {
         local::discover_with(|harness, count| {
             spinner.set(format!("scanning {harness}… ({count} found)"));
