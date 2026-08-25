@@ -46,8 +46,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use txcript::harness::{amp, simple};
-use txcript::{Codec, Common, HarnessId, TextCodec, Transcript, local};
+use txcript::harness::{amp, claude_chat, simple};
+use txcript::{Codec, Common, HarnessId, Store, TextCodec, Transcript, local};
 
 pub mod cache;
 mod export;
@@ -58,7 +58,7 @@ pub mod mcp;
 mod pager;
 mod view;
 
-pub const HARNESSES: &str = "harnesses: claude_code, claude_chat, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, hermes, \
+pub const HARNESSES: &str = "harnesses: claude_code, claude_chat, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, fx, hermes, \
      amp, antigravity, simple, cowork";
 
 /// The `txcript` binary's command line.
@@ -440,6 +440,32 @@ pub fn find_session<'a>(
             Err(ambiguous_message(needle, &candidates))
         }
     }
+}
+
+type LoadedSession = Result<(Transcript<Common>, Option<fragment::SpanReq>), String>;
+
+/// An exact Claude Chat UUID can be loaded from Claude Desktop's active
+/// organization without enumerating conversations first. Titles and id
+/// prefixes still require discovery and therefore fall through to the normal
+/// resolver.
+pub(crate) fn load_direct_claude_chat(
+    source: &str,
+    from: Option<HarnessId>,
+) -> Option<LoadedSession> {
+    if from != Some(HarnessId::ClaudeChat) {
+        return None;
+    }
+    let (id, request) = fragment::parse_ref(source);
+    let conversation_uuid = uuid::Uuid::parse_str(id).ok()?.to_string();
+    Some((|| {
+        let store = claude_chat::ClaudeChatStore::from_desktop().map_err(|e| e.to_string())?;
+        let reference = store
+            .conversation_ref(conversation_uuid, None)
+            .map_err(|e| e.to_string())?;
+        let native = store.load(&reference).map_err(|e| e.to_string())?;
+        let common = claude_chat::ClaudeChat::to_common(&native).map_err(|e| e.to_string())?;
+        Ok((common, request))
+    })())
 }
 
 /// Positions of the first occurrence of each distinct id starting with
@@ -921,6 +947,7 @@ mod style {
             HarnessId::Cursor => "\x1b[34m",           // blue
             HarnessId::CursorDesktop => "\x1b[96m",    // bright cyan
             HarnessId::Grok => "\x1b[37m",             // white
+            HarnessId::Fx => "\x1b[38;5;39m",          // azure
             HarnessId::Hermes => "\x1b[93m",           // bright yellow
             HarnessId::Amp => "\x1b[95m",              // bright magenta
             HarnessId::Antigravity => "\x1b[94m",      // bright blue
@@ -955,6 +982,19 @@ fn cmd_continue(
             with,
             out.map(PathBuf::as_path),
             resume,
+        );
+    }
+
+    if let Some(loaded) = load_direct_claude_chat(id, from) {
+        let target = with.unwrap_or(HarnessId::ClaudeChat);
+        ensure_resumable_source(HarnessId::ClaudeChat, target)?;
+        let (common, request) = loaded?;
+        return continue_loaded_claude_chat(
+            common,
+            target,
+            request.as_ref(),
+            out.map(PathBuf::as_path),
+            out.is_none() && !no_resume,
         );
     }
 
@@ -1285,6 +1325,24 @@ fn continue_session(
     };
 
     launch(target, &resume_id, found.meta.cwd.as_deref(), resume)
+}
+
+fn continue_loaded_claude_chat(
+    common: Transcript<Common>,
+    target: HarnessId,
+    span_req: Option<&fragment::SpanReq>,
+    out: Option<&std::path::Path>,
+    resume: bool,
+) -> Result<ExitCode, String> {
+    let cwd = common.meta.cwd.clone();
+    let mut copy = match span_req {
+        Some(request) => fragment::sliced(&common, request)?,
+        None => common,
+    };
+    fresh_identity(&mut copy, target, out);
+    stamp_live_cwd(&mut copy, out);
+    let resume_id = write_and_report(HarnessId::ClaudeChat, target, &copy, out)?;
+    launch(target, &resume_id, cwd.as_deref(), resume)
 }
 
 fn ensure_resumable_source(source: HarnessId, target: HarnessId) -> Result<(), String> {

@@ -255,6 +255,12 @@ impl SessionServer {
         Parameters(request): Parameters<ReadSessionRequest>,
     ) -> Result<String, ErrorData> {
         let from = parse_from(request.from.as_deref())?;
+        if let Some(loaded) = super::load_direct_claude_chat(&request.id, from) {
+            let (common, span_req) =
+                loaded.map_err(|error| ErrorData::internal_error(error, None))?;
+            let src = crate::fragment::parse_ref(&request.id).0;
+            return render_read_session(src, &common, span_req.as_ref());
+        }
         let sessions = discover_scoped(from)?;
         // A whole-input match (a title that itself contains `#12`) beats the
         // fragment interpretation, as everywhere else.
@@ -273,30 +279,38 @@ impl SessionServer {
         let common = session.read().map_err(|error| {
             ErrorData::internal_error(format!("reading session `{src}`: {error}"), None)
         })?;
-        let total = common.body.len();
-        let span = match &span_req {
-            Some(req) => req
-                .resolve(total)
-                .map_err(|error| ErrorData::invalid_params(error, None))?,
-            None => Span(0..total),
-        };
-        // `resolve` bounds-checked against `total`, so the render lands.
-        let rendered = text::to_text_fragment(&common, &span).ok_or_else(|| {
-            ErrorData::internal_error(
-                format!("range is out of bounds — the session has {total} messages"),
-                None,
-            )
-        })?;
-        // An explicitly requested single message is served whatever its size
-        // — there is no smaller range left to suggest.
-        if rendered.len() > READ_BUDGET && span.0.len() > 1 {
-            return Err(ErrorData::invalid_params(
-                over_budget(src, &common, &span, rendered.len()),
-                None,
-            ));
-        }
-        Ok(rendered)
+        render_read_session(src, &common, span_req.as_ref())
     }
+}
+
+fn render_read_session(
+    src: &str,
+    common: &txcript::Transcript<txcript::Common>,
+    span_req: Option<&crate::fragment::SpanReq>,
+) -> Result<String, ErrorData> {
+    let total = common.body.len();
+    let span = match span_req {
+        Some(req) => req
+            .resolve(total)
+            .map_err(|error| ErrorData::invalid_params(error, None))?,
+        None => Span(0..total),
+    };
+    // `resolve` bounds-checked against `total`, so the render lands.
+    let rendered = text::to_text_fragment(common, &span).ok_or_else(|| {
+        ErrorData::internal_error(
+            format!("range is out of bounds — the session has {total} messages"),
+            None,
+        )
+    })?;
+    // An explicitly requested single message is served whatever its size
+    // — there is no smaller range left to suggest.
+    if rendered.len() > READ_BUDGET && span.0.len() > 1 {
+        return Err(ErrorData::invalid_params(
+            over_budget(src, common, &span, rendered.len()),
+            None,
+        ));
+    }
+    Ok(rendered)
 }
 
 /// The refusal for an over-budget read: how big it was, and concrete

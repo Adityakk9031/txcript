@@ -1149,6 +1149,35 @@ mod remote {
             Self::build(credentials, organization_uuid, CLAUDE_BASE_URL.to_string())
         }
 
+        /// Build a complete reference for one conversation without enumerating
+        /// the account's conversation list. An explicit organization wins;
+        /// otherwise the store's configured or Claude Desktop-active
+        /// organization is used.
+        ///
+        /// # Errors
+        /// Returns an error when either UUID is invalid or no organization is
+        /// available from the caller, configuration, or Claude Desktop.
+        pub fn conversation_ref(
+            &self,
+            conversation_uuid: String,
+            organization_uuid: Option<String>,
+        ) -> Result<ClaudeChatRef> {
+            validate_uuid("conversation", &conversation_uuid)?;
+            let organization_uuid = organization_uuid
+                .or_else(|| self.organization_uuid.clone())
+                .or_else(|| self.active_organization_uuid.clone())
+                .ok_or_else(|| Error::Remote {
+                    harness: ClaudeChat::NAME,
+                    detail: "Claude Desktop has no current organization; open Claude Desktop and select the account or organization containing this chat".to_string(),
+                })?;
+            validate_uuid("organization", &organization_uuid)?;
+            Ok(ClaudeChatRef {
+                organization_uuid,
+                conversation_uuid,
+                updated_at: None,
+            })
+        }
+
         fn build(
             credentials: Credentials,
             organization_uuid: Option<String>,
@@ -1613,11 +1642,12 @@ mod remote {
         }
 
         fn load(&self, reference: &Self::Ref) -> Result<Transcript<Self::H>> {
-            validate_uuid("organization", &reference.organization_uuid)?;
             validate_uuid("conversation", &reference.conversation_uuid)?;
+            let organization_uuid = &reference.organization_uuid;
+            validate_uuid("organization", organization_uuid)?;
             let path = format!(
                 "/api/organizations/{}/chat_conversations/{}?tree=True&rendering_mode=messages&render_all_tools=true",
-                reference.organization_uuid, reference.conversation_uuid
+                organization_uuid, reference.conversation_uuid
             );
             let value = self.get_json(&path)?;
             if value.get("uuid").and_then(Value::as_str)
@@ -1635,7 +1665,7 @@ mod remote {
                 })?;
             self.hydrate_images(&mut conversation);
             self.hydrate_files(
-                &reference.organization_uuid,
+                organization_uuid,
                 &reference.conversation_uuid,
                 &mut conversation,
             );
@@ -2397,6 +2427,81 @@ mod remote {
             assert!(requests[0].starts_with(&format!(
                 "GET /api/organizations/{organization}/chat_conversations_v2?"
             )));
+        }
+
+        #[test]
+        fn direct_load_uses_the_active_organization_without_discovery() {
+            let organization = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+            let conversation = "11111111-1111-4111-8111-111111111111";
+            let message = "33333333-3333-4333-8333-333333333333";
+            let (base, requests, handle) = mock_server(vec![MockResponse::json(json!({
+                "uuid": conversation,
+                "name": "Direct chat",
+                "created_at": "2026-01-01T00:00:00Z",
+                "current_leaf_message_uuid": message,
+                "chat_messages": [{
+                    "uuid": message,
+                    "sender": "human",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "content": [{"type":"text","text":"Hello"}]
+                }]
+            }))]);
+            let mut store = ClaudeChatStore::for_test("test-session-key", None, base).unwrap();
+            store.active_organization_uuid = Some(organization.to_string());
+
+            let reference = store
+                .conversation_ref(conversation.to_string(), None)
+                .unwrap();
+            assert_eq!(reference.organization_uuid, organization);
+            let native = store.load(&reference).unwrap();
+            handle.join().unwrap();
+
+            assert_eq!(native.meta.id, conversation);
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with(&format!(
+                "GET /api/organizations/{organization}/chat_conversations/{conversation}?"
+            )));
+            assert!(!requests[0].contains("chat_conversations_v2"));
+        }
+
+        #[test]
+        fn conversation_ref_requires_an_available_organization() {
+            let conversation = "11111111-1111-4111-8111-111111111111";
+            let store = ClaudeChatStore::for_test(
+                "test-session-key",
+                None,
+                "http://127.0.0.1:1".to_string(),
+            )
+            .unwrap();
+
+            let error = store
+                .conversation_ref(conversation.to_string(), None)
+                .unwrap_err();
+
+            assert!(error.to_string().contains("no current organization"));
+        }
+
+        #[test]
+        fn conversation_ref_prefers_an_explicit_organization() {
+            let configured = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+            let active = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+            let explicit = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+            let conversation = "11111111-1111-4111-8111-111111111111";
+            let mut store = ClaudeChatStore::for_test(
+                "test-session-key",
+                Some(configured.to_string()),
+                "http://127.0.0.1:1".to_string(),
+            )
+            .unwrap();
+            store.active_organization_uuid = Some(active.to_string());
+
+            let reference = store
+                .conversation_ref(conversation.to_string(), Some(explicit.to_string()))
+                .unwrap();
+
+            assert_eq!(reference.organization_uuid, explicit);
+            assert_eq!(reference.conversation_uuid, conversation);
         }
 
         #[test]

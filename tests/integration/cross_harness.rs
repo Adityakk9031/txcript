@@ -6,8 +6,8 @@
 use chrono::{DateTime, Utc};
 use txcript::common;
 use txcript::harness::{
-    amp, antigravity, campfire, claude_code, codex, cowork, cursor, cursor_desktop, grok, hermes,
-    opencode, pi, simple,
+    amp, antigravity, campfire, claude_code, codex, cowork, cursor, cursor_desktop, fx, grok,
+    hermes, opencode, pi, simple,
 };
 use txcript::{Codec, Common, Transcript, convert};
 
@@ -188,7 +188,10 @@ fn conversation_survives_every_hop() {
         "grok"
     );
 
-    let hermes = convert::<grok::Grok, hermes::Hermes>(&grok).unwrap();
+    let fx = convert::<grok::Grok, fx::Fx>(&grok).unwrap();
+    assert_eq!(signature(&fx::Fx::to_common(&fx).unwrap()), expected, "fx");
+
+    let hermes = convert::<fx::Fx, hermes::Hermes>(&fx).unwrap();
     assert_eq!(
         signature(&hermes::Hermes::to_common(&hermes).unwrap()),
         expected,
