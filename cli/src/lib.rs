@@ -20,7 +20,6 @@
 //!     [--no-pager]                          #   print the terminal view directly
 //! txcript query '<pattern>'             # one-shot literal search, ranked hits
 //! txcript query                         # interactive picker; Enter continues
-//!     [--fuzzy]                             #   fzf-style matching instead of literal
 //!     [--from <harness>]                    #   search only <harness> (default: all)
 //!     [--with <harness>]                    #   continue the pick in <harness>
 //!     [--cwd <dir>]                         #   only sessions recorded in <dir>
@@ -220,10 +219,6 @@ pub enum SessionCommand {
         // Other: without a hint, generated completions fall back to filenames.
         #[arg(value_hint = clap::ValueHint::Other)]
         pattern: Option<String>,
-        /// Match fzf-style instead of literally (space-separated terms,
-        /// 'exact, ^prefix, suffix$, !not)
-        #[arg(long)]
-        fuzzy: bool,
         /// Continue the picked session in this harness
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         with: Option<HarnessId>,
@@ -361,11 +356,10 @@ pub fn run_session(command: SessionCommand, options: &Options) -> Result<ExitCod
         }
         SessionCommand::Query {
             pattern,
-            fuzzy,
             with,
             from,
             cwd,
-        } => query::cmd_query(pattern, fuzzy, with, from, cwd.as_deref(), cache),
+        } => query::cmd_query(pattern, with, from, cwd.as_deref(), cache),
     }
 }
 
@@ -1859,23 +1853,18 @@ mod query {
         build_index(from, cwd, cache).map(|(index, _)| index)
     }
 
-    /// The query behind `txcript query` and the MCP search tool: literal
-    /// unless `fuzzy`, and case-insensitive either way. A literal default
-    /// keeps a pattern from matching lines that merely contain its characters
-    /// scattered across them, which is what fuzzy scoring does.
-    pub(super) fn user_query(pattern: &str, fuzzy: bool) -> Query {
-        let mut q = if fuzzy {
-            Query::fuzzy(pattern)
-        } else {
-            Query::substring(pattern)
-        };
+    /// The query behind `txcript query` and the MCP search tool: the pattern
+    /// is one literal needle, spaces included, matched case-insensitively.
+    /// Fuzzy scoring matches any line whose characters contain the pattern in
+    /// order, which turns up lines that only look like matches.
+    pub(super) fn user_query(pattern: &str) -> Query {
+        let mut q = Query::substring(pattern);
         q.case = Case::Insensitive;
         q
     }
 
     pub(super) fn cmd_query(
         pattern: Option<String>,
-        fuzzy: bool,
         with: Option<HarnessId>,
         from: Option<HarnessId>,
         cwd: Option<&Path>,
@@ -1887,10 +1876,10 @@ mod query {
                 if with.is_some() {
                     eprintln!("warning: --with ignored with a pattern");
                 }
-                one_shot(&index, &pattern, fuzzy);
+                one_shot(&index, &pattern);
                 Ok(std::process::ExitCode::SUCCESS)
             }
-            None => match tui::pick(&index, fuzzy)? {
+            None => match tui::pick(&index)? {
                 // Cancelled; terminal already restored, nothing to continue.
                 None => Ok(std::process::ExitCode::SUCCESS),
                 Some(key) => {
@@ -2052,9 +2041,9 @@ mod query {
     }
 
     /// Print ranked hits for a pattern, colorized when stdout is a terminal.
-    fn one_shot(index: &Index, pattern: &str, fuzzy: bool) {
+    fn one_shot(index: &Index, pattern: &str) {
         use std::io::{IsTerminal, Write};
-        let mut q = user_query(pattern, fuzzy);
+        let mut q = user_query(pattern);
         q.limit = Some(20);
         q.hits_per_doc = Some(3);
         let matches = index.query(&q);
@@ -2221,7 +2210,7 @@ mod query {
 
         /// Interactive picker over the index. Returns the chosen doc, or
         /// `None` on cancel. The terminal is fully restored either way.
-        pub(super) fn pick(index: &Index, fuzzy: bool) -> Result<Option<DocKey>, String> {
+        pub(super) fn pick(index: &Index) -> Result<Option<DocKey>, String> {
             if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
                 // Raw mode and the alternate screen need real terminal stdio.
                 Err("interactive query needs a terminal (pass a pattern instead)".into())
@@ -2231,7 +2220,7 @@ mod query {
                 let mut selected = 0usize;
                 let mut stdin = Input::new(std::io::stdin().lock());
                 let (mut rows, mut cols) = term_size();
-                let mut results = query(index, &input, rows, fuzzy);
+                let mut results = query(index, &input, rows);
                 let mut pending = None;
                 render(&input, &results, selected, index.len(), rows, cols);
 
@@ -2240,25 +2229,19 @@ mod query {
                     match key {
                         // A poll timeout: nothing pressed, keep waiting.
                         Key::None => {}
-                        Key::Char(c) => {
-                            input.push(c);
+                        Key::Char(_) | Key::Backspace | Key::Clear => {
+                            apply_edit(&mut input, key);
+                            // A burst of typing arrives faster than a search
+                            // completes. Apply the whole burst, then search
+                            // once for what was actually typed.
+                            pending = drain_edits(&mut stdin, &mut input)?;
                             selected = 0;
+                            // Echo before searching: the prompt line is what
+                            // the typist is watching, and it must not wait on
+                            // results to appear.
+                            render_input(&input);
                             (rows, cols) = term_size();
-                            results = query(index, &input, rows, fuzzy);
-                            render(&input, &results, selected, index.len(), rows, cols);
-                        }
-                        Key::Backspace => {
-                            input.pop();
-                            selected = 0;
-                            (rows, cols) = term_size();
-                            results = query(index, &input, rows, fuzzy);
-                            render(&input, &results, selected, index.len(), rows, cols);
-                        }
-                        Key::Clear => {
-                            input.clear();
-                            selected = 0;
-                            (rows, cols) = term_size();
-                            results = query(index, &input, rows, fuzzy);
+                            results = query(index, &input, rows);
                             render(&input, &results, selected, index.len(), rows, cols);
                         }
                         Key::Up | Key::Down => {
@@ -2270,7 +2253,7 @@ mod query {
 
                             let (new_rows, new_cols) = term_size();
                             if new_rows != rows {
-                                results = query(index, &input, new_rows, fuzzy);
+                                results = query(index, &input, new_rows);
                                 selected = selected.min(results.len().saturating_sub(1));
                             }
                             (rows, cols) = (new_rows, new_cols);
@@ -2321,10 +2304,10 @@ mod query {
             }
         }
 
-        fn query<'a>(index: &'a Index, input: &str, rows: usize, fuzzy: bool) -> Results<'a> {
+        fn query<'a>(index: &'a Index, input: &str, rows: usize) -> Results<'a> {
             let visible = rows.saturating_sub(2).max(1);
             let searching = !input.trim().is_empty();
-            let mut q = super::user_query(input, fuzzy);
+            let mut q = super::user_query(input);
             q.limit = Some(visible);
             q.hits_per_doc = searching.then_some(visible);
             let docs = index.query(&q);
@@ -2379,6 +2362,46 @@ mod query {
 
         /// Apply navigation keys already captured by the current terminal
         /// read. The first non-navigation key is preserved for the next loop.
+        /// Apply one editing keystroke to the query text.
+        fn apply_edit(input: &mut String, key: Key) {
+            match key {
+                Key::Char(c) => input.push(c),
+                Key::Backspace => {
+                    input.pop();
+                }
+                Key::Clear => input.clear(),
+                // Not an edit; the caller only passes edit keys.
+                _ => {}
+            }
+        }
+
+        /// Apply every editing keystroke already buffered, so one search
+        /// covers a whole burst of typing. Returns the first non-edit key,
+        /// unapplied, for the caller to handle next.
+        fn drain_edits(
+            stdin: &mut Input<impl Read>,
+            input: &mut String,
+        ) -> Result<Option<Key>, String> {
+            while stdin.has_buffered() {
+                let key = read_key(stdin)?;
+                match key {
+                    Key::Char(_) | Key::Backspace | Key::Clear => apply_edit(input, key),
+                    Key::None => {}
+                    other => return Ok(Some(other)),
+                }
+            }
+            Ok(None)
+        }
+
+        /// Repaint the prompt line alone, leaving the result rows as they
+        /// are. Cheap enough to run on every keystroke.
+        fn render_input(input: &str) {
+            use std::io::Write;
+            let mut out = std::io::stdout().lock();
+            let _ = write!(out, "\x1b[H\x1b[2K\x1b[1m>\x1b[0m {input}\x1b[7m \x1b[0m");
+            let _ = out.flush();
+        }
+
         fn drain_navigation(
             stdin: &mut Input<impl Read>,
             selected: &mut usize,
@@ -2598,7 +2621,9 @@ mod query {
 
         #[cfg(test)]
         mod tests {
-            use super::{Input, Key, drain_navigation, move_selection, read_key};
+            use super::{
+                Input, Key, apply_edit, drain_edits, drain_navigation, move_selection, read_key,
+            };
 
             #[test]
             fn queued_navigation_is_applied_before_one_render() {
@@ -2612,6 +2637,36 @@ mod query {
 
                 assert_eq!(selected, 5);
                 assert!(matches!(pending, Some(Key::Char('x'))));
+            }
+
+            #[test]
+            fn a_burst_of_typing_costs_one_search() {
+                let bytes = b"needle";
+                let mut input = Input::new(&bytes[..]);
+                let first = read_key(&mut input).unwrap();
+                let mut typed = String::new();
+                apply_edit(&mut typed, first);
+
+                let pending = drain_edits(&mut input, &mut typed).unwrap();
+
+                // The whole burst landed before the caller searches once.
+                assert_eq!(typed, "needle");
+                assert!(pending.is_none());
+            }
+
+            #[test]
+            fn draining_a_burst_stops_at_the_first_non_edit_key() {
+                let bytes = b"ab\x7f\r";
+                let mut input = Input::new(&bytes[..]);
+                let first = read_key(&mut input).unwrap();
+                let mut typed = String::new();
+                apply_edit(&mut typed, first);
+
+                let pending = drain_edits(&mut input, &mut typed).unwrap();
+
+                // Backspace applied inside the burst; Enter handed back.
+                assert_eq!(typed, "a");
+                assert!(matches!(pending, Some(Key::Enter)));
             }
 
             #[test]
@@ -2634,7 +2689,7 @@ mod query {
     mod tui {
         use txcript::search::{DocKey, Index};
 
-        pub(super) fn pick(_: &Index, _: bool) -> Result<Option<DocKey>, String> {
+        pub(super) fn pick(_: &Index) -> Result<Option<DocKey>, String> {
             Err("the interactive picker is unix-only; pass a pattern instead".into())
         }
     }
@@ -2645,19 +2700,12 @@ mod query {
         use txcript::search::{Case, Mode};
 
         #[test]
-        fn patterns_are_literal_and_case_insensitive_by_default() {
-            let q = user_query("Cargo build", false);
+        fn patterns_are_literal_and_case_insensitive() {
+            let q = user_query("Cargo build");
             assert_eq!(q.mode, Mode::Substring);
             assert_eq!(q.case, Case::Insensitive);
             // One needle, spaces included: the space is not an atom separator.
             assert_eq!(q.pattern, "Cargo build");
-        }
-
-        #[test]
-        fn fuzzy_opts_into_atoms_but_never_back_into_case_sensitivity() {
-            let q = user_query("Cargo build", true);
-            assert_eq!(q.mode, Mode::Fuzzy);
-            assert_eq!(q.case, Case::Insensitive);
         }
     }
 }

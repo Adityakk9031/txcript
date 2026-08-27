@@ -43,11 +43,6 @@ struct SearchSessionsRequest {
     /// Text to find. Matched literally and case-insensitively: it must
     /// appear in a line exactly as written, spaces included.
     pattern: String,
-    /// Match `pattern` fzf-style instead of literally: space-separated terms
-    /// that must all appear, plus 'exact, ^prefix, suffix$, and !not. Wider
-    /// but far noisier — a fuzzy term matches any line whose characters
-    /// contain it in order. Defaults to false.
-    fuzzy: Option<bool>,
     /// Search only this harness. Omit to search every harness.
     from: Option<String>,
     /// Search only sessions recorded in or under this working directory.
@@ -233,7 +228,7 @@ impl SessionServer {
     /// Search local session content with the same matching, harness, and
     /// working-directory behavior as `txcript query <pattern>`.
     #[tool(
-        description = "Search local coding-agent sessions for a literal, case-insensitive pattern; set `fuzzy` for fzf-style matching instead. Optional `from` and `cwd` filters match the txcript CLI; omitted filters search all harnesses or directories.",
+        description = "Search local coding-agent sessions for a literal, case-insensitive pattern: it must appear in a line exactly as written, spaces included. Optional `from` and `cwd` filters match the txcript CLI; omitted filters search all harnesses or directories.",
         annotations(title = "Search sessions", read_only_hint = true)
     )]
     fn search_sessions(
@@ -244,7 +239,7 @@ impl SessionServer {
         let cwd = request.cwd.as_deref().map(Path::new);
         let index = super::query::index_for(from, cwd, self.cache.as_deref())
             .map_err(|error| ErrorData::internal_error(error, None))?;
-        let mut query = super::query::user_query(&request.pattern, request.fuzzy.unwrap_or(false));
+        let mut query = super::query::user_query(&request.pattern);
         // Match the CLI's one-shot output bounds.
         query.limit = Some(20);
         query.hits_per_doc = Some(3);
