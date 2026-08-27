@@ -18,8 +18,9 @@
 //! txcript view <id>[#range]             # view a session; compact text when piped
 //!     [--from <harness>]                    #   scope the id lookup to one harness
 //!     [--no-pager]                          #   print the terminal view directly
-//! txcript query '<pattern>'             # one-shot search, print ranked hits
-//! txcript query                         # fzf-style picker; Enter continues
+//! txcript query '<pattern>'             # one-shot literal search, ranked hits
+//! txcript query                         # interactive picker; Enter continues
+//!     [--fuzzy]                             #   fzf-style matching instead of literal
 //!     [--from <harness>]                    #   search only <harness> (default: all)
 //!     [--with <harness>]                    #   continue the pick in <harness>
 //!     [--cwd <dir>]                         #   only sessions recorded in <dir>
@@ -207,17 +208,22 @@ pub enum SessionCommand {
         #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
         out: Option<PathBuf>,
     },
-    /// Search session content; without a pattern, open an fzf-style picker
+    /// Search session content; without a pattern, open an interactive picker
     ///
-    /// A pattern prints ranked hits, labeled by what matched (user text,
-    /// assistant text, thinking, tool use, session metadata). The picker
-    /// filters per keystroke; Enter continues the selection, Esc cancels.
+    /// Matching is literal and case-insensitive: the pattern must appear in a
+    /// line exactly as typed, spaces included. A pattern prints ranked hits,
+    /// labeled by what matched (user text, assistant text, thinking, tool use,
+    /// session metadata). The picker filters per keystroke; Enter continues the
+    /// selection, Esc cancels.
     Query {
-        /// fzf-style pattern ('exact, ^prefix, suffix$, !not); omit to pick
-        /// interactively
+        /// Text to find, matched literally; omit to pick interactively
         // Other: without a hint, generated completions fall back to filenames.
         #[arg(value_hint = clap::ValueHint::Other)]
         pattern: Option<String>,
+        /// Match fzf-style instead of literally (space-separated terms,
+        /// 'exact, ^prefix, suffix$, !not)
+        #[arg(long)]
+        fuzzy: bool,
         /// Continue the picked session in this harness
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
         with: Option<HarnessId>,
@@ -355,10 +361,11 @@ pub fn run_session(command: SessionCommand, options: &Options) -> Result<ExitCod
         }
         SessionCommand::Query {
             pattern,
+            fuzzy,
             with,
             from,
             cwd,
-        } => query::cmd_query(pattern, with, from, cwd.as_deref(), cache),
+        } => query::cmd_query(pattern, fuzzy, with, from, cwd.as_deref(), cache),
     }
 }
 
@@ -1815,7 +1822,7 @@ mod query {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
-    use txcript::search::{DocKey, DocMatch, Extracted, Index, Origin, Query};
+    use txcript::search::{Case, DocKey, DocMatch, Extracted, Index, Origin, Query};
     use txcript::{HarnessId, local};
 
     /// One unit of index-building work, per session.
@@ -1852,8 +1859,23 @@ mod query {
         build_index(from, cwd, cache).map(|(index, _)| index)
     }
 
+    /// The query behind `txcript query` and the MCP search tool: literal
+    /// unless `fuzzy`, and case-insensitive either way. A literal default
+    /// keeps a pattern from matching lines that merely contain its characters
+    /// scattered across them, which is what fuzzy scoring does.
+    pub(super) fn user_query(pattern: &str, fuzzy: bool) -> Query {
+        let mut q = if fuzzy {
+            Query::fuzzy(pattern)
+        } else {
+            Query::substring(pattern)
+        };
+        q.case = Case::Insensitive;
+        q
+    }
+
     pub(super) fn cmd_query(
         pattern: Option<String>,
+        fuzzy: bool,
         with: Option<HarnessId>,
         from: Option<HarnessId>,
         cwd: Option<&Path>,
@@ -1865,10 +1887,10 @@ mod query {
                 if with.is_some() {
                     eprintln!("warning: --with ignored with a pattern");
                 }
-                one_shot(&index, &pattern);
+                one_shot(&index, &pattern, fuzzy);
                 Ok(std::process::ExitCode::SUCCESS)
             }
-            None => match tui::pick(&index)? {
+            None => match tui::pick(&index, fuzzy)? {
                 // Cancelled; terminal already restored, nothing to continue.
                 None => Ok(std::process::ExitCode::SUCCESS),
                 Some(key) => {
@@ -2030,9 +2052,9 @@ mod query {
     }
 
     /// Print ranked hits for a pattern, colorized when stdout is a terminal.
-    fn one_shot(index: &Index, pattern: &str) {
+    fn one_shot(index: &Index, pattern: &str, fuzzy: bool) {
         use std::io::{IsTerminal, Write};
-        let mut q = Query::fuzzy(pattern);
+        let mut q = user_query(pattern, fuzzy);
         q.limit = Some(20);
         q.hits_per_doc = Some(3);
         let matches = index.query(&q);
@@ -2135,7 +2157,7 @@ mod query {
         use std::process::{Command, Stdio};
 
         use terminal_size::{Height, Width};
-        use txcript::search::{DocKey, DocMatch, Hit, Index, Query};
+        use txcript::search::{DocKey, DocMatch, Hit, Index};
 
         /// RAII guard for raw mode and the alternate screen.
         struct Term {
@@ -2197,9 +2219,9 @@ mod query {
             None,
         }
 
-        /// Interactive fuzzy picker over the index. Returns the chosen doc,
-        /// or `None` on cancel. The terminal is fully restored either way.
-        pub(super) fn pick(index: &Index) -> Result<Option<DocKey>, String> {
+        /// Interactive picker over the index. Returns the chosen doc, or
+        /// `None` on cancel. The terminal is fully restored either way.
+        pub(super) fn pick(index: &Index, fuzzy: bool) -> Result<Option<DocKey>, String> {
             if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
                 // Raw mode and the alternate screen need real terminal stdio.
                 Err("interactive query needs a terminal (pass a pattern instead)".into())
@@ -2209,7 +2231,7 @@ mod query {
                 let mut selected = 0usize;
                 let mut stdin = Input::new(std::io::stdin().lock());
                 let (mut rows, mut cols) = term_size();
-                let mut results = query(index, &input, rows);
+                let mut results = query(index, &input, rows, fuzzy);
                 let mut pending = None;
                 render(&input, &results, selected, index.len(), rows, cols);
 
@@ -2222,21 +2244,21 @@ mod query {
                             input.push(c);
                             selected = 0;
                             (rows, cols) = term_size();
-                            results = query(index, &input, rows);
+                            results = query(index, &input, rows, fuzzy);
                             render(&input, &results, selected, index.len(), rows, cols);
                         }
                         Key::Backspace => {
                             input.pop();
                             selected = 0;
                             (rows, cols) = term_size();
-                            results = query(index, &input, rows);
+                            results = query(index, &input, rows, fuzzy);
                             render(&input, &results, selected, index.len(), rows, cols);
                         }
                         Key::Clear => {
                             input.clear();
                             selected = 0;
                             (rows, cols) = term_size();
-                            results = query(index, &input, rows);
+                            results = query(index, &input, rows, fuzzy);
                             render(&input, &results, selected, index.len(), rows, cols);
                         }
                         Key::Up | Key::Down => {
@@ -2248,7 +2270,7 @@ mod query {
 
                             let (new_rows, new_cols) = term_size();
                             if new_rows != rows {
-                                results = query(index, &input, new_rows);
+                                results = query(index, &input, new_rows, fuzzy);
                                 selected = selected.min(results.len().saturating_sub(1));
                             }
                             (rows, cols) = (new_rows, new_cols);
@@ -2299,10 +2321,10 @@ mod query {
             }
         }
 
-        fn query<'a>(index: &'a Index, input: &str, rows: usize) -> Results<'a> {
+        fn query<'a>(index: &'a Index, input: &str, rows: usize, fuzzy: bool) -> Results<'a> {
             let visible = rows.saturating_sub(2).max(1);
             let searching = !input.trim().is_empty();
-            let mut q = Query::fuzzy(input);
+            let mut q = super::user_query(input, fuzzy);
             q.limit = Some(visible);
             q.hits_per_doc = searching.then_some(visible);
             let docs = index.query(&q);
@@ -2612,8 +2634,30 @@ mod query {
     mod tui {
         use txcript::search::{DocKey, Index};
 
-        pub(super) fn pick(_: &Index) -> Result<Option<DocKey>, String> {
+        pub(super) fn pick(_: &Index, _: bool) -> Result<Option<DocKey>, String> {
             Err("the interactive picker is unix-only; pass a pattern instead".into())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::user_query;
+        use txcript::search::{Case, Mode};
+
+        #[test]
+        fn patterns_are_literal_and_case_insensitive_by_default() {
+            let q = user_query("Cargo build", false);
+            assert_eq!(q.mode, Mode::Substring);
+            assert_eq!(q.case, Case::Insensitive);
+            // One needle, spaces included: the space is not an atom separator.
+            assert_eq!(q.pattern, "Cargo build");
+        }
+
+        #[test]
+        fn fuzzy_opts_into_atoms_but_never_back_into_case_sensitivity() {
+            let q = user_query("Cargo build", true);
+            assert_eq!(q.mode, Mode::Fuzzy);
+            assert_eq!(q.case, Case::Insensitive);
         }
     }
 }
