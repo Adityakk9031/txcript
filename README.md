@@ -51,7 +51,7 @@ txcript maps each harness's native transcript format through a typed common mode
 - **A format for everyone else**: agents txcript has never heard of emit the documented [Simple](docs/formats/simple.md) interchange JSON — a file or a stream, handed to txcript directly — and their transcripts continue in any supported harness.
 - **Byte-lossless round-trips**: loading and saving a session in its own format reproduces it exactly.
 - **Continue anywhere**: `txcript continue <id> --with <harness>` rewrites a session into another harness's native format and launches it. The original is never modified.
-- **Search everything**: fuzzy/substring search across every session on the machine (fzf-style syntax, powered by [nucleo](https://github.com/helix-editor/nucleo)), as a library API, a one-shot CLI query, or an interactive picker.
+- **Search everything**: literal, case-insensitive search across every session on the machine (powered by [nucleo](https://github.com/helix-editor/nucleo)), as a library API, a one-shot CLI query, or an interactive picker.
 - **MCP server**: `txcript mcp` exposes read-only `list_sessions`, `search_sessions`, and `read_session` tools, so agents can mine past sessions as context.
 - **Documented formats**: every harness's on-disk format is written up in [`docs/formats/`](docs/formats), with provenance for each claim (official docs, source permalinks, or reverse-engineering notes).
 
@@ -90,7 +90,7 @@ Discovery, listing, search, and `view` work for every harness with a backing sto
 | [pi](https://pi.dev) | `pi` | `~/.pi/agent/sessions/` | JSONL | ⇄ | ✓ | [spec](docs/formats/pi.md) |
 | [Campfire](docs/formats/campfire.md) | `campfire` | `~/.campfire/agent/sessions/` | JSONL | ⇄ | ✓ | [spec](docs/formats/campfire.md) |
 | [Cursor CLI](https://cursor.com/cli) | `cursor` | `~/.cursor/chats/` | SQLite | ⇄ | ✓ | [spec](docs/formats/cursor.md) |
-| [Cursor desktop](https://cursor.com) | `cursor_desktop` | `<Cursor User dir>/globalStorage/` | SQLite | ⇄ | ✓ | — |
+| [Cursor desktop](https://cursor.com) | `cursor_desktop` | `<Cursor User dir>/globalStorage/` | SQLite | ⇄ | ✓ | [spec](docs/formats/cursor-desktop.md) |
 | [Grok CLI](https://github.com/xai-org/grok-build) | `grok` | `~/.grok/sessions/` | JSON session dir | ⇄ | ✓ | [spec](docs/formats/grok.md) |
 | [fx](https://fx.sh) | `fx` | `~/.fx/sessions/` | event-log session dir | ⇄ | ✓ | [spec](docs/formats/fx.md) |
 | Hermes Agent | `hermes` | `~/.hermes/state.db` | SQLite | → | — <sup>3</sup> | [spec](docs/formats/hermes.md) |
@@ -178,12 +178,14 @@ The recorded working directory is kept when it exists on the importing machine a
 
 ```sh
 txcript query 'relay bug'                # one-shot: ranked hits, highlighted
-txcript query                            # fzf-style picker; Enter continues
+txcript query                            # interactive picker; Enter continues
     [--from <harness>]                   #   search only <harness> (default: all)
     [--with <harness>]                   #   continue the pick in <harness>
 ```
 
-The picker is dependency-free (raw-mode ANSI): type to filter with fzf-style fuzzy syntax, arrows / ctrl-p/n to move, Enter to continue the selection in its own harness (or `--with`), Esc to cancel. Every row shows which kind of content matched: user text, assistant text, thinking, tool use, tool output, or session metadata.
+A pattern matches literally and case-insensitively: `relay bug` finds lines containing that exact text, spaces and all.
+
+The picker is dependency-free (raw-mode ANSI): type to filter, arrows / ctrl-p/n to move, Enter to continue the selection in its own harness (or `--with`), Esc to cancel. Every row shows which kind of content matched: user text, assistant text, thinking, tool use, tool output, or session metadata.
 
 ### MCP server
 
@@ -260,7 +262,7 @@ Slash commands the user ran at the harness (`/release patch`) are canonical too:
 ```rust
 use txcript::search::{Query, search};
 
-let hits = search(&common, &Query::fuzzy("relay bug"));   // fzf syntax: 'exact ^prefix !not
+let hits = search(&common, &Query::substring("relay bug"));  // or Query::fuzzy for fzf syntax
 for hit in hits {
     // hit.origin: User | Assistant | Thinking | ToolUse | ToolResult | Meta
     // hit.span addresses the message; hit.highlights are char ranges into hit.line

@@ -18,8 +18,8 @@
 //! txcript view <id>[#range]             # view a session; compact text when piped
 //!     [--from <harness>]                    #   scope the id lookup to one harness
 //!     [--no-pager]                          #   print the terminal view directly
-//! txcript query '<pattern>'             # one-shot search, print ranked hits
-//! txcript query                         # fzf-style picker; Enter continues
+//! txcript query '<pattern>'             # one-shot literal search, ranked hits
+//! txcript query                         # interactive picker; Enter continues
 //!     [--from <harness>]                    #   search only <harness> (default: all)
 //!     [--with <harness>]                    #   continue the pick in <harness>
 //!     [--cwd <dir>]                         #   only sessions recorded in <dir>
@@ -208,14 +208,15 @@ pub enum SessionCommand {
         #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
         out: Option<PathBuf>,
     },
-    /// Search session content; without a pattern, open an fzf-style picker
+    /// Search session content; without a pattern, open an interactive picker
     ///
-    /// A pattern prints ranked hits, labeled by what matched (user text,
-    /// assistant text, thinking, tool use, session metadata). The picker
-    /// filters per keystroke; Enter continues the selection, Esc cancels.
+    /// Matching is literal and case-insensitive: the pattern must appear in a
+    /// line exactly as typed, spaces included. A pattern prints ranked hits,
+    /// labeled by what matched (user text, assistant text, thinking, tool use,
+    /// session metadata). The picker filters per keystroke; Enter continues the
+    /// selection, Esc cancels.
     Query {
-        /// fzf-style pattern ('exact, ^prefix, suffix$, !not); omit to pick
-        /// interactively
+        /// Text to find, matched literally; omit to pick interactively
         // Other: without a hint, generated completions fall back to filenames.
         #[arg(value_hint = clap::ValueHint::Other)]
         pattern: Option<String>,
@@ -1826,7 +1827,7 @@ mod query {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
-    use txcript::search::{DocKey, DocMatch, Extracted, Index, Origin, Query};
+    use txcript::search::{Case, DocKey, DocMatch, Extracted, Index, Origin, Query};
     use txcript::{HarnessId, local};
 
     /// One unit of index-building work, per session.
@@ -1861,6 +1862,16 @@ mod query {
         cache: Option<&Path>,
     ) -> Result<Index, String> {
         build_index(from, cwd, cache).map(|(index, _)| index)
+    }
+
+    /// The query behind `txcript query` and the MCP search tool: the pattern
+    /// is one literal needle, spaces included, matched case-insensitively.
+    /// Fuzzy scoring matches any line whose characters contain the pattern in
+    /// order, which turns up lines that only look like matches.
+    pub(super) fn user_query(pattern: &str) -> Query {
+        let mut q = Query::substring(pattern);
+        q.case = Case::Insensitive;
+        q
     }
 
     pub(super) fn cmd_query(
@@ -2043,7 +2054,7 @@ mod query {
     /// Print ranked hits for a pattern, colorized when stdout is a terminal.
     fn one_shot(index: &Index, pattern: &str) {
         use std::io::{IsTerminal, Write};
-        let mut q = Query::fuzzy(pattern);
+        let mut q = user_query(pattern);
         q.limit = Some(20);
         q.hits_per_doc = Some(3);
         let matches = index.query(&q);
@@ -2146,7 +2157,7 @@ mod query {
         use std::process::{Command, Stdio};
 
         use terminal_size::{Height, Width};
-        use txcript::search::{DocKey, DocMatch, Hit, Index, Query};
+        use txcript::search::{DocKey, DocMatch, Hit, Index};
 
         /// RAII guard for raw mode and the alternate screen.
         struct Term {
@@ -2208,8 +2219,8 @@ mod query {
             None,
         }
 
-        /// Interactive fuzzy picker over the index. Returns the chosen doc,
-        /// or `None` on cancel. The terminal is fully restored either way.
+        /// Interactive picker over the index. Returns the chosen doc, or
+        /// `None` on cancel. The terminal is fully restored either way.
         pub(super) fn pick(index: &Index) -> Result<Option<DocKey>, String> {
             if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
                 // Raw mode and the alternate screen need real terminal stdio.
@@ -2229,23 +2240,17 @@ mod query {
                     match key {
                         // A poll timeout: nothing pressed, keep waiting.
                         Key::None => {}
-                        Key::Char(c) => {
-                            input.push(c);
+                        Key::Char(_) | Key::Backspace | Key::Clear => {
+                            apply_edit(&mut input, key);
+                            // A burst of typing arrives faster than a search
+                            // completes. Apply the whole burst, then search
+                            // once for what was actually typed.
+                            pending = drain_edits(&mut stdin, &mut input)?;
                             selected = 0;
-                            (rows, cols) = term_size();
-                            results = query(index, &input, rows);
-                            render(&input, &results, selected, index.len(), rows, cols);
-                        }
-                        Key::Backspace => {
-                            input.pop();
-                            selected = 0;
-                            (rows, cols) = term_size();
-                            results = query(index, &input, rows);
-                            render(&input, &results, selected, index.len(), rows, cols);
-                        }
-                        Key::Clear => {
-                            input.clear();
-                            selected = 0;
+                            // Echo before searching: the prompt line is what
+                            // the typist is watching, and it must not wait on
+                            // results to appear.
+                            render_input(&input);
                             (rows, cols) = term_size();
                             results = query(index, &input, rows);
                             render(&input, &results, selected, index.len(), rows, cols);
@@ -2313,7 +2318,7 @@ mod query {
         fn query<'a>(index: &'a Index, input: &str, rows: usize) -> Results<'a> {
             let visible = rows.saturating_sub(2).max(1);
             let searching = !input.trim().is_empty();
-            let mut q = Query::fuzzy(input);
+            let mut q = super::user_query(input);
             q.limit = Some(visible);
             q.hits_per_doc = searching.then_some(visible);
             let docs = index.query(&q);
@@ -2368,6 +2373,46 @@ mod query {
 
         /// Apply navigation keys already captured by the current terminal
         /// read. The first non-navigation key is preserved for the next loop.
+        /// Apply one editing keystroke to the query text.
+        fn apply_edit(input: &mut String, key: Key) {
+            match key {
+                Key::Char(c) => input.push(c),
+                Key::Backspace => {
+                    input.pop();
+                }
+                Key::Clear => input.clear(),
+                // Not an edit; the caller only passes edit keys.
+                _ => {}
+            }
+        }
+
+        /// Apply every editing keystroke already buffered, so one search
+        /// covers a whole burst of typing. Returns the first non-edit key,
+        /// unapplied, for the caller to handle next.
+        fn drain_edits(
+            stdin: &mut Input<impl Read>,
+            input: &mut String,
+        ) -> Result<Option<Key>, String> {
+            while stdin.has_buffered() {
+                let key = read_key(stdin)?;
+                match key {
+                    Key::Char(_) | Key::Backspace | Key::Clear => apply_edit(input, key),
+                    Key::None => {}
+                    other => return Ok(Some(other)),
+                }
+            }
+            Ok(None)
+        }
+
+        /// Repaint the prompt line alone, leaving the result rows as they
+        /// are. Cheap enough to run on every keystroke.
+        fn render_input(input: &str) {
+            use std::io::Write;
+            let mut out = std::io::stdout().lock();
+            let _ = write!(out, "\x1b[H\x1b[2K\x1b[1m>\x1b[0m {input}\x1b[7m \x1b[0m");
+            let _ = out.flush();
+        }
+
         fn drain_navigation(
             stdin: &mut Input<impl Read>,
             selected: &mut usize,
@@ -2587,7 +2632,9 @@ mod query {
 
         #[cfg(test)]
         mod tests {
-            use super::{Input, Key, drain_navigation, move_selection, read_key};
+            use super::{
+                Input, Key, apply_edit, drain_edits, drain_navigation, move_selection, read_key,
+            };
 
             #[test]
             fn queued_navigation_is_applied_before_one_render() {
@@ -2601,6 +2648,36 @@ mod query {
 
                 assert_eq!(selected, 5);
                 assert!(matches!(pending, Some(Key::Char('x'))));
+            }
+
+            #[test]
+            fn a_burst_of_typing_costs_one_search() {
+                let bytes = b"needle";
+                let mut input = Input::new(&bytes[..]);
+                let first = read_key(&mut input).unwrap();
+                let mut typed = String::new();
+                apply_edit(&mut typed, first);
+
+                let pending = drain_edits(&mut input, &mut typed).unwrap();
+
+                // The whole burst landed before the caller searches once.
+                assert_eq!(typed, "needle");
+                assert!(pending.is_none());
+            }
+
+            #[test]
+            fn draining_a_burst_stops_at_the_first_non_edit_key() {
+                let bytes = b"ab\x7f\r";
+                let mut input = Input::new(&bytes[..]);
+                let first = read_key(&mut input).unwrap();
+                let mut typed = String::new();
+                apply_edit(&mut typed, first);
+
+                let pending = drain_edits(&mut input, &mut typed).unwrap();
+
+                // Backspace applied inside the burst; Enter handed back.
+                assert_eq!(typed, "a");
+                assert!(matches!(pending, Some(Key::Enter)));
             }
 
             #[test]
@@ -2625,6 +2702,21 @@ mod query {
 
         pub(super) fn pick(_: &Index) -> Result<Option<DocKey>, String> {
             Err("the interactive picker is unix-only; pass a pattern instead".into())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::user_query;
+        use txcript::search::{Case, Mode};
+
+        #[test]
+        fn patterns_are_literal_and_case_insensitive() {
+            let q = user_query("Cargo build");
+            assert_eq!(q.mode, Mode::Substring);
+            assert_eq!(q.case, Case::Insensitive);
+            // One needle, spaces included: the space is not an atom separator.
+            assert_eq!(q.pattern, "Cargo build");
         }
     }
 }

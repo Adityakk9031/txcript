@@ -15,6 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, SecondsFormat, Utc};
@@ -694,35 +695,45 @@ impl Store for CodexStore {
         if self.sessions_dir.is_dir() {
             let mut files = Vec::new();
             collect_rollouts(&self.sessions_dir, &mut files);
-            Ok(files
-                .into_iter()
-                .filter_map(|path| {
-                    // A rollout that fails to read, or lacks a session_meta
-                    // with an id, is not a resumable session. Only
-                    // session_meta lines are parsed — message payloads are
-                    // skipped whole — and the scan stops at the first one
-                    // when it already carries the id (the usual case).
-                    let text = fs::read_to_string(&path).ok()?;
-                    let mut session_lines = text
-                        .lines()
-                        .filter(|line| !line.trim().is_empty())
-                        .filter(|line| is_session_meta(line))
-                        .filter_map(|line| serde_json::from_str::<Line>(line).ok());
-                    let has_id = |l: &Line| l.payload.get("id").and_then(Value::as_str).is_some();
-                    let first = session_lines.next()?;
-                    let has_meta = has_id(&first) || session_lines.any(|l| has_id(&l));
-                    has_meta.then(|| {
-                        let mut meta = meta_from_lines(std::slice::from_ref(&first));
-                        if meta.id.is_empty() {
-                            meta.id = jsonl::file_id(&path);
-                        }
-                        Discovered {
-                            meta,
-                            reference: path,
-                        }
-                    })
+            Ok(super::filter_map_parallel(&files, |path| {
+                // A rollout that fails to read, or lacks a session_meta with
+                // an id, is not a resumable session. Only session_meta lines
+                // are parsed — message payloads are skipped whole — and the
+                // read stops at the first session_meta carrying the id, which
+                // is line one of a well-formed rollout. Reading the rest would
+                // mean pulling every byte of every rollout on the machine
+                // through a JSON probe to learn nothing more.
+                let has_id = |l: &Line| l.payload.get("id").and_then(Value::as_str).is_some();
+                let file = fs::File::open(path).ok()?;
+                let mut first: Option<Line> = None;
+                let mut found_id = false;
+                for line in BufReader::new(file).lines().map_while(std::io::Result::ok) {
+                    if line.trim().is_empty() || !is_session_meta(&line) {
+                        continue;
+                    }
+                    let Ok(parsed) = serde_json::from_str::<Line>(&line) else {
+                        continue;
+                    };
+                    found_id = has_id(&parsed);
+                    if first.is_none() {
+                        first = Some(parsed);
+                    }
+                    if found_id {
+                        break;
+                    }
+                }
+                let first = first?;
+                found_id.then(|| {
+                    let mut meta = meta_from_lines(std::slice::from_ref(&first));
+                    if meta.id.is_empty() {
+                        meta.id = jsonl::file_id(path);
+                    }
+                    Discovered {
+                        meta,
+                        reference: path.clone(),
+                    }
                 })
-                .collect())
+            }))
         } else {
             // A missing sessions root means no sessions, not an error.
             Ok(Vec::new())

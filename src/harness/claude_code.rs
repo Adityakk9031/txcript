@@ -450,23 +450,23 @@ impl Store for ClaudeStore {
         if self.root.is_dir() {
             let mut files = Vec::new();
             Self::collect_jsonl(&self.root, &mut files);
-            Ok(files
-                .into_iter()
-                .filter_map(|path| {
-                    // A session that fails to read is skipped, not fatal. Meta
-                    // comes from the shallow scan, not a full parse.
-                    fs::read_to_string(&path).ok().map(|text| {
-                        let mut meta = meta_from_text(&text);
-                        if meta.id.is_empty() {
-                            meta.id = jsonl::file_id(&path);
-                        }
-                        Discovered {
-                            meta,
-                            reference: path,
-                        }
-                    })
+            // Unlike a codex rollout, a session's metadata is spread over
+            // the whole file — a custom title or summary can be its last
+            // line — so the scan cannot stop early. It fans out instead.
+            Ok(super::filter_map_parallel(&files, |path| {
+                // A session that fails to read is skipped, not fatal. Meta
+                // comes from the shallow scan, not a full parse.
+                fs::read_to_string(path).ok().map(|text| {
+                    let mut meta = meta_from_text(&text);
+                    if meta.id.is_empty() {
+                        meta.id = jsonl::file_id(path);
+                    }
+                    Discovered {
+                        meta,
+                        reference: path.clone(),
+                    }
                 })
-                .collect())
+            }))
         } else {
             // A missing root means no sessions, not an error.
             Ok(Vec::new())
