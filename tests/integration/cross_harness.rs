@@ -234,3 +234,89 @@ fn conversation_survives_every_hop() {
         "claude (round)"
     );
 }
+
+#[test]
+fn multi_tool_conversation_survives_cross_harness_conversion() {
+    let meta = common::Meta {
+        id: "multi-1".into(),
+        timestamp: ts("2026-01-02T03:04:05.000Z"),
+        cwd: Some("/repo".into()),
+        git_branch: None,
+        title: Some("MultiTool".into()),
+        cli_version: None,
+        model: Some("claude-opus-4-8".into()),
+    };
+    let body = vec![
+        common::Message {
+            role: common::Role::User,
+            content: vec![common::Block::Text {
+                text: "read files and edit".into(),
+            }],
+            timestamp: ts("2026-01-02T03:04:06.000Z"),
+            model: None,
+            stop_reason: None,
+            usage: None,
+        },
+        common::Message {
+            role: common::Role::Assistant,
+            content: vec![
+                common::Block::ToolUse {
+                    id: "call-1".into(),
+                    tool: common::Tool::Read {
+                        file_path: "/repo/a.rs".into(),
+                        offset: None,
+                        limit: None,
+                    },
+                },
+                common::Block::ToolUse {
+                    id: "call-2".into(),
+                    tool: common::Tool::Edit {
+                        file_path: "/repo/b.rs".into(),
+                        old_string: "foo".into(),
+                        new_string: "bar".into(),
+                        replace_all: false,
+                    },
+                },
+            ],
+            timestamp: ts("2026-01-02T03:04:07.000Z"),
+            model: Some("claude-opus-4-8".into()),
+            stop_reason: Some(common::StopReason::ToolUse),
+            usage: None,
+        },
+        common::Message {
+            role: common::Role::User,
+            content: vec![
+                common::Block::ToolResult {
+                    tool_use_id: "call-1".into(),
+                    content: common::ToolOutput::Text("file content a".into()),
+                    is_error: false,
+                },
+                common::Block::ToolResult {
+                    tool_use_id: "call-2".into(),
+                    content: common::ToolOutput::Text("edited b".into()),
+                    is_error: false,
+                },
+            ],
+            timestamp: ts("2026-01-02T03:04:08.000Z"),
+            model: None,
+            stop_reason: None,
+            usage: None,
+        },
+    ];
+    let common = Transcript::new(meta, body);
+    let expected = signature(&common);
+
+    let opencode = convert::<simple::Simple, opencode::OpenCode>(&simple::Simple::from_common(&common).unwrap()).unwrap();
+    assert_eq!(
+        signature(&opencode::OpenCode::to_common(&opencode).unwrap()),
+        expected,
+        "opencode multi-tool"
+    );
+
+    let cursor = convert::<simple::Simple, cursor::Cursor>(&simple::Simple::from_common(&common).unwrap()).unwrap();
+    assert_eq!(
+        signature(&cursor::Cursor::to_common(&cursor).unwrap()),
+        expected,
+        "cursor multi-tool"
+    );
+}
