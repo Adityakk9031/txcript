@@ -159,6 +159,7 @@ pub(crate) struct Filters {
     pub(crate) assistant: bool,
     pub(crate) tools: bool,
     pub(crate) reasoning: bool,
+    preserve_empty: bool,
 }
 
 impl Default for Filters {
@@ -168,11 +169,19 @@ impl Default for Filters {
             assistant: true,
             tools: true,
             reasoning: true,
+            preserve_empty: false,
         }
     }
 }
 
 impl Filters {
+    pub(crate) fn crop() -> Self {
+        Self {
+            preserve_empty: true,
+            ..Self::default()
+        }
+    }
+
     fn shows_role(self, role: Role) -> bool {
         match role {
             Role::User => self.user,
@@ -187,6 +196,16 @@ impl Filters {
             Block::Text { .. } | Block::Image { .. } | Block::Artifact { .. } => true,
         }
     }
+}
+
+/// A message's place in the conversation's rhythm: what the user said,
+/// what the assistant answered, and the tool traffic in between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MessageKind {
+    User,
+    Assistant,
+    ToolCall,
+    ToolResult,
 }
 
 /// A session range the pager re-renders on demand: the same text under
@@ -224,6 +243,69 @@ impl Document {
             filters,
             &mut self.images,
         )
+    }
+
+    pub(crate) fn message_count(&self) -> usize {
+        self.common.body.len()
+    }
+
+    pub(crate) fn messages(&self) -> &[Message] {
+        &self.common.body
+    }
+
+    pub(crate) fn message(&self, index: usize) -> Option<&Message> {
+        self.common.body.get(index)
+    }
+
+    /// Put `message` at `index`; later renders show it.
+    pub(crate) fn replace_message(&mut self, index: usize, message: Message) {
+        if let Some(slot) = self.common.body.get_mut(index) {
+            *slot = message;
+        }
+    }
+
+    pub(crate) const fn transcript(&self) -> &Transcript<Common> {
+        &self.common
+    }
+
+    pub(crate) const fn color_enabled(&self) -> bool {
+        self.color
+    }
+
+    pub(crate) fn validate_crop_to(&self, spans: &[Span]) -> Result<(), txcript::CropError> {
+        self.common.crop_to(spans).map(|_| ())
+    }
+
+    /// The complete tool call/result pairs, as message indices.
+    pub(crate) fn tool_pairs(&self) -> Result<Vec<(usize, usize)>, txcript::CropError> {
+        self.common.tool_pairs()
+    }
+
+    /// What each message mostly is, for a one-cell-per-message overview.
+    pub(crate) fn message_kinds(&self) -> Vec<MessageKind> {
+        self.common
+            .body
+            .iter()
+            .map(|message| {
+                let has = |probe: fn(&Block) -> bool| message.content.iter().any(probe);
+                match message.role {
+                    Role::Assistant if has(|block| matches!(block, Block::ToolUse { .. })) => {
+                        MessageKind::ToolCall
+                    }
+                    Role::Assistant => MessageKind::Assistant,
+                    Role::User
+                        if !message.content.is_empty()
+                            && message
+                                .content
+                                .iter()
+                                .all(|block| matches!(block, Block::ToolResult { .. })) =>
+                    {
+                        MessageKind::ToolResult
+                    }
+                    Role::User => MessageKind::User,
+                }
+            })
+            .collect()
     }
 
     /// The pager's prompt line: the range shown and the controls, with
@@ -458,12 +540,11 @@ fn human_messages(
     let mut lines = 0usize;
     let mut counted = 0usize;
     for (offset, message) in messages.iter().enumerate() {
-        if !filters.shows_role(message.role)
-            || !message
-                .content
-                .iter()
-                .any(|block| filters.shows_block(block))
-        {
+        let has_visible_block = message
+            .content
+            .iter()
+            .any(|block| filters.shows_block(block));
+        if !filters.shows_role(message.role) || (!filters.preserve_empty && !has_visible_block) {
             continue;
         }
         let ordinal = start + offset + 1;
@@ -989,6 +1070,25 @@ mod tests {
             ..Filters::default()
         });
         assert!(status.starts_with("#1–3/3  u user off  a assistant  t tools  r reasoning"));
+    }
+
+    #[test]
+    fn crop_filter_renders_empty_messages_so_indices_stay_canonical() {
+        let mut common = transcript();
+        let normal = common.body[0].clone();
+        let empty = Message {
+            content: Vec::new(),
+            ..normal.clone()
+        };
+        common.body = vec![normal.clone(), empty, normal];
+        let mut document = Document::new(common, Span(0..3), false, None);
+
+        let rendered = document.render(60, Filters::crop()).unwrap();
+
+        assert_eq!(rendered.message_starts.len(), 3);
+        assert!(rendered.text.contains("Message #1"));
+        assert!(rendered.text.contains("Message #2"));
+        assert!(rendered.text.contains("Message #3"));
     }
 
     struct FailingWriter(io::ErrorKind);

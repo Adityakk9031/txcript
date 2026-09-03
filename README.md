@@ -147,6 +147,9 @@ txcript continue <id>[#range]            # continue <id>, then launch its harnes
     [--no-resume]                         #   write the session but don't launch
 txcript continue <file|->[#range]        # continue a Simple document instead:
     --with <harness> [...]                #   a file, or stdin (`-`), from any agent
+txcript crop <id>[#range]                # interactively cut messages and save a copy
+    [--with <harness>]                    #   optionally convert the cropped copy
+    [--from <harness>]                    #   scope the source lookup
 txcript view <id>[#range]                # view a session; compact text when piped
     [--from <harness>]                    #   scope the id lookup to one harness
     [--no-pager]                          #   print the terminal view directly
@@ -171,7 +174,7 @@ A session id is any unambiguous prefix of the full id, or the session's exact ti
 - `abc#5-`: message 5 to the end
 - `abc#-10`: start through message 10
 
-`continue` accepts the same suffix and continues just those messages as a new session. A range that would cut a tool call away from its result is refused, and the error suggests the nearest valid range.
+`continue` accepts the same suffix and continues just those messages as a new session. `crop` opens an interactive editor over the session, in the spirit of a video editor's timeline: every message starts out kept, and you remove the ones you don't want from anywhere in the conversation, not just the ends. Move with `j`/`k` or the arrow keys and press Space to remove the message under the cursor (or restore it). To work on a stretch at once, press `v`, move to the other end, then `x` to remove it, `r` to restore it, or `t` to keep only that stretch; `:3-10` selects a range by number and `:42` jumps to a message. `e` opens the message under the cursor in your editor (`$VISUAL`, `$EDITOR`, or `vi`) as plain text, one heading per block: change the text, trim a tool result, or empty a block to drop it, then save and quit to apply. A terminal editor runs in a pane beside or under the transcript; `E` gives it the whole terminal instead, and an editor that opens its own window is waited for. `u` undoes, `U` redoes, `?` lists every key. Removed messages collapse to their header, edited ones say so, and an overview of the whole session, one cell per message, runs down the right edge or along the bottom depending on the window's shape. Enter saves the kept messages, edits included, as a new session; `q` leaves without saving. A `#range` is optional and opens the editor with only that range kept. The copy defaults to the source harness unless `--with` selects another one, and the source is never modified. A tool call and its result are always removed or restored together, so the saved copy never splits them.
 
 `export` writes the session as a [Simple](docs/formats/simple.md) document, to stdout or `--out <file>`. The document is the full rendering of the canonical model — everything `continue` carries between harnesses — detached from any harness's store, so it moves between machines as a file:
 
@@ -272,6 +275,23 @@ codex::CodexStore::default_root().expect("home dir").save(&codex)?;  // resumabl
 ```
 
 The canonical model is `Transcript<Common>`: `Meta` + `Vec<Message>`, where a `Message` holds typed `Block`s (`Text`, `Thinking`, `ToolUse`, `ToolResult`, `Image`) and a typed `Tool` enum.
+
+Crop a canonical transcript in memory without changing the source:
+
+```rust
+use txcript::{Span, Transcript, Common};
+
+let cropped: Transcript<Common> = common.crop(&Span(4..12))?;
+let spliced: Transcript<Common> = common.crop_to(&[Span(0..2), Span(10..40)])?;
+```
+
+`Span` is zero-based and half-open in the Rust API. `crop` keeps one range;
+`crop_to` keeps the union of several, in order, closing the cuts between
+them. Both preserve metadata, copy only the selected messages, reject empty
+or out-of-bounds ranges, and refuse to separate a complete tool call from its
+result. `CropError` exposes the nearest valid span when expanding the
+selection can preserve that pair, and `tool_pairs` lists the call/result
+pairs so an editor can keep them together up front.
 
 Slash commands the user ran at the harness (`/release patch`) are canonical too: a `Tool::Command` call on the user turn, paired with what the command printed back as its `ToolResult`.
 
