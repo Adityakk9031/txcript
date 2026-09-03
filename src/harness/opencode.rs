@@ -536,15 +536,14 @@ fn assistant_part(
                     } if tool_use_id == id => Some((content, *is_error)),
                     _ => None,
                 })
+                && let Value::Object(obj) = &mut state
             {
-                if let Value::Object(obj) = &mut state {
-                    if result.1 {
-                        obj.insert("status".into(), json!("error"));
-                        obj.insert("error".into(), json!(output_to_string(result.0)));
-                        obj.remove("output");
-                    } else {
-                        obj.insert("output".into(), json!(output_to_string(result.0)));
-                    }
+                if result.1 {
+                    obj.insert("status".into(), json!("error"));
+                    obj.insert("error".into(), json!(output_to_string(result.0)));
+                    obj.remove("output");
+                } else {
+                    obj.insert("output".into(), json!(output_to_string(result.0)));
                 }
             }
             json!({ "type": "tool", "tool": oc_name, "callID": id, "state": state })
