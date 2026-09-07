@@ -369,11 +369,13 @@ fn build_export(meta: &Meta, messages: &[Message]) -> Export {
                     "model".into(),
                     json!({ "providerID": "anthropic", "modelID": model_id(msg) }),
                 );
-                last_user_msg_id = Some(msg_id.clone());
                 for (j, block) in msg.content.iter().enumerate() {
                     if let Some(part) = user_part(block, &session_id, &msg_id, idx, j, msg_ms) {
                         parts.push(part);
                     }
+                }
+                if !parts.is_empty() {
+                    last_user_msg_id = Some(msg_id.clone());
                 }
             }
             Role::Assistant => {
