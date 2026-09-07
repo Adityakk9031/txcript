@@ -331,31 +331,37 @@ fn format_session_id(id: &str) -> String {
     }
 }
 
+struct ExportContext<'a> {
+    session_id: &'a str,
+    cwd: &'a str,
+    default_model: Option<&'a str>,
+    messages: &'a [Message],
+}
+
 fn build_user_record(
+    ctx: &ExportContext<'_>,
     msg: &Message,
-    session_id: &str,
     msg_id: &str,
     idx: usize,
-    msg_ms: i64,
-    default_model: Option<&str>,
 ) -> (MessageRecord, bool) {
+    let msg_ms = msg.timestamp.timestamp_millis();
     let mut info = Map::new();
     info.insert("id".into(), json!(msg_id));
-    info.insert("sessionID".into(), json!(session_id));
+    info.insert("sessionID".into(), json!(ctx.session_id));
     info.insert(
         "time".into(),
         json!({ "created": msg_ms, "completed": msg_ms }),
     );
     info.insert("role".into(), json!("user"));
     info.insert("agent".into(), json!("build"));
-    let model = msg.model.as_deref().or(default_model).unwrap_or("unknown");
+    let model = msg.model.as_deref().or(ctx.default_model).unwrap_or("unknown");
     info.insert(
         "model".into(),
         json!({ "providerID": "anthropic", "modelID": model }),
     );
     let mut parts = Vec::new();
     for (j, block) in msg.content.iter().enumerate() {
-        if let Some(part) = user_part(block, session_id, msg_id, idx, j, msg_ms) {
+        if let Some(part) = user_part(block, ctx.session_id, msg_id, idx, j, msg_ms) {
             parts.push(part);
         }
     }
@@ -370,50 +376,47 @@ fn build_user_record(
 }
 
 fn build_assistant_record(
+    ctx: &ExportContext<'_>,
     msg: &Message,
-    session_id: &str,
     msg_id: &str,
-    idx: &mut usize,
-    msg_ms: i64,
-    cwd: &str,
     parent_id: &str,
-    default_model: Option<&str>,
-    messages: &[Message],
+    idx: &mut usize,
 ) -> MessageRecord {
+    let msg_ms = msg.timestamp.timestamp_millis();
     let mut info = Map::new();
     info.insert("id".into(), json!(msg_id));
-    info.insert("sessionID".into(), json!(session_id));
+    info.insert("sessionID".into(), json!(ctx.session_id));
     info.insert(
         "time".into(),
         json!({ "created": msg_ms, "completed": msg_ms }),
     );
     info.insert("role".into(), json!("assistant"));
-    let model = msg.model.as_deref().or(default_model).unwrap_or("unknown");
+    let model = msg.model.as_deref().or(ctx.default_model).unwrap_or("unknown");
     info.insert("modelID".into(), json!(model));
     info.insert("providerID".into(), json!("anthropic"));
     info.insert("mode".into(), json!("build"));
     info.insert("agent".into(), json!("build"));
     info.insert("parentID".into(), json!(parent_id));
-    info.insert("path".into(), json!({ "cwd": cwd, "root": cwd }));
+    info.insert("path".into(), json!({ "cwd": ctx.cwd, "root": ctx.cwd }));
     info.insert("finish".into(), json!(finish_str(msg.stop_reason.as_ref())));
     info.insert("cost".into(), json!(0.0));
     info.insert("tokens".into(), tokens_value(msg.usage.as_ref()));
 
     let mut parts = vec![json!({
-        "id": format!("prt_{}", det_hex(session_id, *idx, 0)),
-        "sessionID": session_id,
+        "id": format!("prt_{}", det_hex(ctx.session_id, *idx, 0)),
+        "sessionID": ctx.session_id,
         "messageID": msg_id,
         "type": "step-start",
     })];
     for (j, block) in msg.content.iter().enumerate() {
         let part = assistant_part(
             block,
-            session_id,
+            ctx.session_id,
             msg_id,
             *idx,
             j + 1,
             msg_ms,
-            messages,
+            ctx.messages,
             idx,
         );
         parts.push(part);
@@ -427,27 +430,23 @@ fn build_assistant_record(
 fn build_export(meta: &Meta, messages: &[Message]) -> Export {
     let session_id = format_session_id(&meta.id);
     let now = meta.timestamp.timestamp_millis();
-    let cwd = meta.cwd.clone().unwrap_or_default();
-    let default_model = meta.model.as_deref();
+    let ctx = ExportContext {
+        session_id: &session_id,
+        cwd: meta.cwd.as_deref().unwrap_or_default(),
+        default_model: meta.model.as_deref(),
+        messages,
+    };
 
     let mut out: Vec<MessageRecord> = Vec::new();
     let mut last_user_msg_id: Option<String> = None;
     let mut idx = 0usize;
     while idx < messages.len() {
         let msg = &messages[idx];
-        let msg_ms = msg.timestamp.timestamp_millis();
         let msg_id = format!("msg_{}", det_hex(&session_id, idx, 0));
 
         match msg.role {
             Role::User => {
-                let (record, emitted) = build_user_record(
-                    msg,
-                    &session_id,
-                    &msg_id,
-                    idx,
-                    msg_ms,
-                    default_model,
-                );
+                let (record, emitted) = build_user_record(&ctx, msg, &msg_id, idx);
                 if emitted {
                     last_user_msg_id = Some(msg_id.clone());
                     out.push(record);
@@ -455,17 +454,7 @@ fn build_export(meta: &Meta, messages: &[Message]) -> Export {
             }
             Role::Assistant => {
                 let parent_id = last_user_msg_id.as_deref().unwrap_or(&msg_id);
-                let record = build_assistant_record(
-                    msg,
-                    &session_id,
-                    &msg_id,
-                    &mut idx,
-                    msg_ms,
-                    &cwd,
-                    parent_id,
-                    default_model,
-                    messages,
-                );
+                let record = build_assistant_record(&ctx, msg, &msg_id, parent_id, &mut idx);
                 out.push(record);
             }
         }
