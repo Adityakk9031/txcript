@@ -287,7 +287,7 @@ impl Session {
             Locator::ChatGptRemote(reference) => {
                 format!("https://chatgpt.com/c/{}", reference.conversation_id)
             }
-            #[cfg(feature = "opencode")]
+            #[cfg(any(feature = "opencode", feature = "hermes"))]
             Locator::Id(id) => format!("{} db session {id}", self.harness),
         }
     }
@@ -1054,5 +1054,25 @@ mod resume_template_tests {
     #[test]
     fn empty_template_expands_to_nothing() {
         assert!(apply_resume_template("   ", "id").is_none());
+    }
+
+    #[cfg(any(feature = "opencode", feature = "hermes"))]
+    #[test]
+    fn id_locator_location_formats_cleanly() {
+        let session = super::Session {
+            harness: super::HarnessId::Hermes,
+            meta: super::Meta {
+                id: "sess-1".to_string(),
+                timestamp: chrono::Utc::now(),
+                cwd: None,
+                git_branch: None,
+                title: None,
+                cli_version: None,
+                model: None,
+            },
+            updated_at: None,
+            locator: super::Locator::Id("sess-1".to_string()),
+        };
+        assert_eq!(session.location(), "hermes db session sess-1");
     }
 }

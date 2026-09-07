@@ -1091,17 +1091,19 @@ fn cmd_crop(
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err("crop is interactive and requires a terminal".to_string());
     }
-    if let Some(known_target) = with.or(from) {
-        ensure_crop_target(known_target)?;
+    if let Some(target) = with {
+        ensure_crop_target(target)?;
     }
 
     if let Some(loaded) = load_direct_claude_chat(source, from) {
         let target = with.unwrap_or(HarnessId::ClaudeChat);
+        ensure_crop_target(target)?;
         let (common, request) = loaded?;
         return crop_loaded(&common, HarnessId::ClaudeChat, target, request.as_ref());
     }
     if let Some(loaded) = load_direct_chatgpt(source, from) {
         let target = with.unwrap_or(HarnessId::ChatGpt);
+        ensure_crop_target(target)?;
         let (common, request) = loaded?;
         return crop_loaded(&common, HarnessId::ChatGpt, target, request.as_ref());
     }
