@@ -354,7 +354,11 @@ fn build_user_record(
     );
     info.insert("role".into(), json!("user"));
     info.insert("agent".into(), json!("build"));
-    let model = msg.model.as_deref().or(ctx.default_model).unwrap_or("unknown");
+    let model = msg
+        .model
+        .as_deref()
+        .or(ctx.default_model)
+        .unwrap_or("unknown");
     info.insert(
         "model".into(),
         json!({ "providerID": "anthropic", "modelID": model }),
@@ -391,7 +395,11 @@ fn build_assistant_record(
         json!({ "created": msg_ms, "completed": msg_ms }),
     );
     info.insert("role".into(), json!("assistant"));
-    let model = msg.model.as_deref().or(ctx.default_model).unwrap_or("unknown");
+    let model = msg
+        .model
+        .as_deref()
+        .or(ctx.default_model)
+        .unwrap_or("unknown");
     info.insert("modelID".into(), json!(model));
     info.insert("providerID".into(), json!("anthropic"));
     info.insert("mode".into(), json!("build"));

@@ -340,6 +340,7 @@ fn parallel_tool_calls_and_results_preserve_valid_parent_ids() {
     let export = opencode::OpenCode::from_common(&transcript).unwrap();
 
     let emitted_user_ids: std::collections::HashSet<String> = export
+        .body
         .messages
         .iter()
         .filter(|m| m.info.get("role").and_then(|r| r.as_str()) == Some("user"))
@@ -357,7 +358,7 @@ fn parallel_tool_calls_and_results_preserve_valid_parent_ids() {
         "only the prompt user message is emitted"
     );
 
-    for m in &export.messages {
+    for m in &export.body.messages {
         if m.info.get("role").and_then(|r| r.as_str()) == Some("assistant") {
             let parent_id = m
                 .info
