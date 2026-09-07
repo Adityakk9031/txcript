@@ -252,8 +252,7 @@ fn codec_fixpoint_through_common_loses_nothing() {
     assert_eq!(common, back);
 }
 
-#[test]
-fn parallel_tool_calls_and_results_preserve_valid_parent_ids() {
+fn sample_parallel_common() -> Transcript<Common> {
     let meta = common::Meta {
         id: "ses_parallel".into(),
         timestamp: ts("2026-01-02T03:04:05.000Z"),
@@ -336,7 +335,12 @@ fn parallel_tool_calls_and_results_preserve_valid_parent_ids() {
             }),
         },
     ];
-    let transcript = Transcript::new(meta, body);
+    Transcript::new(meta, body)
+}
+
+#[test]
+fn parallel_tool_calls_and_results_preserve_valid_parent_ids() {
+    let transcript = sample_parallel_common();
     let export = opencode::OpenCode::from_common(&transcript).unwrap();
 
     let emitted_user_ids: std::collections::HashSet<String> = export
