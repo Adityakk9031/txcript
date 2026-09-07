@@ -343,10 +343,19 @@ fn parallel_tool_calls_and_results_preserve_valid_parent_ids() {
         .messages
         .iter()
         .filter(|m| m.info.get("role").and_then(|r| r.as_str()) == Some("user"))
-        .filter_map(|m| m.info.get("id").and_then(|id| id.as_str()).map(str::to_string))
+        .filter_map(|m| {
+            m.info
+                .get("id")
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+        })
         .collect();
 
-    assert_eq!(emitted_user_ids.len(), 1, "only the prompt user message is emitted");
+    assert_eq!(
+        emitted_user_ids.len(),
+        1,
+        "only the prompt user message is emitted"
+    );
 
     for m in &export.messages {
         if m.info.get("role").and_then(|r| r.as_str()) == Some("assistant") {
