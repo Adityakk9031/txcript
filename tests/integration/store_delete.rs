@@ -4,7 +4,7 @@
 
 use chrono::{TimeZone, Utc};
 use txcript::common::{Block, Message, Meta, Role};
-use txcript::harness::{campfire, claude_code, codex, grok, pi};
+use txcript::harness::{amp, antigravity, campfire, claude_code, codex, grok, pi};
 use txcript::{Codec, Common, Store, Transcript};
 
 #[cfg(feature = "opencode")]
@@ -91,6 +91,75 @@ fn pi_delete_roundtrip() {
 fn campfire_delete_roundtrip() {
     let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
     roundtrip(&campfire::CampfireStore::new(dir.path().to_path_buf()));
+}
+
+#[test]
+fn amp_delete_roundtrip() {
+    let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    roundtrip(&amp::AmpStore::new(dir.path().to_path_buf()));
+}
+
+#[test]
+fn antigravity_delete_roundtrip() {
+    let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    roundtrip(&antigravity::AntigravityStore::new(
+        dir.path().to_path_buf(),
+    ));
+}
+
+#[test]
+fn amp_delete_refuses_a_non_session_path() {
+    let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    let store = amp::AmpStore::new(dir.path().to_path_buf());
+    assert!(
+        store
+            .delete(&dir.path().join("somewhere/else.json"))
+            .is_err()
+    );
+}
+
+#[test]
+fn claude_code_delete_refuses_a_non_session_path() {
+    let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    let store = claude_code::ClaudeStore::new(dir.path().to_path_buf());
+    assert!(
+        store
+            .delete(&dir.path().join("somewhere/else.jsonl"))
+            .is_err()
+    );
+}
+
+#[test]
+fn codex_delete_refuses_a_non_session_path() {
+    let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    let store = codex::CodexStore::new(dir.path().to_path_buf());
+    assert!(
+        store
+            .delete(&dir.path().join("somewhere/else.jsonl"))
+            .is_err()
+    );
+}
+
+#[test]
+fn pi_delete_refuses_a_non_session_path() {
+    let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    let store = pi::PiStore::new(dir.path().to_path_buf());
+    assert!(
+        store
+            .delete(&dir.path().join("somewhere/else.jsonl"))
+            .is_err()
+    );
+}
+
+#[test]
+fn campfire_delete_refuses_a_non_session_path() {
+    let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+    let store = campfire::CampfireStore::new(dir.path().to_path_buf());
+    assert!(
+        store
+            .delete(&dir.path().join("somewhere/else.jsonl"))
+            .is_err()
+    );
 }
 
 #[test]

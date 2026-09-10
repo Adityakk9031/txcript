@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::harness::jsonl;
 use crate::harness::pi::{self, Record};
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
@@ -82,7 +82,27 @@ impl Store for CampfireStore {
         pi::write_session(&self.sessions_dir, &transcript.meta, &transcript.body)
     }
 
+    /// Removes a Campfire session log. Guarded on shape and containment:
+    /// the reference must be a `.jsonl` file resolving within `sessions_dir`,
+    /// so a foreign or stale reference never removes files outside the sessions root.
     fn delete(&self, reference: &PathBuf) -> Result<()> {
-        Ok(std::fs::remove_file(reference)?)
+        if reference.extension().is_none_or(|ext| ext != "jsonl") {
+            return Err(Error::Malformed {
+                harness: Campfire::NAME,
+                detail: format!("not a campfire session file: {}", reference.display()),
+            });
+        }
+        let canon = reference.canonicalize()?;
+        let sessions = self.sessions_dir.canonicalize()?;
+        if canon.strip_prefix(&sessions).is_err() || canon == sessions {
+            return Err(Error::Malformed {
+                harness: Campfire::NAME,
+                detail: format!(
+                    "refusing to delete outside the sessions root: {}",
+                    reference.display()
+                ),
+            });
+        }
+        Ok(std::fs::remove_file(canon)?)
     }
 }

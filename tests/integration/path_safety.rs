@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{TimeZone, Utc};
 use txcript::common::{Block, Message, Meta, Role};
-use txcript::harness::{amp, antigravity, campfire, claude_code, codex, cursor, grok, pi};
+use txcript::harness::{
+    amp, antigravity, campfire, claude_code, codex, cowork, cursor, fx, grok, pi,
+};
 use txcript::{Codec, Common, Store, Transcript};
 
 fn small_common(id: &str) -> Transcript<Common> {
@@ -85,6 +87,12 @@ fn hostile_ids_cannot_escape_any_file_backed_store() {
         &antigravity::AntigravityStore::new(root.to_path_buf()),
         root,
     );
+    assert_save_confined(&fx::FxStore::new(root.to_path_buf()), root);
+    let cowork_account = root
+        .join("11111111-1111-1111-1111-111111111111")
+        .join("22222222-2222-2222-2222-222222222222");
+    std::fs::create_dir_all(&cowork_account).unwrap();
+    assert_save_confined(&cowork::CoworkStore::new(root.to_path_buf()), root);
 }
 
 #[test]
@@ -177,6 +185,118 @@ fn antigravity_delete_refuses_paths_outside_the_conversations_root() {
         "a .db outside the conversations root must be refused"
     );
     assert!(foreign_db.is_file(), "the foreign file must survive");
+}
+
+#[test]
+fn amp_delete_refuses_paths_outside_the_threads_root() {
+    let threads = tempfile::tempdir().unwrap();
+    let victim = tempfile::tempdir().unwrap();
+    let foreign = victim.path().join("thread.json");
+    std::fs::write(&foreign, b"{}").unwrap();
+
+    let store = amp::AmpStore::new(threads.path().to_path_buf());
+    assert!(
+        store.delete(&foreign).is_err(),
+        "a thread.json outside the threads root must be refused"
+    );
+    assert!(victim.path().is_dir(), "the foreign directory must survive");
+    assert!(foreign.is_file(), "the foreign file must survive");
+}
+
+#[test]
+fn claude_delete_refuses_paths_outside_the_projects_root() {
+    let projects = tempfile::tempdir().unwrap();
+    let victim = tempfile::tempdir().unwrap();
+    let foreign = victim.path().join("session.jsonl");
+    std::fs::write(&foreign, b"{}").unwrap();
+
+    let store = claude_code::ClaudeStore::new(projects.path().to_path_buf());
+    assert!(
+        store.delete(&foreign).is_err(),
+        "a session.jsonl outside the projects root must be refused"
+    );
+    assert!(victim.path().is_dir(), "the foreign directory must survive");
+    assert!(foreign.is_file(), "the foreign file must survive");
+}
+
+#[test]
+fn codex_delete_refuses_paths_outside_the_sessions_root() {
+    let sessions = tempfile::tempdir().unwrap();
+    let victim = tempfile::tempdir().unwrap();
+    let foreign = victim.path().join("rollout.jsonl");
+    std::fs::write(&foreign, b"{}").unwrap();
+
+    let store = codex::CodexStore::new(sessions.path().to_path_buf());
+    assert!(
+        store.delete(&foreign).is_err(),
+        "a rollout.jsonl outside the sessions root must be refused"
+    );
+    assert!(victim.path().is_dir(), "the foreign directory must survive");
+    assert!(foreign.is_file(), "the foreign file must survive");
+}
+
+#[test]
+fn pi_delete_refuses_paths_outside_the_sessions_root() {
+    let sessions = tempfile::tempdir().unwrap();
+    let victim = tempfile::tempdir().unwrap();
+    let foreign = victim.path().join("session.jsonl");
+    std::fs::write(&foreign, b"{}").unwrap();
+
+    let store = pi::PiStore::new(sessions.path().to_path_buf());
+    assert!(
+        store.delete(&foreign).is_err(),
+        "a session.jsonl outside the sessions root must be refused"
+    );
+    assert!(victim.path().is_dir(), "the foreign directory must survive");
+    assert!(foreign.is_file(), "the foreign file must survive");
+}
+
+#[test]
+fn campfire_delete_refuses_paths_outside_the_sessions_root() {
+    let sessions = tempfile::tempdir().unwrap();
+    let victim = tempfile::tempdir().unwrap();
+    let foreign = victim.path().join("session.jsonl");
+    std::fs::write(&foreign, b"{}").unwrap();
+
+    let store = campfire::CampfireStore::new(sessions.path().to_path_buf());
+    assert!(
+        store.delete(&foreign).is_err(),
+        "a session.jsonl outside the sessions root must be refused"
+    );
+    assert!(victim.path().is_dir(), "the foreign directory must survive");
+    assert!(foreign.is_file(), "the foreign file must survive");
+}
+
+#[test]
+fn fx_delete_refuses_paths_outside_the_sessions_root() {
+    let sessions = tempfile::tempdir().unwrap();
+    let victim = tempfile::tempdir().unwrap();
+    let events = victim.path().join("events.jsonl");
+    std::fs::write(&events, b"").unwrap();
+
+    let store = fx::FxStore::new(sessions.path().to_path_buf());
+    assert!(
+        store.delete(&victim.path().to_path_buf()).is_err(),
+        "an fx session outside the sessions root must be refused"
+    );
+    assert!(victim.path().is_dir(), "the foreign directory must survive");
+    assert!(events.is_file(), "the foreign file must survive");
+}
+
+#[test]
+fn cowork_delete_refuses_paths_outside_the_sessions_root() {
+    let root = tempfile::tempdir().unwrap();
+    let victim = tempfile::tempdir().unwrap();
+    let foreign = victim.path().join("local_session.json");
+    std::fs::write(&foreign, b"{}").unwrap();
+
+    let store = cowork::CoworkStore::new(root.path().to_path_buf());
+    assert!(
+        store.delete(&foreign).is_err(),
+        "a cowork record outside the root must be refused"
+    );
+    assert!(victim.path().is_dir(), "the foreign directory must survive");
+    assert!(foreign.is_file(), "the foreign file must survive");
 }
 
 #[cfg(unix)]

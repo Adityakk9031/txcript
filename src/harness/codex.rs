@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::common::{Block, ImageSource, Message, Meta, Role, Tool, ToolOutput, Usage};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::harness::jsonl;
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
 
@@ -767,8 +767,28 @@ impl Store for CodexStore {
         })
     }
 
+    /// Removes a Codex rollout log. Guarded on shape and containment:
+    /// the reference must be a `.jsonl` file resolving within `sessions_dir`,
+    /// so a foreign or stale reference never removes files outside the sessions root.
     fn delete(&self, reference: &PathBuf) -> Result<()> {
-        Ok(fs::remove_file(reference)?)
+        if reference.extension().is_none_or(|ext| ext != "jsonl") {
+            return Err(Error::Malformed {
+                harness: Codex::NAME,
+                detail: format!("not a codex session file: {}", reference.display()),
+            });
+        }
+        let canon = reference.canonicalize()?;
+        let sessions = self.sessions_dir.canonicalize()?;
+        if canon.strip_prefix(&sessions).is_err() || canon == sessions {
+            return Err(Error::Malformed {
+                harness: Codex::NAME,
+                detail: format!(
+                    "refusing to delete outside the sessions root: {}",
+                    reference.display()
+                ),
+            });
+        }
+        Ok(fs::remove_file(canon)?)
     }
 
     fn fingerprints(&self, refs: &[PathBuf]) -> Result<HashMap<String, String>> {
