@@ -23,7 +23,7 @@ use chrono::{DateTime, Utc};
 
 use crate::common::{ArtifactSource, Block, Meta};
 use crate::harness::{
-    amp, antigravity, campfire, claude_code, codex, cowork, cursor, fx, grok, pi,
+    amp, antigravity, campfire, claude_code, codex, cowork, cursor, fx, grok, grok_bot, pi,
 };
 
 #[cfg(feature = "chatgpt")]
@@ -72,7 +72,10 @@ pub fn discover() -> Vec<Session> {
 
 /// [`discover`], reporting progress: `on_store(harness, sessions_so_far)` is
 /// called before each store is scanned.
+///
+/// One dispatch arm per harness; length grows with the harness count.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session> {
     fn scan<S>(harness: HarnessId, store: Option<S>, out: &mut Vec<Session>)
     where
@@ -118,6 +121,12 @@ pub fn discover_with(mut on_store: impl FnMut(HarnessId, usize)) -> Vec<Session>
     );
     on_store(HarnessId::Grok, out.len());
     scan(HarnessId::Grok, grok::GrokStore::default_root(), &mut out);
+    on_store(HarnessId::GrokBot, out.len());
+    scan(
+        HarnessId::GrokBot,
+        grok_bot::GrokBotStore::default_root(),
+        &mut out,
+    );
     on_store(HarnessId::Fx, out.len());
     scan(HarnessId::Fx, fx::FxStore::default_root(), &mut out);
     on_store(HarnessId::Amp, out.len());
@@ -326,6 +335,7 @@ impl Session {
             }
             (HarnessId::Cursor, Locator::Path(p)) => go(cursor::CursorStore::default_root(), p),
             (HarnessId::Grok, Locator::Path(p)) => go(grok::GrokStore::default_root(), p),
+            (HarnessId::GrokBot, Locator::Path(p)) => go(grok_bot::GrokBotStore::default_root(), p),
             (HarnessId::Fx, Locator::Path(p)) => go(fx::FxStore::default_root(), p),
             (HarnessId::Amp, Locator::Path(p)) => go(amp::AmpStore::default_root(), p),
             (HarnessId::Antigravity, Locator::Path(p)) => {
@@ -380,6 +390,7 @@ impl Session {
             }
             (HarnessId::Cursor, Locator::Path(p)) => go(cursor::CursorStore::default_root(), p),
             (HarnessId::Grok, Locator::Path(p)) => go(grok::GrokStore::default_root(), p),
+            (HarnessId::GrokBot, Locator::Path(p)) => go(grok_bot::GrokBotStore::default_root(), p),
             (HarnessId::Fx, Locator::Path(p)) => go(fx::FxStore::default_root(), p),
             (HarnessId::Amp, Locator::Path(p)) => go(amp::AmpStore::default_root(), p),
             (HarnessId::Antigravity, Locator::Path(p)) => {
@@ -448,6 +459,7 @@ pub fn fingerprints(sessions: &[Session]) -> Vec<String> {
             HarnessId::Campfire => group.files(campfire::CampfireStore::default_root()),
             HarnessId::Cursor => group.files(cursor::CursorStore::default_root()),
             HarnessId::Grok => group.files(grok::GrokStore::default_root()),
+            HarnessId::GrokBot => group.files(grok_bot::GrokBotStore::default_root()),
             HarnessId::Fx => group.files(fx::FxStore::default_root()),
             HarnessId::Amp => group.files(amp::AmpStore::default_root()),
             HarnessId::Antigravity => group.files(antigravity::AntigravityStore::default_root()),
@@ -622,6 +634,16 @@ pub struct Written {
     pub location: String,
 }
 
+/// Optional knobs for [`write_with`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WriteOpts<'a> {
+    /// Override the harness's default on-disk root (file-backed stores).
+    pub root: Option<&'a Path>,
+    /// Harness-specific mint / import metadata (JSON object). Unknown keys are
+    /// ignored by harnesses that do not consume them yet.
+    pub metadata: Option<&'a serde_json::Value>,
+}
+
 /// Persist a canonical transcript in `target`'s native, resumable format.
 /// `root` overrides the harness's default on-disk root (file-backed stores
 /// only; `OpenCode` always goes through `opencode import` into the live
@@ -630,13 +652,32 @@ pub struct Written {
 ///
 /// # Errors
 /// When conversion to the target fails or its store rejects the write.
-// One dispatch arm per harness; length grows with the harness count, not
-// with complexity.
-#[allow(clippy::too_many_lines)]
 pub fn write(
     target: HarnessId,
     common: &Transcript<Common>,
     root: Option<&Path>,
+) -> Result<Written> {
+    write_with(
+        target,
+        common,
+        WriteOpts {
+            root,
+            metadata: None,
+        },
+    )
+}
+
+/// [`write`] with optional harness-specific [`WriteOpts::metadata`].
+///
+/// # Errors
+/// When conversion to the target fails or its store rejects the write.
+// One dispatch arm per harness; length grows with the harness count, not
+// with complexity.
+#[allow(clippy::too_many_lines)]
+pub fn write_with(
+    target: HarnessId,
+    common: &Transcript<Common>,
+    opts: WriteOpts<'_>,
 ) -> Result<Written> {
     fn go<S>(
         store: Option<S>,
@@ -662,6 +703,7 @@ pub fn write(
         })
     }
 
+    let root = opts.root;
     match target {
         HarnessId::ClaudeCode => write_claude_code(common, root),
         // Live web sources are server-authoritative and have no import. Their
@@ -712,6 +754,27 @@ pub fn write(
             common,
             |s| s.sessions_dir,
         ),
+        // Live continue-into mints a box-harness agent via the local gateway
+        // and seeds `store.db` transcript_entries (plus agent-transcripts
+        // JSONL). A root override writes JSONL only — useful for tests and
+        // offline conversion, but the UI will not show that history.
+        HarnessId::GrokBot => {
+            if let Some(dir) = root {
+                let store = grok_bot::GrokBotStore::new(dir);
+                let native = grok_bot::GrokBot::from_common(common)?;
+                let saved = store.save(&native)?;
+                Ok(Written {
+                    id: saved.id,
+                    location: saved.reference.display().to_string(),
+                })
+            } else {
+                let saved = grok_bot::mint_with_history(common, opts.metadata)?;
+                Ok(Written {
+                    id: saved.id,
+                    location: saved.reference.display().to_string(),
+                })
+            }
+        }
         HarnessId::Fx => go(
             fx::FxStore::default_root(),
             fx::FxStore::new,
@@ -951,6 +1014,9 @@ pub fn resume_command(harness: HarnessId, id: &str) -> (String, Vec<String>) {
             // the session is in the Agents sidebar.
             HarnessId::CursorDesktop => ("cursor".into(), Vec::new()),
             HarnessId::Grok => ("grok".into(), vec!["--resume".into(), id]),
+            // No CLI resume: continue never launches for grok_bot (mint /
+            // openAgent already surfaced the agent in the product UI).
+            HarnessId::GrokBot => ("txcript".into(), Vec::new()),
             HarnessId::Fx => ("fx".into(), vec!["--resume".into(), id]),
             HarnessId::Hermes => ("hermes".into(), vec!["--resume".into(), id]),
             HarnessId::Amp => ("amp".into(), vec!["threads".into(), "continue".into(), id]),
