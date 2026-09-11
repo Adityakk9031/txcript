@@ -9,6 +9,12 @@ Each release is published to [crates.io](https://crates.io/crates/txcript),
 [npm](https://www.npmjs.com/package/txcript), and
 [GitHub Releases](https://github.com/skillsynchq/txcript/releases).
 
+## [0.14.1](https://github.com/skillsynchq/txcript/compare/v0.14.0...v0.14.1) - 2026-09-11
+
+### Fixed
+
+- Discover all agents and title from profile name ([#40](https://github.com/skillsynchq/txcript/pull/40))
+
 ## [0.14.0](https://github.com/skillsynchq/txcript/compare/v0.13.0...v0.14.0) - 2026-09-11
 
 ### Added
