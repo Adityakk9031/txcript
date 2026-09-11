@@ -910,13 +910,17 @@ fn extract(meta: &Meta, messages: &[Message]) -> Vec<Line> {
                 // Images carry no searchable text.
                 Block::Image { .. } => {}
                 Block::Artifact { artifact } => {
-                    push(m, b, Origin::Assistant, &artifact.name);
+                    let origin = match message.role {
+                        Role::User => Origin::User,
+                        Role::Assistant => Origin::Assistant,
+                    };
+                    push(m, b, origin, &artifact.name);
                     match &artifact.source {
                         crate::common::ArtifactSource::Text { text, .. } => {
-                            push(m, b, Origin::Assistant, text);
+                            push(m, b, origin, text);
                         }
                         crate::common::ArtifactSource::Path { path, .. } => {
-                            push(m, b, Origin::Assistant, path);
+                            push(m, b, origin, path);
                         }
                         crate::common::ArtifactSource::Base64 { .. } => {}
                     }

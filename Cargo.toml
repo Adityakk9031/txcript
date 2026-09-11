@@ -32,13 +32,14 @@ overflow-checks = true
 
 [package]
 name = "txcript"
-version = "0.12.1"
+version = "0.13.0"
 edition = "2024"
 # Policy: track the latest stable (kept in lockstep with the CI msrv job),
 # not a measured feature floor — bump both together on toolchain updates.
 rust-version = "1.96"
 description = "Convert coding-agent session transcripts between harness formats."
 license = "Apache-2.0"
+homepage = "https://github.com/skillsynchq/txcript"
 repository = "https://github.com/skillsynchq/txcript"
 readme = "README.md"
 keywords = ["transcript", "claude", "codex", "agent", "wasm"]
