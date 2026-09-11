@@ -32,6 +32,8 @@
   &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://github.com/xai-org/grok-build"><img src="https://github.com/xai-org.png?size=160" alt="Grok CLI" height="44" width="44"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://x.ai/bot"><img src="docs/assets/grok-bot-icon.png" alt="Grok Bot" height="44" width="44"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://ampcode.com"><img src="https://ampcode.com/app-icon.png?v=3" alt="Amp" height="44" width="44"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://antigravity.google"><img src="https://github.com/google-antigravity.png?size=160" alt="Antigravity" height="44" width="44"></a>
