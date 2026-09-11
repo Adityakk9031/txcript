@@ -9,6 +9,17 @@ Each release is published to [crates.io](https://crates.io/crates/txcript),
 [npm](https://www.npmjs.com/package/txcript), and
 [GitHub Releases](https://github.com/skillsynchq/txcript/releases).
 
+## [0.14.0](https://github.com/skillsynchq/txcript/compare/v0.13.0...v0.14.0) - 2026-09-11
+
+### Added
+
+- Add Grok Bot transcript harness ([#39](https://github.com/skillsynchq/txcript/pull/39))
+
+### Fixed
+
+- Map old_string/new_string to camelCase in denormalize_cursor_args ([#23](https://github.com/skillsynchq/txcript/pull/23))
+- Preserve custom and unknown tool casing across OpenCode and Pi ([#31](https://github.com/skillsynchq/txcript/pull/31))
+
 ## [0.13.0](https://github.com/skillsynchq/txcript/compare/v0.12.1...v0.13.0) - 2026-09-04
 
 ### Added
