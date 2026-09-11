@@ -9,6 +9,13 @@ Each release is published to [crates.io](https://crates.io/crates/txcript),
 [npm](https://www.npmjs.com/package/txcript), and
 [GitHub Releases](https://github.com/skillsynchq/txcript/releases).
 
+## [0.14.2](https://github.com/skillsynchq/txcript/compare/v0.14.1...v0.14.2) - 2026-09-11
+
+### Fixed
+
+- Unique transcript entry ids across consecutive assistants ([#41](https://github.com/skillsynchq/txcript/pull/41))
+- Roll back failed mints with deleteAgent ([#42](https://github.com/skillsynchq/txcript/pull/42))
+
 ## [0.14.1](https://github.com/skillsynchq/txcript/compare/v0.14.0...v0.14.1) - 2026-09-11
 
 ### Fixed
