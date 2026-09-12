@@ -153,7 +153,7 @@ pub enum SessionCommand {
         /// `#range` of 1-based inclusive message numbers (`abc#5-12`, `#7`,
         /// `#5-`, `#-10`)
         // Other: without a hint, generated completions fall back to filenames.
-        #[arg(value_hint = clap::ValueHint::Other)]
+        #[arg(value_hint = clap::ValueHint::Other, allow_hyphen_values = true)]
         id: String,
         /// Continue in this harness instead of the session's own
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
@@ -180,9 +180,10 @@ pub enum SessionCommand {
     /// The source is never modified. By default the cropped copy is written
     /// to the source harness; --with converts it to another harness instead.
     Crop {
-        /// Session id (any unambiguous prefix) or exact title, optionally with
-        /// an initial message range (`abc#5-12`, `abc#7`, `abc#5-`, `abc#-10`)
-        #[arg(value_hint = clap::ValueHint::Other)]
+        /// Session id (any unambiguous prefix) or exact title; or a Simple
+        /// document file. Optionally with an initial message range (`abc#5-12`,
+        /// `abc#7`, `abc#5-`, `abc#-10`)
+        #[arg(value_hint = clap::ValueHint::Other, allow_hyphen_values = true)]
         source: String,
         /// Write the cropped copy in this harness instead of the source harness
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
@@ -202,11 +203,12 @@ pub enum SessionCommand {
     /// number messages so a printed ordinal can be fed straight back as a
     /// `#range`.
     View {
-        /// Session id (any unambiguous prefix) or its exact title, with an
-        /// optional `#range` of 1-based inclusive message numbers
-        /// (`abc#5-12`, `#7`, `#5-`, `#-10`)
+        /// Session id (any unambiguous prefix) or its exact title; or a
+        /// Simple document (a file path, `-` for stdin). Takes an optional
+        /// `#range` of 1-based inclusive message numbers (`abc#5-12`, `#7`,
+        /// `#5-`, `#-10`)
         // Other: without a hint, generated completions fall back to filenames.
-        #[arg(value_hint = clap::ValueHint::Other)]
+        #[arg(value_hint = clap::ValueHint::Other, allow_hyphen_values = true)]
         source: String,
         /// Only look for the session in this harness
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
@@ -222,10 +224,11 @@ pub enum SessionCommand {
     /// Move it to another machine and `continue <file> --with <harness>`
     /// picks the session up there; a `#range` exports just those messages.
     Export {
-        /// Session id (any unambiguous prefix) or its exact title, with an
-        /// optional `#range` of 1-based inclusive message numbers
-        /// (`abc#5-12`, `#7`, `#5-`, `#-10`)
-        #[arg(value_hint = clap::ValueHint::Other)]
+        /// Session id (any unambiguous prefix) or its exact title; or a
+        /// Simple document (a file path, `-` for stdin). Takes an optional
+        /// `#range` of 1-based inclusive message numbers (`abc#5-12`, `#7`,
+        /// `#5-`, `#-10`)
+        #[arg(value_hint = clap::ValueHint::Other, allow_hyphen_values = true)]
         source: String,
         /// Only look for the session in this harness
         #[arg(long, value_name = "HARNESS", value_parser = HarnessParser)]
@@ -934,6 +937,37 @@ mod identity_tests {
         assert!(matches!(
             cli.command,
             crate::Command::Session(crate::SessionCommand::Continue { ref id, .. }) if id == "session-123"
+        ));
+    }
+
+    #[test]
+    fn hyphen_prefixed_source_arguments_parse_across_commands() {
+        use clap::Parser;
+
+        let cli =
+            crate::Cli::try_parse_from(["txcript", "continue", "-#1", "--with", "codex"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            crate::Command::Session(crate::SessionCommand::Continue { ref id, .. }) if id == "-#1"
+        ));
+
+        let cli = crate::Cli::try_parse_from(["txcript", "view", "-#1"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            crate::Command::Session(crate::SessionCommand::View { ref source, .. }) if source == "-#1"
+        ));
+
+        let cli = crate::Cli::try_parse_from(["txcript", "export", "-#1-5"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            crate::Command::Session(crate::SessionCommand::Export { ref source, .. }) if source == "-#1-5"
+        ));
+
+        let cli = crate::Cli::try_parse_from(["txcript", "crop", "-#1", "--with", "claude_code"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            crate::Command::Session(crate::SessionCommand::Crop { ref source, .. }) if source == "-#1"
         ));
     }
 }
