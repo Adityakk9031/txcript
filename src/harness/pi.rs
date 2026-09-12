@@ -559,7 +559,7 @@ pub(crate) fn write_session(
     let id = meta.id.clone();
     // Callers are the pi and campfire stores; either way the id is the
     // transcript's own.
-    super::checked_id_component("pi", &id)?;
+    super::checked_id_component(Pi::NAME, &id)?;
     let cwd = meta.cwd.as_deref().unwrap_or_default();
     let dir = sessions_dir.join(encode_cwd(cwd));
     fs::create_dir_all(&dir)?;

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use chrono::{TimeZone, Utc};
 use txcript::common::{Block, Message, Meta, Role};
 use txcript::harness::{
-    amp, antigravity, campfire, claude_code, codex, cursor, grok, grok_bot, pi,
+    amp, antigravity, campfire, claude_code, codex, cowork, cursor, fx, grok, grok_bot, pi,
 };
 use txcript::{Codec, Common, Store, Transcript};
 
@@ -88,6 +88,8 @@ fn hostile_ids_cannot_escape_any_file_backed_store() {
         &antigravity::AntigravityStore::new(root.to_path_buf()),
         root,
     );
+    assert_save_confined(&fx::FxStore::new(root.to_path_buf()), root);
+    assert_save_confined(&cowork::CoworkStore::new(root.to_path_buf()), root);
 }
 
 #[test]
@@ -98,6 +100,112 @@ fn traversal_id_is_rejected_before_anything_is_written() {
     let store = claude_code::ClaudeStore::new(dir.path().to_path_buf());
     let native = claude_code::ClaudeCode::from_common(&small_common("../../pwned")).unwrap();
     assert!(store.save(&native).is_err(), "traversal id must not save");
+}
+
+#[test]
+fn windows_reserved_names_and_invalid_components_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let hostile_ids = &[
+        "CON",
+        "con",
+        "aux",
+        "NUL",
+        "COM1",
+        "com2.json",
+        "LPT3",
+        "lpt4.txt",
+        "trailing-dot.",
+        "trailing-space ",
+        "wild*card",
+        "question?mark",
+        "pipe|line",
+        "less<than",
+        "greater>than",
+        "quote\"name",
+    ];
+
+    let claude = claude_code::ClaudeStore::new(root.to_path_buf());
+    let codex = codex::CodexStore::new(root.to_path_buf());
+    let pi = pi::PiStore::new(root.to_path_buf());
+    let campfire = campfire::CampfireStore::new(root.to_path_buf());
+    let cursor = cursor::CursorStore::new(root.to_path_buf());
+    let grok = grok::GrokStore::new(root.to_path_buf());
+    let grok_bot = grok_bot::GrokBotStore::new(root.to_path_buf());
+    let amp = amp::AmpStore::new(root.to_path_buf());
+    let antigravity = antigravity::AntigravityStore::new(root.to_path_buf());
+
+    for &evil in hostile_ids {
+        let common = small_common(evil);
+
+        if let Ok(native) = claude_code::ClaudeCode::from_common(&common) {
+            assert!(claude.save(&native).is_err(), "Claude must refuse `{evil}`");
+        }
+        if let Ok(native) = codex::Codex::from_common(&common) {
+            assert!(codex.save(&native).is_err(), "Codex must refuse `{evil}`");
+        }
+        if let Ok(native) = pi::Pi::from_common(&common) {
+            assert!(pi.save(&native).is_err(), "Pi must refuse `{evil}`");
+        }
+        if let Ok(native) = campfire::Campfire::from_common(&common) {
+            assert!(
+                campfire.save(&native).is_err(),
+                "Campfire must refuse `{evil}`"
+            );
+        }
+        if let Ok(native) = cursor::Cursor::from_common(&common) {
+            assert!(cursor.save(&native).is_err(), "Cursor must refuse `{evil}`");
+        }
+        if let Ok(native) = grok::Grok::from_common(&common) {
+            assert!(grok.save(&native).is_err(), "Grok must refuse `{evil}`");
+        }
+        if let Ok(native) = grok_bot::GrokBot::from_common(&common) {
+            assert!(
+                grok_bot.save(&native).is_err(),
+                "GrokBot must refuse `{evil}`"
+            );
+        }
+        if let Ok(native) = amp::Amp::from_common(&common) {
+            assert!(amp.save(&native).is_err(), "Amp must refuse `{evil}`");
+        }
+        if let Ok(native) = antigravity::Antigravity::from_common(&common) {
+            assert!(
+                antigravity.save(&native).is_err(),
+                "Antigravity must refuse `{evil}`"
+            );
+        }
+        if let Ok(native) = fx::Fx::from_common(&common) {
+            assert!(
+                fx::FxStore::new(root.to_path_buf()).save(&native).is_err(),
+                "Fx must refuse `{evil}`"
+            );
+        }
+        if let Ok(native) = cowork::Cowork::from_common(&common) {
+            assert!(
+                cowork::CoworkStore::new(root.to_path_buf())
+                    .save(&native)
+                    .is_err(),
+                "Cowork must refuse `{evil}`"
+            );
+        }
+    }
+}
+
+#[test]
+fn local_write_rejects_reserved_and_invalid_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for evil in &["CON", "aux.jsonl", "nul", "COM1", "foo*", "bar?"] {
+        let common = small_common(evil);
+        let opts = txcript::local::WriteOpts {
+            root: Some(root),
+            metadata: None,
+        };
+        assert!(
+            txcript::local::write_with(txcript::HarnessId::Codex, &common, opts).is_err(),
+            "local::write_with must refuse `{evil}`"
+        );
+    }
 }
 
 #[test]

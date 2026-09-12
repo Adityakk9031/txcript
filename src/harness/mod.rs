@@ -76,12 +76,37 @@ where
 /// absolute id replaces it entirely. Only a single, plain component is
 /// accepted — no separators, no `.`/`..`, no drive-style `:`, no control
 /// characters, not empty.
+/// Checks whether `name` matches a Windows reserved device name (CON, PRN, AUX,
+/// NUL, COM1..COM9, LPT1..LPT9), with or without arbitrary file extensions.
+fn is_reserved_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    let stem = stem.trim_end_matches([' ', '.']);
+    if stem.eq_ignore_ascii_case("CON")
+        || stem.eq_ignore_ascii_case("PRN")
+        || stem.eq_ignore_ascii_case("AUX")
+        || stem.eq_ignore_ascii_case("NUL")
+    {
+        return true;
+    }
+    if stem.len() == 4 {
+        let (prefix, digit) = stem.split_at(3);
+        if (prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT"))
+            && digit.chars().all(|c| c.is_ascii_digit())
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) fn checked_id_component(harness: &'static str, id: &str) -> crate::Result<()> {
     let ok = !id.is_empty()
         && id != "."
         && id != ".."
-        && !id.contains(['/', '\\', ':'])
-        && !id.chars().any(char::is_control);
+        && !id.ends_with(['.', ' '])
+        && !id.contains(['/', '\\', ':', '<', '>', '"', '|', '?', '*'])
+        && !id.chars().any(char::is_control)
+        && !is_reserved_device_name(id);
     if ok {
         Ok(())
     } else {

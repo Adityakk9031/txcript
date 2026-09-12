@@ -1058,6 +1058,9 @@ impl Store for AmpStore {
     }
 
     fn save(&self, transcript: &Transcript<Amp>) -> Result<Saved<PathBuf>> {
+        if !transcript.meta.id.is_empty() {
+            super::checked_id_component(Amp::NAME, &transcript.meta.id)?;
+        }
         // The document's own id wins: it is the one `from_common` shaped to
         // Amp's `T-…` rules, and the one the CLI resumes by. A foreign
         // `meta.id` (a Claude uuid) is not a valid Amp thread id.

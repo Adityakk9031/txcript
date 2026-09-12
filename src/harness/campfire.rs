@@ -79,6 +79,7 @@ impl Store for CampfireStore {
     }
 
     fn save(&self, transcript: &Transcript<Campfire>) -> Result<Saved<PathBuf>> {
+        super::checked_id_component(Campfire::NAME, &transcript.meta.id)?;
         pi::write_session(&self.sessions_dir, &transcript.meta, &transcript.body)
     }
 

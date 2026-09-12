@@ -704,6 +704,13 @@ pub fn write_with(
     }
 
     let root = opts.root;
+    if !common.meta.id.is_empty()
+        && target != HarnessId::ChatGpt
+        && target != HarnessId::ClaudeChat
+        && target != HarnessId::Simple
+    {
+        crate::harness::checked_id_component(target.as_str(), &common.meta.id)?;
+    }
     match target {
         HarnessId::ClaudeCode => write_claude_code(common, root),
         // Live web sources are server-authoritative and have no import. Their
