@@ -9,6 +9,12 @@ Each release is published to [crates.io](https://crates.io/crates/txcript),
 [npm](https://www.npmjs.com/package/txcript), and
 [GitHub Releases](https://github.com/skillsynchq/txcript/releases).
 
+## [0.14.4](https://github.com/skillsynchq/txcript/compare/v0.14.3...v0.14.4) - 2026-09-13
+
+### Fixed
+
+- Sanitize replayed tool names ([#49](https://github.com/skillsynchq/txcript/pull/49))
+
 ## [0.14.3](https://github.com/skillsynchq/txcript/compare/v0.14.2...v0.14.3) - 2026-09-12
 
 ### Fixed
