@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use txcript::common;
 use txcript::harness::{
     amp, antigravity, campfire, claude_code, codex, cowork, cursor, cursor_desktop, fx, grok,
-    hermes, opencode, pi, simple,
+    grok_bot, hermes, opencode, pi, simple,
 };
 use txcript::{Codec, Common, Transcript, convert};
 
@@ -252,7 +252,14 @@ fn assert_cycle(common: &Transcript<Common>, context: &str) {
         "{context}: grok"
     );
 
-    let fx = convert::<grok::Grok, fx::Fx>(&grok).unwrap();
+    let grok_bot = convert::<grok::Grok, grok_bot::GrokBot>(&grok).unwrap();
+    assert_eq!(
+        signature(&grok_bot::GrokBot::to_common(&grok_bot).unwrap()),
+        expected,
+        "{context}: grok_bot"
+    );
+
+    let fx = convert::<grok_bot::GrokBot, fx::Fx>(&grok_bot).unwrap();
     assert_eq!(
         signature(&fx::Fx::to_common(&fx).unwrap()),
         expected,
@@ -317,5 +324,25 @@ fn custom_tool_casing_survives_every_hop() {
         "myCustomTool",
     ] {
         assert_cycle(&sample_with_raw_tool(tool_name), tool_name);
+    }
+}
+
+#[test]
+fn claude_tools_become_openai_safe_when_moved_to_codex() {
+    for (source, expected) in [("mcp.server/tool", "mcp_server_tool"), ("", "tool")] {
+        let common = sample_with_raw_tool(source);
+        let claude = claude_code::ClaudeCode::from_common(&common).unwrap();
+        let codex = convert::<claude_code::ClaudeCode, codex::Codex>(&claude).unwrap();
+        let name = codex
+            .body
+            .iter()
+            .find(|line| {
+                line.payload.get("type").and_then(serde_json::Value::as_str)
+                    == Some("function_call")
+            })
+            .and_then(|line| line.payload.get("name"))
+            .and_then(serde_json::Value::as_str);
+
+        assert_eq!(name, Some(expected), "source name: {source:?}");
     }
 }
