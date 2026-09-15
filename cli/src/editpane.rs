@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// The editor to run: `$VISUAL`, else `$EDITOR`, else `vi`.
+/// The editor to run: `$VISUAL`, else `$EDITOR`, else `notepad` on Windows or `vi` on Unix.
 pub(crate) fn editor_command() -> String {
     ["VISUAL", "EDITOR"]
         .iter()
@@ -22,17 +22,24 @@ pub(crate) fn editor_command() -> String {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
-        .unwrap_or_else(|| "vi".to_string())
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                "notepad".to_string()
+            } else {
+                "vi".to_string()
+            }
+        })
 }
 
 /// The editor's name as the user knows it: the command's program, without
 /// its directory.
 pub(crate) fn editor_name(command: &str) -> String {
     let program = command.split_whitespace().next().unwrap_or(command);
-    Path::new(program)
+    let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    Path::new(base)
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or(program)
+        .unwrap_or(base)
         .to_string()
 }
 
@@ -63,9 +70,17 @@ pub(crate) fn opens_a_window(command: &str) -> bool {
         "mvim",
         "open",
         "xdg-open",
+        "notepad",
+        "notepad++",
+        "notepad2",
+        "textedit",
     ];
     let name = editor_name(command);
-    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    let name = name
+        .strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".cmd"))
+        .or_else(|| name.strip_suffix(".bat"))
+        .unwrap_or(&name);
     if matches!(name, "emacs" | "emacsclient") {
         // Emacs draws in the terminal only when asked to.
         return !command
@@ -79,7 +94,7 @@ pub(crate) fn opens_a_window(command: &str) -> bool {
 /// `command "<file>"` through the shell, so `$EDITOR` may carry arguments.
 fn shell_invocation(command: &str) -> (&'static str, Vec<String>) {
     if cfg!(windows) {
-        ("cmd", vec!["/C".into(), format!("{command} \"%1\"")])
+        ("cmd", vec!["/C".into(), command.to_string()])
     } else {
         (
             "sh",
@@ -486,9 +501,25 @@ mod tests {
         let (program, args) = shell_invocation("nvim -u NONE");
         if cfg!(windows) {
             assert_eq!(program, "cmd");
+            assert_eq!(args, vec!["/C", "nvim -u NONE"]);
         } else {
             assert_eq!(program, "sh");
             assert_eq!(args, vec!["-c", "nvim -u NONE \"$1\"", "sh"]);
         }
+    }
+
+    #[test]
+    fn opens_a_window_detects_gui_editors() {
+        assert!(opens_a_window("notepad"));
+        assert!(opens_a_window("notepad.exe"));
+        assert!(opens_a_window("notepad++"));
+        assert!(opens_a_window("notepad2.exe"));
+        assert!(opens_a_window("textedit"));
+        assert!(opens_a_window("code"));
+        assert!(opens_a_window("code.cmd"));
+        assert!(opens_a_window("C:\\bin\\code.cmd"));
+        assert!(!opens_a_window("vi"));
+        assert!(!opens_a_window("nano"));
+        assert!(!opens_a_window("emacs -nw"));
     }
 }
