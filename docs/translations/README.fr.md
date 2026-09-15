@@ -165,6 +165,7 @@ La conversion transfère l'historique de la conversation. La destination fournit
 - [API Rust](https://docs.rs/txcript) et [référence JavaScript](../usage.md#npm-package).
 - [Formats de transcription](../formats/README.md) : organisation du stockage, correspondances et limites, avec sources et notes de rétro-ingénierie.
 - [Développement](../usage.md#development) et [guide des tests](../../tests/README.md).
+- [Contribuer](../../CONTRIBUTING.md) · [Signaler une vulnérabilité](../../SECURITY.md).
 - [Historique des modifications](../../CHANGELOG.md) · [Signaler un problème](https://github.com/skillsynchq/txcript/issues).
 
 ## Licence

@@ -165,6 +165,7 @@ Simple 也能表示推理、工具调用、结果、图片和元数据。`txcrip
 - [Rust API](https://docs.rs/txcript) 和 [JavaScript 参考](../usage.md#npm-package)。
 - [会话记录格式](../formats/README.md)：存储布局、映射关系和限制，附有来源与逆向工程笔记。
 - [开发](../usage.md#development)和[测试指南](../../tests/README.md)。
+- [贡献指南](../../CONTRIBUTING.md) · [报告安全漏洞](../../SECURITY.md).
 - [更新日志](../../CHANGELOG.md) · [报告问题](https://github.com/skillsynchq/txcript/issues)。
 
 ## 许可证

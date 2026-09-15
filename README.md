@@ -157,6 +157,7 @@ Conversion carries conversation history. The destination supplies its own system
 - [Rust API](https://docs.rs/txcript) and [JavaScript reference](docs/usage.md#npm-package).
 - [Transcript formats](docs/formats/README.md): storage layouts, mappings, and limitations, with sources and reverse-engineering notes.
 - [Development](docs/usage.md#development) and [test guide](tests/README.md).
+- [Contributing](CONTRIBUTING.md) · [Report a security vulnerability](SECURITY.md).
 - [Changelog](CHANGELOG.md) · [Report an issue](https://github.com/skillsynchq/txcript/issues).
 
 ## License

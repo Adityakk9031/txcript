@@ -165,6 +165,7 @@ Simple は推論、ツール呼び出し、結果、画像、メタデータも�
 - [Rust API](https://docs.rs/txcript) と [JavaScript リファレンス](../usage.md#npm-package)。
 - [会話記録の形式](../formats/README.md)：保存構造、変換時の対応関係、制限事項、出典、リバースエンジニアリングのメモ。
 - [開発](../usage.md#development)と[テストガイド](../../tests/README.md)。
+- [貢献ガイド](../../CONTRIBUTING.md) · [脆弱性の報告](../../SECURITY.md).
 - [変更履歴](../../CHANGELOG.md) · [問題を報告](https://github.com/skillsynchq/txcript/issues)。
 
 ## ライセンス

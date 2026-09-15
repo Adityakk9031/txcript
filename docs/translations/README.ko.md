@@ -165,6 +165,7 @@ Simple은 추론, 도구 호출, 결과, 이미지, 메타데이터도 표현합
 - [Rust API](https://docs.rs/txcript)와 [JavaScript 참조](../usage.md#npm-package).
 - [대화 기록 형식](../formats/README.md): 저장 구조, 변환 대응 관계, 제한, 출처, 리버스 엔지니어링 기록.
 - [개발](../usage.md#development) 및 [테스트 가이드](../../tests/README.md).
+- [기여 안내](../../CONTRIBUTING.md) · [보안 취약점 신고](../../SECURITY.md).
 - [변경 기록](../../CHANGELOG.md) · [문제 보고](https://github.com/skillsynchq/txcript/issues).
 
 ## 라이선스

@@ -165,6 +165,7 @@ Die Konvertierung überträgt den Gesprächsverlauf. Das Ziel stellt seine eigen
 - [Rust-API](https://docs.rs/txcript) und [JavaScript-Referenz](../usage.md#npm-package).
 - [Transkriptformate](../formats/README.md): Speicheraufbau, Zuordnungen und Einschränkungen mit Quellen und Reverse-Engineering-Notizen.
 - [Entwicklung](../usage.md#development) und [Testleitfaden](../../tests/README.md).
+- [Mitwirken](../../CONTRIBUTING.md) · [Eine Sicherheitslücke melden](../../SECURITY.md).
 - [Änderungsprotokoll](../../CHANGELOG.md) · [Problem melden](https://github.com/skillsynchq/txcript/issues).
 
 ## Lizenz

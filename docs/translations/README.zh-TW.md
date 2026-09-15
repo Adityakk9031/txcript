@@ -165,6 +165,7 @@ Simple 也能表示推理、工具呼叫、結果、圖片和中繼資料。`txc
 - [Rust API](https://docs.rs/txcript) 和 [JavaScript 參考](../usage.md#npm-package)。
 - [對話紀錄格式](../formats/README.md)：儲存配置、對應關係和限制，附有來源與逆向工程筆記。
 - [開發](../usage.md#development)與[測試指南](../../tests/README.md)。
+- [貢獻指南](../../CONTRIBUTING.md) · [回報安全漏洞](../../SECURITY.md).
 - [變更紀錄](../../CHANGELOG.md) · [回報問題](https://github.com/skillsynchq/txcript/issues)。
 
 ## 授權條款

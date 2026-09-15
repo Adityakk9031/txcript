@@ -165,6 +165,7 @@ La conversione trasferisce la cronologia della conversazione. La destinazione fo
 - [API Rust](https://docs.rs/txcript) e [riferimento JavaScript](../usage.md#npm-package).
 - [Formati delle trascrizioni](../formats/README.md): struttura degli archivi, corrispondenze e limiti, con fonti e note di reverse engineering.
 - [Sviluppo](../usage.md#development) e [guida ai test](../../tests/README.md).
+- [Contribuire](../../CONTRIBUTING.md) · [Segnalare una vulnerabilità](../../SECURITY.md).
 - [Registro delle modifiche](../../CHANGELOG.md) · [Segnala un problema](https://github.com/skillsynchq/txcript/issues).
 
 ## Licenza

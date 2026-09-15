@@ -165,6 +165,7 @@ Simple मध्ये तर्कविचार, साधनांना क
 - [Rust API](https://docs.rs/txcript) आणि [JavaScript संदर्भ](../usage.md#npm-package).
 - [संवाद रेकॉर्डची स्वरूपे](../formats/README.md): साठवणीची रचना, रूपांतरातील जुळवणी आणि मर्यादा, स्रोत व रिव्हर्स इंजिनिअरिंगच्या नोंदींसह.
 - [विकास](../usage.md#development) आणि [चाचणी मार्गदर्शक](../../tests/README.md).
+- [योगदान मार्गदर्शक](../../CONTRIBUTING.md) · [सुरक्षा त्रुटी कळवा](../../SECURITY.md).
 - [बदलांचा इतिहास](../../CHANGELOG.md) · [समस्या नोंदवा](https://github.com/skillsynchq/txcript/issues).
 
 ## परवाना

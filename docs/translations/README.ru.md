@@ -165,6 +165,7 @@ Simple также представляет рассуждения, вызовы 
 - [Rust API](https://docs.rs/txcript) и [справочник JavaScript](../usage.md#npm-package).
 - [Форматы транскриптов](../formats/README.md): устройство хранилищ, сопоставления и ограничения со ссылками на источники и заметками об обратной разработке.
 - [Разработка](../usage.md#development) и [руководство по тестированию](../../tests/README.md).
+- [Участие в разработке](../../CONTRIBUTING.md) · [Сообщить об уязвимости](../../SECURITY.md).
 - [История изменений](../../CHANGELOG.md) · [Сообщить о проблеме](https://github.com/skillsynchq/txcript/issues).
 
 ## Лицензия
