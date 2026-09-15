@@ -9,6 +9,42 @@ Each release is published to [crates.io](https://crates.io/crates/txcript),
 [npm](https://www.npmjs.com/package/txcript), and
 [GitHub Releases](https://github.com/skillsynchq/txcript/releases).
 
+## [0.14.4](https://github.com/skillsynchq/txcript/compare/v0.14.3...v0.14.4) - 2026-09-13
+
+### Fixed
+
+- Sanitize replayed tool names ([#49](https://github.com/skillsynchq/txcript/pull/49))
+
+## [0.14.3](https://github.com/skillsynchq/txcript/compare/v0.14.2...v0.14.3) - 2026-09-12
+
+### Fixed
+
+- Export freeform tool inputs as objects ([#44](https://github.com/skillsynchq/txcript/pull/44))
+
+## [0.14.2](https://github.com/skillsynchq/txcript/compare/v0.14.1...v0.14.2) - 2026-09-11
+
+### Fixed
+
+- Unique transcript entry ids across consecutive assistants ([#41](https://github.com/skillsynchq/txcript/pull/41))
+- Roll back failed mints with deleteAgent ([#42](https://github.com/skillsynchq/txcript/pull/42))
+
+## [0.14.1](https://github.com/skillsynchq/txcript/compare/v0.14.0...v0.14.1) - 2026-09-11
+
+### Fixed
+
+- Discover all agents and title from profile name ([#40](https://github.com/skillsynchq/txcript/pull/40))
+
+## [0.14.0](https://github.com/skillsynchq/txcript/compare/v0.13.0...v0.14.0) - 2026-09-11
+
+### Added
+
+- Add Grok Bot transcript harness ([#39](https://github.com/skillsynchq/txcript/pull/39))
+
+### Fixed
+
+- Map old_string/new_string to camelCase in denormalize_cursor_args ([#23](https://github.com/skillsynchq/txcript/pull/23))
+- Preserve custom and unknown tool casing across OpenCode and Pi ([#31](https://github.com/skillsynchq/txcript/pull/31))
+
 ## [0.13.0](https://github.com/skillsynchq/txcript/compare/v0.12.1...v0.13.0) - 2026-09-04
 
 ### Added

@@ -19,7 +19,7 @@ use serde_json::json;
 use txcript::common::{Block, Message, Meta, Role, Tool, ToolOutput};
 use txcript::harness::{
     amp, antigravity, campfire, claude_code, codex, cowork, cursor, cursor_desktop, fx, grok,
-    hermes, opencode, pi, simple,
+    grok_bot, hermes, opencode, pi, simple,
 };
 use txcript::{Codec, Common, Transcript};
 
@@ -79,15 +79,22 @@ fn arb_tool() -> impl Strategy<Value = Tool> {
             description: None,
             run_in_background: false,
         }),
-        // A name no harness types, so it can't normalize into a typed tool.
-        // Title-case-shaped only: opencode lowercases unknown names on write
-        // and title-cases on read, so any other shape (`mcp__x`, `WebSearch`)
-        // does not round-trip through it today — a known codec bug this
-        // generator excludes rather than hides behind a looser assertion.
-        ("Custom_[a-z]{1,8}", arb_text()).prop_map(|(tool_name, note)| Tool::Raw {
-            tool_name,
-            input: json!({ "note": note }),
-        }),
+        // Names no harness types, with arbitrary casing: snake_case, camelCase,
+        // PascalCase, and MCP namespaces (`mcp__...`), all of which round-trip
+        // losslessly across every codec.
+        (
+            prop_oneof![
+                "Custom_[A-Za-z0-9_]{1,10}",
+                "custom_[a-z0-9_]{1,10}",
+                "mcp__[a-z]{1,6}__[a-z]{1,8}",
+                "rawTool[A-Za-z0-9]{1,8}",
+            ],
+            arb_text(),
+        )
+            .prop_map(|(tool_name, note)| Tool::Raw {
+                tool_name,
+                input: json!({ "note": note }),
+            }),
     ]
 }
 
@@ -265,6 +272,7 @@ proptest! {
         assert_fixpoint::<cursor::Cursor>("cursor", &common)?;
         assert_fixpoint::<cursor_desktop::CursorDesktop>("cursor_desktop", &common)?;
         assert_fixpoint::<grok::Grok>("grok", &common)?;
+        assert_fixpoint::<grok_bot::GrokBot>("grok_bot", &common)?;
         assert_fixpoint::<fx::Fx>("fx", &common)?;
         assert_fixpoint::<hermes::Hermes>("hermes", &common)?;
         assert_fixpoint::<amp::Amp>("amp", &common)?;
