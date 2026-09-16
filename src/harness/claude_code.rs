@@ -495,8 +495,28 @@ impl Store for ClaudeStore {
         })
     }
 
+    /// Removes a Claude Code session log. Guarded on shape and containment:
+    /// the reference must be a `.jsonl` file resolving within `root`, so a
+    /// foreign or stale reference never removes files outside the configured projects.
     fn delete(&self, reference: &PathBuf) -> Result<()> {
-        Ok(fs::remove_file(reference)?)
+        if reference.extension().is_none_or(|ext| ext != "jsonl") {
+            return Err(Error::Malformed {
+                harness: ClaudeCode::NAME,
+                detail: format!("not a claude code session file: {}", reference.display()),
+            });
+        }
+        let canon = reference.canonicalize()?;
+        let root = self.root.canonicalize()?;
+        if canon.strip_prefix(&root).is_err() || canon == root {
+            return Err(Error::Malformed {
+                harness: ClaudeCode::NAME,
+                detail: format!(
+                    "refusing to delete outside the projects root: {}",
+                    reference.display()
+                ),
+            });
+        }
+        Ok(fs::remove_file(canon)?)
     }
 
     fn fingerprints(&self, refs: &[PathBuf]) -> Result<HashMap<String, String>> {
@@ -1013,6 +1033,15 @@ fn serialize_block(block: &Block) -> Value {
         }
         Block::ToolUse { id, tool } => {
             let (name, input) = tool.to_canonical();
+            // Codex freeform calls and other Raw tools can carry any JSON
+            // value; Anthropic requires an object even for historical calls.
+            // Keep the payload inside an object instead of losing it or
+            // emitting a session that fails with "Input should be an object".
+            let input = if input.is_object() {
+                input
+            } else {
+                serde_json::json!({"input": input})
+            };
             serde_json::json!({"type": "tool_use", "id": id, "name": name, "input": input})
         }
         Block::ToolResult {

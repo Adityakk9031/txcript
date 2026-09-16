@@ -1081,8 +1081,28 @@ impl Store for AmpStore {
         })
     }
 
+    /// Removes an Amp thread document. Guarded on shape and containment: the
+    /// reference must be a `.json` file resolving directly under `threads_dir`,
+    /// so a foreign or stale reference never removes an unrelated file.
     fn delete(&self, reference: &PathBuf) -> Result<()> {
-        Ok(fs::remove_file(reference)?)
+        if reference.extension().is_none_or(|ext| ext != "json") {
+            return Err(Error::Malformed {
+                harness: Amp::NAME,
+                detail: format!("not an amp thread file: {}", reference.display()),
+            });
+        }
+        let canon = reference.canonicalize()?;
+        let threads_dir = self.threads_dir.canonicalize()?;
+        if canon.parent() != Some(threads_dir.as_path()) {
+            return Err(Error::Malformed {
+                harness: Amp::NAME,
+                detail: format!(
+                    "refusing to delete outside the threads root: {}",
+                    reference.display()
+                ),
+            });
+        }
+        Ok(fs::remove_file(canon)?)
     }
 
     fn fingerprints(&self, refs: &[PathBuf]) -> Result<HashMap<String, String>> {
