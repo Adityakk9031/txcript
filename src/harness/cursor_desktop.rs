@@ -477,27 +477,52 @@ fn normalize_tool(name: &str, params: Value) -> Tool {
             Tool::from_canonical("Read", Value::Object(input))
         }
         "write_file_v2" => {
-            let mut input = Map::new();
-            if let Some(path) = params.get("targetFile") {
-                input.insert("file_path".into(), path.clone());
+            let can_map = if let Value::Object(map) = &params {
+                let allowed = ["targetFile", "contents"];
+                map.keys().all(|k| allowed.contains(&k.as_str()))
+                    && map.contains_key("targetFile")
+                    && map.contains_key("contents")
+            } else {
+                false
+            };
+            if can_map {
+                let mut input = Map::new();
+                if let Some(path) = params.get("targetFile") {
+                    input.insert("file_path".into(), path.clone());
+                }
+                if let Some(contents) = params.get("contents") {
+                    input.insert("content".into(), contents.clone());
+                }
+                Tool::from_canonical("Write", Value::Object(input))
+            } else {
+                Tool::from_canonical(name, params)
             }
-            if let Some(contents) = params.get("contents") {
-                input.insert("content".into(), contents.clone());
-            }
-            Tool::from_canonical("Write", Value::Object(input))
         }
         "edit_file_v2" => {
-            let mut input = Map::new();
-            if let Some(path) = params.get("targetFile") {
-                input.insert("file_path".into(), path.clone());
+            let can_map = if let Value::Object(map) = &params {
+                let allowed = ["targetFile", "oldString", "newString"];
+                map.keys().all(|k| allowed.contains(&k.as_str()))
+                    && map.contains_key("targetFile")
+                    && map.contains_key("oldString")
+                    && map.contains_key("newString")
+            } else {
+                false
+            };
+            if can_map {
+                let mut input = Map::new();
+                if let Some(path) = params.get("targetFile") {
+                    input.insert("file_path".into(), path.clone());
+                }
+                if let Some(old) = params.get("oldString") {
+                    input.insert("old_string".into(), old.clone());
+                }
+                if let Some(new) = params.get("newString") {
+                    input.insert("new_string".into(), new.clone());
+                }
+                Tool::from_canonical("Edit", Value::Object(input))
+            } else {
+                Tool::from_canonical(name, params)
             }
-            if let Some(old) = params.get("oldString") {
-                input.insert("old_string".into(), old.clone());
-            }
-            if let Some(new) = params.get("newString") {
-                input.insert("new_string".into(), new.clone());
-            }
-            Tool::from_canonical("Edit", Value::Object(input))
         }
         _ => Tool::from_canonical(name, params),
     }
@@ -547,7 +572,7 @@ fn denormalize_tool(tool: &Tool) -> (String, Value, Option<u64>) {
             let mut params = Map::new();
             params.insert("targetFile".into(), Value::from(file_path.clone()));
             params.insert("contents".into(), Value::from(content.clone()));
-            ("write_file_v2".into(), Value::Object(params), Some(43))
+            ("write_file_v2".into(), Value::Object(params), None)
         }
         Tool::Edit {
             file_path,
@@ -559,7 +584,7 @@ fn denormalize_tool(tool: &Tool) -> (String, Value, Option<u64>) {
             params.insert("targetFile".into(), Value::from(file_path.clone()));
             params.insert("oldString".into(), Value::from(old_string.clone()));
             params.insert("newString".into(), Value::from(new_string.clone()));
-            ("edit_file_v2".into(), Value::Object(params), Some(44))
+            ("edit_file_v2".into(), Value::Object(params), None)
         }
         other => {
             let (name, input) = other.to_canonical();
@@ -1161,7 +1186,11 @@ fn hex_pair(hi: u8, lo: u8) -> Option<u8> {
 
 #[cfg(feature = "opencode")]
 fn normalize_path(s: &str, is_windows: bool) -> String {
-    let mut clean = s.replace('\\', "/");
+    let mut clean = if is_windows {
+        s.replace('\\', "/")
+    } else {
+        s.to_string()
+    };
     let bytes = clean.as_bytes();
     if is_windows
         && bytes.len() >= 3
@@ -1800,6 +1829,18 @@ mod tests {
         assert!(matches_workspace_folder_platform(
             "file:///path/%zz/name",
             "/path/%zz/name",
+            false
+        ));
+
+        // POSIX backslash is preserved and not converted to slash
+        assert!(matches_workspace_folder_platform(
+            "file:///repo/dir\\file",
+            "/repo/dir\\file",
+            false
+        ));
+        assert!(!matches_workspace_folder_platform(
+            "file:///repo/dir/file",
+            "/repo/dir\\file",
             false
         ));
     }
