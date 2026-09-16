@@ -80,11 +80,15 @@ impl SpanReq {
     /// When the range is empty, inverted, or past `len`; the message carries
     /// the user-facing 1-based numbers.
     pub fn resolve(&self, len: usize) -> Result<Span, String> {
+        if self.start == Some(0) || self.end == Some(0) {
+            return Err(format!("message numbers are 1-based — `#{self}` has a 0"));
+        }
+        if len == 0 {
+            return Err("the session has 0 messages".to_string());
+        }
         let start = self.start.unwrap_or(1);
         let end = self.end.unwrap_or(len);
         match (start, end) {
-            // Message numbers are 1-based; a 0 bound can't name anything.
-            (0, _) | (_, 0) => Err(format!("message numbers are 1-based — `#{self}` has a 0")),
             (s, e) if s > e => Err(format!("range `#{self}` is inverted")),
             (_, e) if e > len => Err(format!(
                 "range `#{self}` is out of bounds — the session has {len} message{}",
@@ -190,6 +194,14 @@ mod tests {
         assert!(req(Some(0), Some(3)).resolve(20).is_err());
         assert!(req(Some(9), Some(3)).resolve(20).is_err());
         assert!(req(Some(1), Some(21)).resolve(20).is_err());
+        assert_eq!(
+            req(None, None).resolve(0).unwrap_err(),
+            "the session has 0 messages"
+        );
+        assert_eq!(
+            req(Some(1), None).resolve(0).unwrap_err(),
+            "the session has 0 messages"
+        );
     }
 
     #[test]
