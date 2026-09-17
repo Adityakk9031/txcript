@@ -2293,39 +2293,38 @@ mod query {
         } else {
             HashSet::new()
         };
-        let scoped: Vec<local::Session> = found
-            .into_iter()
-            .filter(|session| {
-                if !super::selected(session, from, cwd) {
-                    return false;
-                }
-                if let Some(branch) = git_branch {
-                    if session.meta.git_branch.as_deref() != Some(branch) {
+        let scoped: Vec<local::Session> =
+            found
+                .into_iter()
+                .filter(|session| {
+                    if !super::selected(session, from, cwd) {
                         return false;
                     }
-                }
-                if let Some(model_filter) = model {
-                    let matches =
-                        session.meta.model.as_deref().is_some_and(|m| {
+                    if let Some(branch) = git_branch
+                        && session.meta.git_branch.as_deref() != Some(branch)
+                    {
+                        return false;
+                    }
+                    if let Some(model_filter) = model
+                        && !session.meta.model.as_deref().is_some_and(|m| {
                             m.to_lowercase().contains(&model_filter.to_lowercase())
-                        });
-                    if !matches {
+                        })
+                    {
                         return false;
                     }
-                }
-                if let Some(since) = since {
-                    if session.meta.timestamp < since {
+                    if let Some(since) = since
+                        && session.meta.timestamp < since
+                    {
                         return false;
                     }
-                }
-                if let Some(until) = until {
-                    if session.meta.timestamp > until {
+                    if let Some(until) = until
+                        && session.meta.timestamp > until
+                    {
                         return false;
                     }
-                }
-                true
-            })
-            .collect();
+                    true
+                })
+                .collect();
         let total = scoped.len();
 
         // Cursors for the cache check. Empty cursors never hit, so a session
