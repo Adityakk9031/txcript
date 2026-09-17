@@ -399,3 +399,23 @@ fn stop_reasons_survive_conversions() {
         );
     }
 }
+
+#[test]
+fn claude_tools_become_openai_safe_when_moved_to_codex() {
+    for (source, expected) in [("mcp.server/tool", "mcp_server_tool"), ("", "tool")] {
+        let common = sample_with_raw_tool(source);
+        let claude = claude_code::ClaudeCode::from_common(&common).unwrap();
+        let codex = convert::<claude_code::ClaudeCode, codex::Codex>(&claude).unwrap();
+        let name = codex
+            .body
+            .iter()
+            .find(|line| {
+                line.payload.get("type").and_then(serde_json::Value::as_str)
+                    == Some("function_call")
+            })
+            .and_then(|line| line.payload.get("name"))
+            .and_then(serde_json::Value::as_str);
+
+        assert_eq!(name, Some(expected), "source name: {source:?}");
+    }
+}
