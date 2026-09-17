@@ -515,29 +515,29 @@ fn human_header(out: &mut String, common: &Transcript<Common>, span: &Span, colo
         &format!("{shown} of {}", common.body.len()),
         color,
     );
-    if let Some(usage) = common.total_usage() {
-        if !usage.is_zero() {
-            let mut parts = vec![
-                format!("{} in", usage.input_tokens),
-                format!("{} out", usage.output_tokens),
-            ];
-            if let Some(cached) = usage.cache_read_input_tokens {
-                if cached > 0 {
-                    parts.push(format!("{cached} cached"));
-                }
-            }
-            if let Some(created) = usage.cache_creation_input_tokens {
-                if created > 0 {
-                    parts.push(format!("{created} cache write"));
-                }
-            }
-            human_field(
-                out,
-                "Tokens",
-                &format!("{} ({})", usage.total_tokens(), parts.join(", ")),
-                color,
-            );
+    if let Some(usage) = common.total_usage()
+        && !usage.is_zero()
+    {
+        let mut parts = vec![
+            format!("{} in", usage.input_tokens),
+            format!("{} out", usage.output_tokens),
+        ];
+        if let Some(cached) = usage.cache_read_input_tokens
+            && cached > 0
+        {
+            parts.push(format!("{cached} cached"));
         }
+        if let Some(created) = usage.cache_creation_input_tokens
+            && created > 0
+        {
+            parts.push(format!("{created} cache write"));
+        }
+        human_field(
+            out,
+            "Tokens",
+            &format!("{} ({})", usage.total_tokens(), parts.join(", ")),
+            color,
+        );
     }
 }
 
