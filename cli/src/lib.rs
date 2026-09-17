@@ -2185,6 +2185,7 @@ mod query {
 
     /// Build the same filtered index used by the CLI for the MCP search tool.
     #[cfg(feature = "mcp")]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn index_for(
         from: Option<HarnessId>,
         cwd: Option<&Path>,
@@ -2207,6 +2208,7 @@ mod query {
         q
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn cmd_query(
         pattern: Option<String>,
         with: Option<HarnessId>,
@@ -2268,6 +2270,7 @@ mod query {
     /// # Errors
     /// Returns an error when an explicitly selected live store cannot be
     /// discovered or read.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn build_index(
         from: Option<HarnessId>,
         cwd: Option<&Path>,
