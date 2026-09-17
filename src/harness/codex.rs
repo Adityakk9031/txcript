@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::common::{Block, ImageSource, Message, Meta, Role, Tool, ToolOutput, Usage};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::harness::jsonl;
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
 
@@ -607,7 +607,7 @@ fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str) {
                         "response_item",
                         json!({
                             "type": "function_call",
-                            "name": name,
+                            "name": openai_tool_name(&name),
                             "arguments": input.to_string(),
                             "call_id": id,
                         }),
@@ -648,6 +648,27 @@ fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str) {
             };
             lines.push(meta_line_str(ts, "event_msg", event));
         }
+    }
+}
+
+/// The `OpenAI` API validates replayed function-call names with `[A-Za-z0-9_-]+`.
+/// Foreign harnesses permit broader names, so replace unsupported characters
+/// at the Codex boundary and give an empty historical name a stable fallback.
+fn openai_tool_name(name: &str) -> String {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        "tool".to_string()
+    } else {
+        safe
     }
 }
 
@@ -775,8 +796,28 @@ impl Store for CodexStore {
         })
     }
 
+    /// Removes a Codex rollout log. Guarded on shape and containment:
+    /// the reference must be a `.jsonl` file resolving within `sessions_dir`,
+    /// so a foreign or stale reference never removes files outside the sessions root.
     fn delete(&self, reference: &PathBuf) -> Result<()> {
-        Ok(fs::remove_file(reference)?)
+        if reference.extension().is_none_or(|ext| ext != "jsonl") {
+            return Err(Error::Malformed {
+                harness: Codex::NAME,
+                detail: format!("not a codex session file: {}", reference.display()),
+            });
+        }
+        let canon = reference.canonicalize()?;
+        let sessions = self.sessions_dir.canonicalize()?;
+        if canon.strip_prefix(&sessions).is_err() || canon == sessions {
+            return Err(Error::Malformed {
+                harness: Codex::NAME,
+                detail: format!(
+                    "refusing to delete outside the sessions root: {}",
+                    reference.display()
+                ),
+            });
+        }
+        Ok(fs::remove_file(canon)?)
     }
 
     fn fingerprints(&self, refs: &[PathBuf]) -> Result<HashMap<String, String>> {
