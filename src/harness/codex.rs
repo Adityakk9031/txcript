@@ -543,7 +543,35 @@ fn messages_to_lines(meta: &Meta, messages: &[Message]) -> Vec<Line> {
     lines
 }
 
+fn flush_message_content(
+    lines: &mut Vec<Line>,
+    message_content: &mut Vec<Value>,
+    text_chunks: &mut Vec<String>,
+    role: Role,
+    role_str: &str,
+    ts: &str,
+) {
+    if !message_content.is_empty() {
+        lines.push(meta_line_str(
+            ts,
+            "response_item",
+            json!({ "type": "message", "role": role_str, "content": std::mem::take(message_content) }),
+        ));
+        if !text_chunks.is_empty() {
+            let combined = std::mem::take(text_chunks).join("\n\n");
+            let event = match role {
+                Role::User => {
+                    json!({ "type": "user_message", "message": combined, "kind": "plain" })
+                }
+                Role::Assistant => json!({ "type": "agent_message", "message": combined }),
+            };
+            lines.push(meta_line_str(ts, "event_msg", event));
+        }
+    }
+}
+
 /// Emit the `response_item` (and paired display `event_msg`) lines for one message.
+#[allow(clippy::too_many_lines)]
 fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str) {
     let role_str = match msg.role {
         Role::User => "user",
@@ -578,6 +606,14 @@ fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str) {
                 text_chunks.push(text);
             }
             Block::Thinking { text, .. } => {
+                flush_message_content(
+                    lines,
+                    &mut message_content,
+                    &mut text_chunks,
+                    msg.role,
+                    role_str,
+                    ts,
+                );
                 lines.push(meta_line_str(
                     ts,
                     "response_item",
@@ -594,6 +630,14 @@ fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str) {
                 ));
             }
             Block::ToolUse { id, tool } => {
+                flush_message_content(
+                    lines,
+                    &mut message_content,
+                    &mut text_chunks,
+                    msg.role,
+                    role_str,
+                    ts,
+                );
                 let (name, input) = tool.to_canonical();
                 lines.push(meta_line_str(
                     ts,
@@ -611,6 +655,14 @@ fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str) {
                 content,
                 ..
             } => {
+                flush_message_content(
+                    lines,
+                    &mut message_content,
+                    &mut text_chunks,
+                    msg.role,
+                    role_str,
+                    ts,
+                );
                 lines.push(meta_line_str(
                     ts,
                     "response_item",
@@ -624,23 +676,14 @@ fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str) {
         }
     }
 
-    if !message_content.is_empty() {
-        lines.push(meta_line_str(
-            ts,
-            "response_item",
-            json!({ "type": "message", "role": role_str, "content": message_content }),
-        ));
-        if !text_chunks.is_empty() {
-            let combined = text_chunks.join("\n\n");
-            let event = match msg.role {
-                Role::User => {
-                    json!({ "type": "user_message", "message": combined, "kind": "plain" })
-                }
-                Role::Assistant => json!({ "type": "agent_message", "message": combined }),
-            };
-            lines.push(meta_line_str(ts, "event_msg", event));
-        }
-    }
+    flush_message_content(
+        lines,
+        &mut message_content,
+        &mut text_chunks,
+        msg.role,
+        role_str,
+        ts,
+    );
 }
 
 /// The `OpenAI` API validates replayed function-call names with `[A-Za-z0-9_-]+`.
