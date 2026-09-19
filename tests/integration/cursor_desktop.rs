@@ -548,3 +548,79 @@ fn pending_tool_call_yields_no_result_message() {
         }]
     );
 }
+
+#[cfg(feature = "opencode")]
+#[test]
+fn delete_roundtrip_removes_session_and_fails_on_duplicate() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = CursorDesktopStore::new(dir.path());
+    let saved = store.save(&sample_transcript()).unwrap();
+
+    assert_eq!(store.discover().unwrap().len(), 1);
+    store.delete(&saved.reference).unwrap();
+    assert_eq!(store.discover().unwrap().len(), 0);
+
+    assert!(store.delete(&saved.reference).is_err());
+}
+
+#[cfg(feature = "opencode")]
+#[test]
+fn delete_succeeds_on_database_without_composer_headers_table() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("globalStorage").join("state.vscdb");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO cursorDiskKV VALUES ('composerData:pre-table-1', '{}');
+         INSERT INTO cursorDiskKV VALUES ('bubbleId:pre-table-1:b1', '{}');",
+    )
+    .unwrap();
+
+    let store = CursorDesktopStore::new(dir.path());
+    store.delete(&"pre-table-1".to_string()).unwrap();
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM cursorDiskKV WHERE key LIKE '%pre-table-1%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+
+    // Deleting again should fail with no such session
+    assert!(store.delete(&"pre-table-1".to_string()).is_err());
+}
+
+#[cfg(feature = "opencode")]
+#[test]
+fn delete_succeeds_on_kv_only_session_in_modern_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("globalStorage").join("state.vscdb");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE composerHeaders (composerId TEXT PRIMARY KEY, recency INTEGER);
+         CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO cursorDiskKV VALUES ('composerData:kv-only-1', '{}');
+         INSERT INTO cursorDiskKV VALUES ('bubbleId:kv-only-1:b1', '{}');",
+    )
+    .unwrap();
+
+    let store = CursorDesktopStore::new(dir.path());
+    store.delete(&"kv-only-1".to_string()).unwrap();
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM cursorDiskKV WHERE key LIKE '%kv-only-1%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+
+    assert!(store.delete(&"kv-only-1".to_string()).is_err());
+}
