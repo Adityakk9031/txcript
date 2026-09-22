@@ -276,3 +276,164 @@ fn codec_fixpoint_through_common_loses_nothing() {
     let back = codex::Codex::to_common(&native).unwrap();
     assert_eq!(common, back);
 }
+
+#[test]
+fn from_common_denormalizes_bash_to_exec_command() {
+    let common = sample_common();
+    let native = codex::Codex::from_common(&common).unwrap();
+    let mut found = false;
+    for line in &native.body {
+        if line.kind != "response_item"
+            || line.payload.get("type").and_then(serde_json::Value::as_str) != Some("function_call")
+        {
+            continue;
+        }
+        let name = line
+            .payload
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        // No generic canonical name may leak: Codex knows only exec_command.
+        assert_ne!(
+            name, "Bash",
+            "from_common must not emit the canonical Bash name"
+        );
+        if name == "exec_command" {
+            let args: serde_json::Value = line
+                .payload
+                .get("arguments")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(serde_json::Value::Null);
+            if args.get("cmd").and_then(serde_json::Value::as_str) == Some("ls") {
+                found = true;
+            }
+        }
+    }
+    assert!(
+        found,
+        "from_common must emit native exec_command instead of generic Bash"
+    );
+}
+
+#[test]
+fn from_common_denormalizes_web_search_to_web_search_call() {
+    let mut common = sample_common();
+    common.body.push(common::Message {
+        role: common::Role::Assistant,
+        content: vec![common::Block::ToolUse {
+            id: "ws-call".into(),
+            tool: common::Tool::Raw {
+                tool_name: "WebSearch".into(),
+                input: serde_json::json!({"query": "rust lang"}),
+            },
+        }],
+        timestamp: ts("2026-01-02T03:04:11.000Z"),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    });
+    common.body.push(common::Message {
+        role: common::Role::User,
+        content: vec![common::Block::ToolResult {
+            tool_use_id: "ws-call".into(),
+            content: common::ToolOutput::Text("found it".into()),
+            is_error: false,
+        }],
+        timestamp: ts("2026-01-02T03:04:12.000Z"),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    });
+    let native = codex::Codex::from_common(&common).unwrap();
+    let found = native.body.iter().any(|line| {
+        line.kind == "response_item"
+            && line.payload.get("type").and_then(serde_json::Value::as_str)
+                == Some("web_search_call")
+            && line
+                .payload
+                .get("call_id")
+                .and_then(serde_json::Value::as_str)
+                == Some("ws-call")
+    });
+    assert!(
+        found,
+        "from_common must emit native web_search_call instead of generic function_call"
+    );
+}
+
+#[test]
+fn from_common_denormalizes_edit_to_apply_patch_with_error_result() {
+    let mut common = sample_common();
+    common.body.push(common::Message {
+        role: common::Role::Assistant,
+        content: vec![common::Block::ToolUse {
+            id: "call-patch".into(),
+            tool: common::Tool::Edit {
+                file_path: "src/main.rs".into(),
+                old_string: "old".into(),
+                new_string: "new".into(),
+                replace_all: false,
+            },
+        }],
+        timestamp: ts("2026-01-02T03:04:11.000Z"),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    });
+    common.body.push(common::Message {
+        role: common::Role::User,
+        content: vec![common::Block::ToolResult {
+            tool_use_id: "call-patch".into(),
+            content: common::ToolOutput::Text("Success.".into()),
+            is_error: true,
+        }],
+        timestamp: ts("2026-01-02T03:04:12.000Z"),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    });
+    // Structured output keeps its shape through the envelope's `output`
+    // field instead of flattening to text as `function_call_output` did.
+    common.body.push(common::Message {
+        role: common::Role::Assistant,
+        content: vec![common::Block::ToolUse {
+            id: "call-patch-json".into(),
+            tool: common::Tool::Write {
+                file_path: "src/new.rs".into(),
+                content: "fn main() {}".into(),
+            },
+        }],
+        timestamp: ts("2026-01-02T03:04:13.000Z"),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    });
+    common.body.push(common::Message {
+        role: common::Role::User,
+        content: vec![common::Block::ToolResult {
+            tool_use_id: "call-patch-json".into(),
+            content: common::ToolOutput::Json(serde_json::json!({"files": ["src/new.rs"]})),
+            is_error: false,
+        }],
+        timestamp: ts("2026-01-02T03:04:14.000Z"),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    });
+    let native = codex::Codex::from_common(&common).unwrap();
+    assert!(
+        native.body.iter().any(|line| {
+            line.kind == "response_item"
+                && line.payload.get("type").and_then(serde_json::Value::as_str)
+                    == Some("custom_tool_call")
+                && line.payload.get("name").and_then(serde_json::Value::as_str)
+                    == Some("apply_patch")
+        }),
+        "from_common must emit native apply_patch instead of generic Edit"
+    );
+    // The envelope round-trips through to_common losslessly, including the
+    // error bit via exit_code.
+    let back = codex::Codex::to_common(&native).unwrap();
+    assert_eq!(common, back);
+}
