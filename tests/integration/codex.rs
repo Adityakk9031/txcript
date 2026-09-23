@@ -509,3 +509,147 @@ fn from_common_keeps_foreign_web_search_paired_with_its_function_result() {
     }));
     assert_eq!(common, codex::Codex::to_common(&native).unwrap());
 }
+
+/// A completed call ID can be reused by a different tool later in the
+/// transcript. Both the native result type and the read-back must follow
+/// that occurrence, not every call with the same ID.
+#[test]
+fn reused_call_ids_preserve_result_types_and_round_trip() {
+    let mut common = sample_common();
+    let call_template = common.body[2].clone();
+    let result_template = common.body[3].clone();
+    let bash = match &call_template.content[0] {
+        common::Block::ToolUse { tool, .. } => tool.clone(),
+        _ => unreachable!(),
+    };
+    let tools = [
+        bash.clone(),
+        common::Tool::Edit {
+            file_path: "main.rs".into(),
+            old_string: "old".into(),
+            new_string: "new".into(),
+            replace_all: false,
+        },
+        bash.clone(),
+        common::Tool::Write {
+            file_path: "new.rs".into(),
+            content: "new".into(),
+        },
+        bash.clone(),
+        common::Tool::Raw {
+            tool_name: "ApplyPatch".into(),
+            input: serde_json::json!({
+                "patch": "*** Begin Patch\n*** Delete File: old.rs\n*** End Patch",
+                "files": ["old.rs"],
+            }),
+        },
+        bash,
+    ];
+    common.body.truncate(2);
+    for (i, tool) in tools.into_iter().enumerate() {
+        let mut call = call_template.clone();
+        call.content = vec![common::Block::ToolUse {
+            id: "reused".into(),
+            tool,
+        }];
+        let mut result = result_template.clone();
+        result.content = vec![common::Block::ToolResult {
+            tool_use_id: "reused".into(),
+            content: common::ToolOutput::Text(format!("result {i}")),
+            is_error: i % 2 == 1,
+        }];
+        common.body.extend([call, result]);
+    }
+
+    let native = codex::Codex::from_common(&common).unwrap();
+    let kinds: Vec<_> = native
+        .body
+        .iter()
+        .filter(|line| line.kind == "response_item" && line.payload["call_id"] == "reused")
+        .map(|line| line.payload["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "function_call",
+            "function_call_output",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "function_call",
+            "function_call_output",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "function_call",
+            "function_call_output",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "function_call",
+            "function_call_output",
+        ]
+    );
+    assert_eq!(common, codex::Codex::to_common(&native).unwrap());
+}
+
+/// A mirror belongs to one call occurrence. A canonical result for a later
+/// reuse of its ID must not suppress an earlier call's only result.
+#[test]
+fn reused_call_ids_deduplicate_only_their_own_mirrors() {
+    use txcript::TextCodec;
+
+    let call = serde_json::json!({
+        "type": "function_call", "name": "exec_command",
+        "arguments": "{\"cmd\":\"ls\"}", "call_id": "reused",
+    });
+    let fallback = |output| {
+        serde_json::json!({
+            "type": "function_call_output", "call_id": "reused", "output": output,
+        })
+    };
+    let canonical = serde_json::json!({
+        "type": "exec_command_end", "call_id": "reused",
+        "aggregated_output": "canonical", "exit_code": 0,
+    });
+    for canonical_first in [false, true] {
+        let pair = if canonical_first {
+            [
+                ("event_msg", canonical.clone()),
+                ("response_item", fallback("mirror")),
+            ]
+        } else {
+            [
+                ("response_item", fallback("mirror")),
+                ("event_msg", canonical.clone()),
+            ]
+        };
+        let records = [
+            ("response_item", call.clone()),
+            ("response_item", fallback("first")),
+            ("response_item", call.clone()),
+            pair[0].clone(),
+            pair[1].clone(),
+            ("response_item", call.clone()),
+            ("response_item", fallback("last")),
+        ];
+        let text: String = records
+            .into_iter()
+            .map(|(kind, payload)| {
+                serde_json::json!({"type": kind, "payload": payload}).to_string() + "\n"
+            })
+            .collect();
+        let native = codex::Codex::from_text(&text).unwrap();
+        let common = codex::Codex::to_common(&native).unwrap();
+        let results: Vec<_> = common
+            .body
+            .iter()
+            .flat_map(|msg| &msg.content)
+            .filter_map(|block| match block {
+                common::Block::ToolResult {
+                    content: common::ToolOutput::Text(text),
+                    ..
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, ["first", "canonical", "last"]);
+    }
+}

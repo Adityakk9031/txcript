@@ -106,7 +106,9 @@ the form `["bash"|"sh"|"zsh", "-lc"|"-c", cmd]` collapse to the inner command.
   malformed lines are skipped by the JSONL parser rather than aborting the file; a `session_meta`
   without an id disqualifies a file from discovery instead of producing a broken session.
 - **Duplicate results are by design.** Seeing both `exec_command_end` and a matching
-  `function_call_output` in a file is normal; only one becomes a `ToolResult`.
+  `function_call_output` in a file is normal; only one becomes a `ToolResult`. Matching
+  and duplicate suppression follow each function/custom call occurrence, so a completed
+  ID can be reused without changing the result type or dropping an earlier result.
 
 ## References
 
