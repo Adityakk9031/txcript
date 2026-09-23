@@ -482,12 +482,34 @@ impl Store for ClaudeStore {
     }
 
     fn save(&self, transcript: &Transcript<ClaudeCode>) -> Result<Saved<PathBuf>> {
-        let id = transcript.meta.id.clone();
+        let id = if transcript.meta.id.is_empty() {
+            Uuid::new_v4().to_string()
+        } else {
+            transcript.meta.id.clone()
+        };
         super::checked_id_component(ClaudeCode::NAME, &id)?;
         let cwd = transcript.meta.cwd.as_deref().unwrap_or_default();
         let dir = self.root.join(encode_project_dir(cwd));
         fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{id}.jsonl"));
+        // If we synthesised a fresh id, stamp it into the transcript so the
+        // `sessionId` on every JSONL line matches the filename. Without this
+        // the file and its content would carry two different UUIDs and Claude
+        // Code would fail to resume the session.
+        let stamped;
+        let transcript = if transcript.meta.id == id {
+            transcript
+        } else {
+            stamped = Transcript::new(
+                {
+                    let mut m = transcript.meta.clone();
+                    m.id.clone_from(&id);
+                    m
+                },
+                transcript.body.clone(),
+            );
+            &stamped
+        };
         fs::write(&path, ClaudeCode::to_text(transcript)?)?;
         Ok(Saved {
             id,

@@ -276,3 +276,25 @@ fn codec_fixpoint_through_common_loses_nothing() {
     let back = codex::Codex::to_common(&native).unwrap();
     assert_eq!(common, back);
 }
+
+#[test]
+fn store_save_empty_id_synthesizes_uuid() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = codex::CodexStore::new(dir.path());
+    let src = dir.path().join("rollout-x.jsonl");
+    std::fs::write(&src, exercise_rollout()).unwrap();
+
+    let mut loaded = store.load(&src).unwrap();
+    loaded.meta.id = String::new();
+
+    let saved = store.save(&loaded).unwrap();
+    assert!(!saved.id.is_empty());
+    assert!(saved.reference.exists());
+    assert!(
+        saved
+            .reference
+            .to_string_lossy()
+            .ends_with(&format!("{}.jsonl", saved.id))
+    );
+    uuid::Uuid::parse_str(&saved.id).unwrap();
+}

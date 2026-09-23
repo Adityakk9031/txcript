@@ -26,6 +26,7 @@ use crate::common::{Block, ImageSource, Message, Meta, Role, Tool, ToolOutput, U
 use crate::error::{Error, Result};
 use crate::harness::jsonl;
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
+use uuid::Uuid;
 
 /// The Codex harness marker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -770,7 +771,11 @@ impl Store for CodexStore {
     }
 
     fn save(&self, transcript: &Transcript<Codex>) -> Result<Saved<PathBuf>> {
-        let id = transcript.meta.id.clone();
+        let id = if transcript.meta.id.is_empty() {
+            Uuid::new_v4().to_string()
+        } else {
+            transcript.meta.id.clone()
+        };
         super::checked_id_component(Codex::NAME, &id)?;
         let t = &transcript.meta.timestamp;
         let dir = self
@@ -781,6 +786,24 @@ impl Store for CodexStore {
         fs::create_dir_all(&dir)?;
         let compact = t.format("%Y-%m-%dT%H-%M-%S").to_string();
         let path = dir.join(format!("rollout-{compact}-{id}.jsonl"));
+        // Stamp the resolved id into the transcript so the session_meta line
+        // inside the rollout carries the same id as the filename. Without this
+        // a synthesised UUID in the filename and an empty string in the file
+        // would prevent Codex from resuming the session.
+        let stamped;
+        let transcript = if transcript.meta.id == id {
+            transcript
+        } else {
+            stamped = Transcript::new(
+                {
+                    let mut m = transcript.meta.clone();
+                    m.id.clone_from(&id);
+                    m
+                },
+                transcript.body.clone(),
+            );
+            &stamped
+        };
         fs::write(&path, Codex::to_text(transcript)?)?;
         Ok(Saved {
             id,
