@@ -501,6 +501,18 @@ fn messages_to_lines(meta: &Meta, messages: &[Message]) -> Vec<Line> {
     }
     lines.push(meta_line(&meta.timestamp, "session_meta", payload));
 
+    // Calls Codex issued as `custom_tool_call`, looked up when emitting
+    // results: a patch call pairs with `custom_tool_call_output`,
+    // everything else with `function_call_output`.
+    let patch_ids: HashSet<&str> = messages
+        .iter()
+        .flat_map(|msg| &msg.content)
+        .filter_map(|block| match block {
+            Block::ToolUse { id, tool } if is_patch_tool(tool) => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+
     for (i, msg) in messages.iter().enumerate() {
         let ts = msg.timestamp.to_rfc3339_opts(SecondsFormat::Millis, true);
 
@@ -516,7 +528,7 @@ fn messages_to_lines(meta: &Meta, messages: &[Message]) -> Vec<Line> {
             lines.push(meta_line(&msg.timestamp, "turn_context", tc));
         }
 
-        push_message_lines(&mut lines, msg, &ts);
+        push_message_lines(&mut lines, msg, &ts, &patch_ids);
 
         if matches!(msg.role, Role::Assistant)
             && let Some(usage) = msg.usage.as_ref()
@@ -544,7 +556,7 @@ fn messages_to_lines(meta: &Meta, messages: &[Message]) -> Vec<Line> {
 }
 
 /// Emit the `response_item` (and paired display `event_msg`) lines for one message.
-fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str) {
+fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str, patch_ids: &HashSet<&str>) {
     let role_str = match msg.role {
         Role::User => "user",
         Role::Assistant => "assistant",
@@ -593,33 +605,33 @@ fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str) {
                     json!({ "type": "agent_reasoning", "text": text }),
                 ));
             }
-            Block::ToolUse { id, tool } => {
-                let (name, input) = tool.to_canonical();
-                lines.push(meta_line_str(
-                    ts,
-                    "response_item",
-                    json!({
-                        "type": "function_call",
-                        "name": openai_tool_name(&name),
-                        "arguments": input.to_string(),
-                        "call_id": id,
-                    }),
-                ));
-            }
+            Block::ToolUse { id, tool } => push_tool_use_lines(lines, ts, id, tool),
             Block::ToolResult {
                 tool_use_id,
                 content,
-                ..
+                is_error,
             } => {
-                lines.push(meta_line_str(
-                    ts,
-                    "response_item",
-                    json!({
-                        "type": "function_call_output",
-                        "call_id": tool_use_id,
-                        "output": tool_output_text(content),
-                    }),
-                ));
+                if patch_ids.contains(tool_use_id.as_str()) {
+                    lines.push(meta_line_str(
+                        ts,
+                        "response_item",
+                        json!({
+                            "type": "custom_tool_call_output",
+                            "call_id": tool_use_id,
+                            "output": custom_tool_output(content, *is_error),
+                        }),
+                    ));
+                } else {
+                    lines.push(meta_line_str(
+                        ts,
+                        "response_item",
+                        json!({
+                            "type": "function_call_output",
+                            "call_id": tool_use_id,
+                            "output": tool_output_text(content),
+                        }),
+                    ));
+                }
             }
         }
     }
@@ -641,6 +653,160 @@ fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str) {
             lines.push(meta_line_str(ts, "event_msg", event));
         }
     }
+}
+
+/// Emit the native call line for one tool invocation: `exec_command` for
+/// shell, `custom_tool_call` for edits, `web_search_call` for search — the
+/// exact reverse of the inbound normalization, so Codex validates the replay.
+fn push_tool_use_lines(lines: &mut Vec<Line>, ts: &str, id: &str, tool: &Tool) {
+    match tool {
+        Tool::Bash {
+            command, workdir, ..
+        } => {
+            // `exec_command` takes `cmd`/`workdir`; the remaining
+            // `Bash` extras (timeout, description, background) have
+            // no native slot and are dropped — matching the inbound
+            // normalizer, which keeps the same two fields.
+            let mut args = Map::new();
+            args.insert("cmd".into(), Value::String(command.clone()));
+            if let Some(w) = workdir {
+                args.insert("workdir".into(), Value::String(w.clone()));
+            }
+            lines.push(meta_line_str(
+                ts,
+                "response_item",
+                json!({
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": Value::Object(args).to_string(),
+                    "call_id": id,
+                }),
+            ));
+        }
+        Tool::Raw { tool_name, input } if tool_name == "WebSearch" => {
+            lines.push(meta_line_str(
+                ts,
+                "response_item",
+                json!({
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "call_id": id,
+                    "action": input,
+                }),
+            ));
+        }
+        Tool::Edit {
+            file_path,
+            old_string,
+            new_string,
+            ..
+        } => {
+            push_custom_tool_call(
+                lines,
+                ts,
+                id,
+                &Value::String(apply_patch_update(file_path, old_string, new_string)),
+            );
+        }
+        Tool::Write { file_path, content } => {
+            push_custom_tool_call(
+                lines,
+                ts,
+                id,
+                &Value::String(apply_patch_add(file_path, content)),
+            );
+        }
+        Tool::Raw { tool_name, input } if tool_name == "ApplyPatch" => {
+            // The fallback shape inbound keeps is
+            // `{"patch": <envelope>, "files": [...]}`; unwrap it
+            // so live Codex sees the string input it wrote.
+            let input = match input {
+                Value::Object(obj) if obj.get("patch").is_some_and(Value::is_string) => {
+                    obj["patch"].clone()
+                }
+                _ => input.clone(),
+            };
+            push_custom_tool_call(lines, ts, id, &input);
+        }
+        _ => {
+            let (name, input) = tool.to_canonical();
+            lines.push(meta_line_str(
+                ts,
+                "response_item",
+                json!({
+                    "type": "function_call",
+                    "name": openai_tool_name(&name),
+                    "arguments": input.to_string(),
+                    "call_id": id,
+                }),
+            ));
+        }
+    }
+}
+
+/// A call Codex issued as `custom_tool_call` (`apply_patch`), so its result
+/// must be a `custom_tool_call_output` to pair on replay.
+fn is_patch_tool(tool: &Tool) -> bool {
+    matches!(tool, Tool::Edit { .. } | Tool::Write { .. })
+        || matches!(tool, Tool::Raw { tool_name, .. } if tool_name == "ApplyPatch")
+}
+
+/// Rebuild the single-hunk `*** Update File` envelope the inbound parser
+/// folds into `Edit`, so the call re-imports identically. `replace_all` has
+/// no envelope equivalent; the patch applies once.
+fn apply_patch_update(file_path: &str, old_string: &str, new_string: &str) -> String {
+    let mut patch = vec![
+        "*** Begin Patch".to_string(),
+        format!("*** Update File: {file_path}"),
+        "@@".to_string(),
+    ];
+    patch.extend(old_string.lines().map(|l| format!("-{l}")));
+    patch.extend(new_string.lines().map(|l| format!("+{l}")));
+    patch.push("*** End Patch".to_string());
+    patch.join("\n")
+}
+
+/// Rebuild the `*** Add File` envelope the inbound parser folds into `Write`.
+fn apply_patch_add(file_path: &str, content: &str) -> String {
+    let mut patch = vec![
+        "*** Begin Patch".to_string(),
+        format!("*** Add File: {file_path}"),
+    ];
+    patch.extend(content.lines().map(|l| format!("+{l}")));
+    patch.push("*** End Patch".to_string());
+    patch.join("\n")
+}
+
+fn push_custom_tool_call(lines: &mut Vec<Line>, ts: &str, id: &str, input: &Value) {
+    lines.push(meta_line_str(
+        ts,
+        "response_item",
+        json!({
+            "type": "custom_tool_call",
+            "status": "completed",
+            "call_id": id,
+            "name": "apply_patch",
+            "input": input,
+        }),
+    ));
+}
+
+/// Mirror the `custom_tool_call_output` envelope Codex writes (see
+/// `parse_custom_tool_output`): `output` carries the payload, `exit_code`
+/// carries the error bit, so the result re-imports with `is_error` intact.
+fn custom_tool_output(content: &ToolOutput, is_error: bool) -> String {
+    let output = match content {
+        ToolOutput::Text(s) => Value::String(s.clone()),
+        ToolOutput::Json(v) => v.clone(),
+    };
+    json!({
+        "output": output,
+        "metadata": {
+            "exit_code": i64::from(is_error),
+            "duration_seconds": 0.0,
+        },
+    })
+    .to_string()
 }
 
 /// The `OpenAI` API validates replayed function-call names with `[A-Za-z0-9_-]+`.
