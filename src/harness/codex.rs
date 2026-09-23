@@ -656,8 +656,8 @@ fn push_message_lines(lines: &mut Vec<Line>, msg: &Message, ts: &str, patch_ids:
 }
 
 /// Emit the native call line for one tool invocation: `exec_command` for
-/// shell, `custom_tool_call` for edits, `web_search_call` for search — the
-/// exact reverse of the inbound normalization, so Codex validates the replay.
+/// shell and `custom_tool_call` for edits. Foreign tools keep their canonical
+/// function-call form and their paired function-call results.
 fn push_tool_use_lines(lines: &mut Vec<Line>, ts: &str, id: &str, tool: &Tool) {
     match tool {
         Tool::Bash {
@@ -683,18 +683,6 @@ fn push_tool_use_lines(lines: &mut Vec<Line>, ts: &str, id: &str, tool: &Tool) {
                 }),
             ));
         }
-        Tool::Raw { tool_name, input } if tool_name == "WebSearch" => {
-            lines.push(meta_line_str(
-                ts,
-                "response_item",
-                json!({
-                    "type": "web_search_call",
-                    "status": "completed",
-                    "call_id": id,
-                    "action": input,
-                }),
-            ));
-        }
         Tool::Edit {
             file_path,
             old_string,
@@ -705,26 +693,24 @@ fn push_tool_use_lines(lines: &mut Vec<Line>, ts: &str, id: &str, tool: &Tool) {
                 lines,
                 ts,
                 id,
-                &Value::String(apply_patch_update(file_path, old_string, new_string)),
+                &apply_patch_update(file_path, old_string, new_string),
             );
         }
         Tool::Write { file_path, content } => {
-            push_custom_tool_call(
-                lines,
-                ts,
-                id,
-                &Value::String(apply_patch_add(file_path, content)),
-            );
+            push_custom_tool_call(lines, ts, id, &apply_patch_add(file_path, content));
         }
         Tool::Raw { tool_name, input } if tool_name == "ApplyPatch" => {
             // The fallback shape inbound keeps is
             // `{"patch": <envelope>, "files": [...]}`; unwrap it
             // so live Codex sees the string input it wrote.
-            let input = match input {
-                Value::Object(obj) if obj.get("patch").is_some_and(Value::is_string) => {
-                    obj["patch"].clone()
-                }
-                _ => input.clone(),
+            let input = match input.get("patch").and_then(Value::as_str) {
+                Some(patch) => patch.to_owned(),
+                None => match input {
+                    Value::String(text) => text.clone(),
+                    // Even a malformed historical call must satisfy Codex's
+                    // string input type. The reader decodes JSON strings.
+                    other => other.to_string(),
+                },
             };
             push_custom_tool_call(lines, ts, id, &input);
         }
@@ -777,7 +763,7 @@ fn apply_patch_add(file_path: &str, content: &str) -> String {
     patch.join("\n")
 }
 
-fn push_custom_tool_call(lines: &mut Vec<Line>, ts: &str, id: &str, input: &Value) {
+fn push_custom_tool_call(lines: &mut Vec<Line>, ts: &str, id: &str, input: &str) {
     lines.push(meta_line_str(
         ts,
         "response_item",
