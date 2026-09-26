@@ -1149,11 +1149,12 @@ impl Store for CursorDesktopStore {
         };
         let deleted_kv: usize = conn
             .execute(
-                "DELETE FROM cursorDiskKV WHERE key = ?1 OR key LIKE ?2 OR key LIKE ?3",
+                "DELETE FROM cursorDiskKV WHERE key = ?1 OR key LIKE ?2 OR key LIKE ?3 OR key LIKE ?4",
                 params![
                     format!("composerData:{reference}"),
                     format!("bubbleId:{reference}:%"),
-                    format!("%:{reference}%"),
+                    format!("%:{reference}"),
+                    format!("%:{reference}:%"),
                 ],
             )
             .map_err(sqlite_err)?;

@@ -624,3 +624,56 @@ fn delete_succeeds_on_kv_only_session_in_modern_database() {
 
     assert!(store.delete(&"kv-only-1".to_string()).is_err());
 }
+
+#[cfg(feature = "opencode")]
+#[test]
+fn delete_exact_session_id_does_not_delete_prefixed_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("globalStorage").join("state.vscdb");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE composerHeaders (composerId TEXT PRIMARY KEY, recency INTEGER);
+         CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO composerHeaders VALUES ('session-1', 100);
+         INSERT INTO composerHeaders VALUES ('session-10', 200);
+         INSERT INTO cursorDiskKV VALUES ('composerData:session-1', '{}');
+         INSERT INTO cursorDiskKV VALUES ('bubbleId:session-1:b1', '{}');
+         INSERT INTO cursorDiskKV VALUES ('checkpointId:session-1:c1', '{}');
+         INSERT INTO cursorDiskKV VALUES ('composerData:session-10', '{}');
+         INSERT INTO cursorDiskKV VALUES ('bubbleId:session-10:b1', '{}');
+         INSERT INTO cursorDiskKV VALUES ('checkpointId:session-10:c1', '{}');",
+    )
+    .unwrap();
+
+    let store = CursorDesktopStore::new(dir.path());
+    store.delete(&"session-1".to_string()).unwrap();
+
+    let count_s10_headers: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM composerHeaders WHERE composerId = 'session-10'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count_s10_headers, 1);
+
+    let remaining_s10_keys: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM cursorDiskKV WHERE key LIKE '%session-10%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining_s10_keys, 3);
+
+    let remaining_target_keys: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM cursorDiskKV WHERE key LIKE '%session-1%' AND key NOT LIKE '%session-10%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining_target_keys, 0);
+}
