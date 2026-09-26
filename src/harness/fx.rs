@@ -599,6 +599,56 @@ fn drop_keys(input: Value, keys: &[&str]) -> Value {
 
 // ── codec: from_common ─────────────────────────────────────────────────
 
+struct TurnPayload {
+    timestamp_ms: i64,
+    turn: Value,
+    usage: Option<Usage>,
+}
+
+fn build_turn_events(
+    session_id: &str,
+    generation: &str,
+    created_ms: i64,
+    meta: &Meta,
+    turn_payloads: Vec<TurnPayload>,
+) -> (Vec<Value>, i64) {
+    let mut events = vec![session_started(session_id, generation, created_ms, meta)];
+    let mut last_ts = created_ms;
+    for (idx, tp) in turn_payloads.into_iter().enumerate() {
+        last_ts = tp.timestamp_ms;
+        let seq = u64::try_from(idx).unwrap_or(0) + 2;
+        let mut payload_map = Map::new();
+        payload_map.insert("conversation_language".into(), json!("und"));
+        let (input, output) = tp
+            .usage
+            .as_ref()
+            .map_or((0, 0), |u| (u.input_tokens, u.output_tokens));
+        payload_map.insert("total_input_tokens".into(), json!(input));
+        payload_map.insert("total_output_tokens".into(), json!(output));
+        if let Some(r) = tp.usage.as_ref().and_then(|u| u.cache_read_input_tokens) {
+            payload_map.insert("total_cache_read_tokens".into(), json!(r));
+        }
+        if let Some(w) = tp
+            .usage
+            .as_ref()
+            .and_then(|u| u.cache_creation_input_tokens)
+        {
+            payload_map.insert("total_cache_write_tokens".into(), json!(w));
+        }
+        payload_map.insert("turn".into(), tp.turn);
+        events.push(json!({
+            "schema_version": 1,
+            "log_generation": generation,
+            "seq": seq,
+            "event_id": derived_hex(session_id, &format!("event:{seq}")),
+            "timestamp_ms": tp.timestamp_ms,
+            "kind": "history_turn_committed",
+            "payload": Value::Object(payload_map),
+        }));
+    }
+    (events, last_ts)
+}
+
 fn body_from_messages(meta: &Meta, messages: &[Message]) -> FxSession {
     let session_id = if meta.id.is_empty() {
         Uuid::new_v4().to_string()
@@ -614,7 +664,7 @@ fn body_from_messages(meta: &Meta, messages: &[Message]) -> FxSession {
         reasoning: Vec::new(),
         tool_names: HashMap::new(),
     };
-    let mut turn_payloads: Vec<(i64, Value, u64, u64)> = Vec::new();
+    let mut turn_payloads: Vec<TurnPayload> = Vec::new();
     let mut i = 0;
     let mut turn_idx: u64 = 0;
     while i < messages.len() {
@@ -632,45 +682,39 @@ fn body_from_messages(meta: &Meta, messages: &[Message]) -> FxSession {
             i += 1;
         }
         let body = &messages[body_start..i];
-        let mut turn_input = 0u64;
-        let mut turn_output = 0u64;
+        let mut turn_usage: Option<Usage> = None;
         for msg in body {
             if let Some(u) = msg.usage {
-                turn_input = turn_input.saturating_add(u.input_tokens);
-                turn_output = turn_output.saturating_add(u.output_tokens);
+                let cur = turn_usage.get_or_insert_with(Usage::default);
+                cur.input_tokens = cur.input_tokens.saturating_add(u.input_tokens);
+                cur.output_tokens = cur.output_tokens.saturating_add(u.output_tokens);
+                if let Some(r) = u.cache_read_input_tokens {
+                    cur.cache_read_input_tokens =
+                        Some(cur.cache_read_input_tokens.unwrap_or(0).saturating_add(r));
+                }
+                if let Some(w) = u.cache_creation_input_tokens {
+                    cur.cache_creation_input_tokens = Some(
+                        cur.cache_creation_input_tokens
+                            .unwrap_or(0)
+                            .saturating_add(w),
+                    );
+                }
             }
         }
         let ts = prompt
             .or_else(|| body.first())
             .map_or(meta.timestamp, |m| m.timestamp);
         let payload = builder.build_turn(turn_idx, prompt, body);
-        turn_payloads.push((ts.timestamp_millis(), payload, turn_input, turn_output));
+        turn_payloads.push(TurnPayload {
+            timestamp_ms: ts.timestamp_millis(),
+            turn: payload,
+            usage: turn_usage,
+        });
         turn_idx += 1;
     }
 
-    // Assemble the event log: the session header, then one committed event
-    // per turn. Byte offsets are computed from the rendered lines.
-    let mut events: Vec<Value> = Vec::new();
-    events.push(session_started(&session_id, &generation, created_ms, meta));
-    let mut last_ts = created_ms;
-    for (idx, (ts_ms, turn, turn_input, turn_output)) in turn_payloads.into_iter().enumerate() {
-        last_ts = ts_ms;
-        let seq = u64::try_from(idx).unwrap_or(0) + 2;
-        events.push(json!({
-            "schema_version": 1,
-            "log_generation": generation,
-            "seq": seq,
-            "event_id": derived_hex(&session_id, &format!("event:{seq}")),
-            "timestamp_ms": ts_ms,
-            "kind": "history_turn_committed",
-            "payload": {
-                "conversation_language": "und",
-                "total_input_tokens": turn_input,
-                "total_output_tokens": turn_output,
-                "turn": turn,
-            },
-        }));
-    }
+    let (events, last_ts) =
+        build_turn_events(&session_id, &generation, created_ms, meta, turn_payloads);
 
     let mut total_input = 0u64;
     let mut total_output = 0u64;
