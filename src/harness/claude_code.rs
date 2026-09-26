@@ -500,13 +500,25 @@ impl Store for ClaudeStore {
         let transcript = if transcript.meta.id == id {
             transcript
         } else {
+            let mut body = transcript.body.clone();
+            for record in &mut body {
+                match record {
+                    Record::User(entry) | Record::Assistant(entry) => {
+                        entry.session_id = Some(id.clone());
+                    }
+                    Record::Other(Value::Object(map)) if map.contains_key("sessionId") => {
+                        map.insert("sessionId".to_string(), Value::String(id.clone()));
+                    }
+                    _ => {}
+                }
+            }
             stamped = Transcript::new(
                 {
                     let mut m = transcript.meta.clone();
                     m.id.clone_from(&id);
                     m
                 },
-                transcript.body.clone(),
+                body,
             );
             &stamped
         };

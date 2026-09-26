@@ -88,6 +88,9 @@ fn store_save_empty_id_synthesizes_uuid() {
             .ends_with(&format!("{}.jsonl", saved.id))
     );
     uuid::Uuid::parse_str(&saved.id).unwrap();
+
+    let reloaded = store.load(&saved.reference).unwrap();
+    assert_eq!(reloaded.meta.id, saved.id);
 }
 
 #[test]

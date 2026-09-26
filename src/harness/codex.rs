@@ -794,13 +794,39 @@ impl Store for CodexStore {
         let transcript = if transcript.meta.id == id {
             transcript
         } else {
+            let mut body = transcript.body.clone();
+            let mut found_session_meta = false;
+            for line in &mut body {
+                if line.kind == "session_meta"
+                    && let Value::Object(map) = &mut line.payload
+                {
+                    map.insert("id".to_string(), Value::String(id.clone()));
+                    found_session_meta = true;
+                }
+            }
+            if !found_session_meta {
+                let payload = json!({
+                    "id": id,
+                    "timestamp": transcript.meta.timestamp.to_rfc3339_opts(SecondsFormat::Millis, true),
+                    "cwd": transcript.meta.cwd.clone().unwrap_or_default(),
+                    "originator": "codex_cli_rs",
+                    "cli_version": transcript.meta.cli_version.clone().unwrap_or_default(),
+                    "source": "cli",
+                    "model_provider": "openai",
+                    "base_instructions": Value::Null,
+                });
+                body.insert(
+                    0,
+                    meta_line(&transcript.meta.timestamp, "session_meta", payload),
+                );
+            }
             stamped = Transcript::new(
                 {
                     let mut m = transcript.meta.clone();
                     m.id.clone_from(&id);
                     m
                 },
-                transcript.body.clone(),
+                body,
             );
             &stamped
         };
