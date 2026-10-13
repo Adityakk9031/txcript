@@ -95,6 +95,8 @@ Exposes three read-only tools; their optional filters match the CLI:
 
 `list_sessions` pages with `limit` and `offset` and reports the total before paging; the live Claude Chat and ChatGPT sources are never listed. `read_session` takes the same `#range` suffix as `view` and returns the same compact text; a read too large to return whole is refused with suggested sub-ranges. `--cache` applies to the server too.
 
+`search_sessions` runs beside whatever its person is doing on the machine: it reads sessions on half the cores, holds each only while it is searched, and stops when the client cancels the call or disconnects.
+
 
 ### Shell integration
 
