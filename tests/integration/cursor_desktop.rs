@@ -805,6 +805,72 @@ fn delete_exact_session_id_does_not_delete_prefixed_sibling() {
 
 #[cfg(feature = "opencode")]
 #[test]
+fn delete_escapes_like_wildcards_in_session_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("globalStorage").join("state.vscdb");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO cursorDiskKV VALUES ('composerData:session_1', '{}');
+         INSERT INTO cursorDiskKV VALUES ('bubbleId:session_1:b1', '{}');
+         INSERT INTO cursorDiskKV VALUES ('composerData:sessionX1', '{}');
+         INSERT INTO cursorDiskKV VALUES ('bubbleId:sessionX1:b1', '{}');
+         INSERT INTO cursorDiskKV VALUES ('composerData:session%1', '{}');
+         INSERT INTO cursorDiskKV VALUES ('bubbleId:session%1:b1', '{}');
+         INSERT INTO cursorDiskKV VALUES ('composerData:sessionANYTHING1', '{}');
+         INSERT INTO cursorDiskKV VALUES ('bubbleId:sessionANYTHING1:b1', '{}');",
+    )
+    .unwrap();
+
+    let store = CursorDesktopStore::new(dir.path());
+
+    // Delete session_1: should NOT delete sessionX1 or sessionANYTHING1 or session%1
+    store.delete(&"session_1".to_string()).unwrap();
+
+    let count_session_x1: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM cursorDiskKV WHERE key LIKE '%sessionX1%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count_session_x1, 2);
+
+    let count_deleted_underscore: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM cursorDiskKV WHERE key LIKE '%session\\_1%' ESCAPE '\\'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count_deleted_underscore, 0);
+
+    // Delete session%1: should NOT delete sessionANYTHING1
+    store.delete(&"session%1".to_string()).unwrap();
+
+    let count_session_anything1: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM cursorDiskKV WHERE key LIKE '%sessionANYTHING1%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count_session_anything1, 2);
+
+    let count_deleted_percent: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM cursorDiskKV WHERE key LIKE '%session\\%1%' ESCAPE '\\'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count_deleted_percent, 0);
+}
+
+#[cfg(feature = "opencode")]
+#[test]
 fn store_resolves_workspace_id_with_percent_encoding_and_spaces() {
     let dir = tempfile::tempdir().unwrap();
     let store = CursorDesktopStore::new(dir.path());

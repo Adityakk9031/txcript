@@ -1290,14 +1290,15 @@ impl Store for CursorDesktopStore {
         } else {
             0
         };
+        let escaped = escape_like_pattern(reference);
         let deleted_kv: usize = conn
             .execute(
-                "DELETE FROM cursorDiskKV WHERE key = ?1 OR key LIKE ?2 OR key LIKE ?3 OR key LIKE ?4",
+                "DELETE FROM cursorDiskKV WHERE key = ?1 OR key LIKE ?2 ESCAPE '\\' OR key LIKE ?3 ESCAPE '\\' OR key LIKE ?4 ESCAPE '\\'",
                 params![
                     format!("composerData:{reference}"),
-                    format!("bubbleId:{reference}:%"),
-                    format!("%:{reference}"),
-                    format!("%:{reference}:%"),
+                    format!("bubbleId:{escaped}:%"),
+                    format!("%:{escaped}"),
+                    format!("%:{escaped}:%"),
                 ],
             )
             .map_err(sqlite_err)?;
@@ -1440,6 +1441,18 @@ fn discover_from_headers(conn: &Connection) -> Result<Vec<Discovered<String>>> {
             reference: cid,
         })
         .collect())
+}
+
+#[cfg(feature = "opencode")]
+fn escape_like_pattern(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Half-open key range covering every key that starts with `prefix`: the
