@@ -32,6 +32,33 @@ are not followed, guarding against cycles; symlinked files still list). A file o
 session if it contains a `session_meta` line carrying an `id`; discovery parses just those lines
 and skips message payloads entirely. On load, a missing id falls back to the filename's uuid.
 
+Codex compresses a rollout it hasn't written to for 7 days. It replaces the file in place with
+`rollout-<ts>-<id>.jsonl.zst`, one zstd frame at level 3, and expands it back to `.jsonl` the
+next time the session is resumed. Upstream gates this behind its
+`local_thread_store_compression` feature. With txcript's `codex_zstd` feature, on by default,
+discovery lists a compressed rollout and `load` decodes it. Discovery reads only as far as the
+header line, so listing a compressed session costs about what a plain one does. Both forms can be
+on disk for a moment while Codex compresses or expands a session. Codex reads the plain one then,
+and discovery lists only that one. Without the feature a compressed rollout isn't listed. zstd is
+a C library, so the wasm build leaves it out.
+
+Codex's own `/archive` (TUI) and `codex archive`/`codex unarchive` (CLI) move a rollout out of
+this dated tree into a flat sibling directory, `archived_sessions` (no `YYYY/MM/DD` sharding).
+`CodexStore::default_root` sets `archived_sessions_dir` to that sibling, and discovery walks it
+alongside `sessions_dir`, so an archived rollout is still listed — Codex's own session picker just
+won't show it until it's unarchived back into `sessions/`. A `CodexStore` built directly from a
+custom `sessions_dir` has no archived directory unless one is set with
+`with_archived_sessions_dir`.
+
+Deletion accepts rollout files, plain or compressed, in either configured directory, including
+when the active directory is missing. It resolves symlinks before checking containment and refuses paths
+outside both directories. Saving always writes into `sessions_dir`.
+
+For Rust callers, the new public field changes struct-literal construction. Replace
+`CodexStore { sessions_dir }` with `CodexStore::new(sessions_dir)`, or include
+`archived_sessions_dir: None` in the literal. Use `with_archived_sessions_dir` to enable
+archives for a custom store.
+
 ## Dissection of a transcript
 
 Every line shares one envelope — upstream's `RolloutLine`: a `timestamp` (RFC 3339, millisecond
@@ -43,7 +70,7 @@ it carries.
 
 | Their name | What it is | Maps to |
 |---|---|---|
-| `session_meta` | Header: `id`, `timestamp`, `cwd`, `cli_version`, `git.branch`, `model_provider`, instructions | `Meta` (id, timestamp, cwd, git_branch, cli_version, model) |
+| `session_meta` | Header: `id`, `timestamp`, `cwd`, `cli_version`, `git.branch`, `model_provider`, instructions, `source`/`parent_thread_id`/`forked_from_id` | `Meta` (id, timestamp, cwd, git_branch, cli_version, model, lineage) |
 | `turn_context` | Turn boundary: `turn_id`, `model`, cwd, sandbox/approval policy | Model attribution for the turn's assistant messages |
 | `response_item` / `message` | User or assistant message; `content` array of `input_text` / `output_text` / `input_image` (data URL) | `Message` with `Text` / `Image` blocks |
 | `response_item` / `reasoning` | Reasoning item: `summary` array of `summary_text`, opaque `encrypted_content` | Assistant `Thinking` block (summary text only) |
@@ -75,6 +102,19 @@ A synthetic `response_item` line, shaped like the real thing:
 
 That becomes an assistant `ToolUse` with tool `Bash { command: "cargo test" }` — argv arrays of
 the form `["bash"|"sh"|"zsh", "-lc"|"-c", cmd]` collapse to the inner command.
+
+## Lineage
+
+`session_meta.payload` names a parent two ways, and `Meta::lineage` is filled from whichever
+applies, at discovery time as well as on load — reading the header line is all it costs.
+`source.subagent` present means this thread was spawned: the parent is
+`source.subagent.thread_spawn.parent_thread_id` for a spawned subagent, or the top-level
+`parent_thread_id` for the guardian-review shape (`source.subagent.other == "guardian"`, usually
+paired with `thread_source: "guardian_review"`) and any other subagent shape. No `source.subagent`
+but a top-level `parent_thread_id` is also a spawn. Otherwise, `forked_from_id` is a fork. A
+subagent thread forked from its parent's history at spawn time carries both fields; spawn wins.
+Writing lineage back into a rollout is not implemented yet — `from_common` never emits
+`source`/`parent_thread_id`/`forked_from_id`.
 
 ## Caveats
 
@@ -118,7 +158,9 @@ the form `["bash"|"sh"|"zsh", "-lc"|"-c", cmd]` collapse to the inner command.
   <https://github.com/openai/codex/blob/260261ed8f5c91ad6b7f695571a4111ed1a46272/codex-rs/rollout/src/recorder.rs> (accessed 2026-08-10)
 - Payload item types (`ResponseItem`, `EventMsg`, `SessionMeta`, `TurnContext`):
   <https://github.com/openai/codex/blob/260261ed8f5c91ad6b7f695571a4111ed1a46272/codex-rs/protocol/src/protocol.rs> (accessed 2026-08-10)
+- Upstream compression (the `.jsonl.zst` name, the 7-day age, plain read before compressed):
+  <https://github.com/openai/codex/blob/eb1d7065f8b1b2fb3d197bc66448deb432ab0a12/codex-rs/rollout/src/compression.rs> (accessed 2026-10-13)
 - Authoritative mapping in this repo: `src/harness/codex.rs` (codec, store, tool normalization),
   with shape fixtures and aggregation assertions in `tests/integration/codex.rs`.
 
-Last verified: 2026-08-10, against src/harness/codex.rs and real local sessions.
+Last verified: 2026-10-13, against src/harness/codex.rs and real local sessions.
