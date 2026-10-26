@@ -314,6 +314,8 @@ fn meta_from_export(body: &Value) -> Meta {
         title: string("title"),
         cli_version: string("cli_version"),
         model: string("model"),
+        // Hermes's export carries no parent/fork/spawn signal.
+        lineage: None,
     }
 }
 
@@ -817,7 +819,8 @@ fn native_content(blocks: &[Block]) -> Value {
         let text = blocks
             .iter()
             .filter_map(|block| match block {
-                Block::Text { text } => Some(text.as_str()),
+                Block::Text { text } => Some(text.clone()),
+                Block::Artifact { artifact } => Some(artifact.display_text()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -833,6 +836,9 @@ fn native_content(blocks: &[Block]) -> Value {
             .iter()
             .filter_map(|block| match block {
                 Block::Text { text } => Some(json!({"type": "text", "text": text})),
+                Block::Artifact { artifact } => {
+                    Some(json!({"type": "text", "text": artifact.display_text()}))
+                }
                 Block::Image { source } => Some(json!({
                     "type": "image_url",
                     "image_url": {

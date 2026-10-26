@@ -54,7 +54,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use txcript::harness::{amp, chatgpt, claude_chat, simple};
+use txcript::harness::{amp, chatgpt, claude_chat, cowork_remote, simple};
 use txcript::{Codec, Common, HarnessId, Store, TextCodec, Transcript, local};
 
 pub mod cache;
@@ -69,7 +69,7 @@ mod pager;
 mod view;
 
 pub const HARNESSES: &str = "harnesses: claude_code, claude_chat, chatgpt, codex, opencode, pi, campfire, cursor, cursor_desktop, grok, fx, hermes, \
-     amp, antigravity, simple, cowork";
+     amp, antigravity, simple, cowork, cowork_remote";
 
 /// The `txcript` binary's command line.
 #[derive(Parser)]
@@ -269,6 +269,20 @@ pub enum SessionCommand {
         /// Only sessions recorded in or under this working directory
         #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
         cwd: Option<PathBuf>,
+        /// Only sessions on this git branch (exact match)
+        #[arg(long, value_name = "BRANCH")]
+        git_branch: Option<String>,
+        /// Only sessions that used this model (case-insensitive substring)
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+        /// Only sessions started at or after this time (RFC3339 or
+        /// YYYY-MM-DD, a bare date meaning that local midnight)
+        #[arg(long, value_name = "WHEN", value_parser = parse_since)]
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        /// Only sessions started at or before this time (RFC3339 or
+        /// YYYY-MM-DD, a bare date meaning the end of that local day)
+        #[arg(long, value_name = "WHEN", value_parser = parse_until)]
+        until: Option<chrono::DateTime<chrono::Utc>>,
     },
 }
 
@@ -402,7 +416,109 @@ pub fn run_session(command: SessionCommand, options: &Options) -> Result<ExitCod
             with,
             from,
             cwd,
-        } => query::cmd_query(pattern, with, from, cwd.as_deref(), cache),
+            git_branch,
+            model,
+            since,
+            until,
+        } => query::cmd_query(
+            pattern,
+            with,
+            from,
+            cwd.as_deref(),
+            git_branch.as_deref(),
+            model.as_deref(),
+            since,
+            until,
+            cache,
+        ),
+    }
+}
+
+/// Strip the Windows verbatim-device prefix (`\\?\`, including `\\?\UNC\`)
+/// that `canonicalize` adds, so vanished paths still match canonicalized
+/// parents. Wide-char math keeps non-UTF8 paths intact.
+#[cfg(windows)]
+const VERBATIM_PREFIX: &[u16] = &[0x5C, 0x5C, 0x3F, 0x5C]; // `\\?\`
+#[cfg(windows)]
+const UNC_PREFIX: &[u16] = &[0x5C, 0x5C, 0x3F, 0x5C, 0x55, 0x4E, 0x43, 0x5C]; // `\\?\UNC\`
+
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: &std::path::Path) -> std::path::PathBuf {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if let Some(rest) = wide.strip_prefix(UNC_PREFIX) {
+        // `\\?\UNC\server\share` ⟺ `\\server\share`.
+        let mut full = vec![0x5C, 0x5C];
+        full.extend_from_slice(rest);
+        std::ffi::OsString::from_wide(&full).into()
+    } else if let Some(rest) = wide.strip_prefix(VERBATIM_PREFIX) {
+        std::ffi::OsString::from_wide(rest).into()
+    } else {
+        path.to_path_buf()
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(path: &std::path::Path) -> std::path::PathBuf {
+    path.to_path_buf()
+}
+
+/// Component-wise `starts_with` that folds case on Windows, where `C:\Users`
+/// and `c:\users` are the same directory. Non-Windows keeps the exact
+/// `Path::starts_with`.
+fn path_starts_with(child: &std::path::Path, parent: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        let mut child_comps = child.components();
+        let mut parent_comps = parent.components();
+        loop {
+            match (parent_comps.next(), child_comps.next()) {
+                (None, _) => return true,
+                (Some(_), None) => return false,
+                (Some(p), Some(c)) => {
+                    // Unicode lowercase approximates the filesystem's own
+                    // case folding; ASCII-only would miss e.g. `é` vs `É`.
+                    if p.as_os_str().to_string_lossy().to_lowercase()
+                        != c.as_os_str().to_string_lossy().to_lowercase()
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        child.starts_with(parent)
+    }
+}
+
+/// Canonicalize the longest existing prefix of `path`, re-appending the
+/// vanished tail verbatim, so the parent still resolves symlinks, junctions,
+/// or 8.3 short names the raw spelling would mismatch.
+fn canonicalize_lenient(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(base) = current.canonicalize() {
+            let mut out = strip_verbatim_prefix(&base);
+            for component in tail.iter().rev() {
+                out.push(component);
+            }
+            return out;
+        }
+        let mut components = current.components();
+        match components.next_back() {
+            // Empty path, or only a prefix/root remains: nothing resolvable.
+            None | Some(Component::Prefix(_) | Component::RootDir) => {
+                return strip_verbatim_prefix(path);
+            }
+            Some(last) => {
+                tail.push(last.as_os_str().to_os_string());
+                current = components.as_path();
+            }
+        }
     }
 }
 
@@ -415,8 +531,10 @@ pub fn run_session(command: SessionCommand, options: &Options) -> Result<ExitCod
 /// vanished directories compare as plain components.
 #[must_use]
 pub fn under_dir(session_cwd: &str, dir: &std::path::Path) -> bool {
-    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    canon(std::path::Path::new(session_cwd)).starts_with(canon(dir))
+    path_starts_with(
+        &canonicalize_lenient(std::path::Path::new(session_cwd)),
+        &canonicalize_lenient(dir),
+    )
 }
 
 /// The `--from`/`--cwd` session filters shared by `list` and `query`.
@@ -529,6 +647,54 @@ pub(crate) fn load_direct_chatgpt(source: &str, from: Option<HarnessId>) -> Opti
         let common = chatgpt::ChatGpt::to_common(&native).map_err(|error| error.to_string())?;
         Ok((common, request))
     })())
+}
+
+/// A full cloud Cowork id bypasses listing, like Claude Chat UUID reads.
+pub(crate) fn load_direct_cowork_remote(
+    source: &str,
+    from: Option<HarnessId>,
+) -> Option<LoadedSession> {
+    if from != Some(HarnessId::CoworkRemote) {
+        return None;
+    }
+    let (id, request) = fragment::parse_ref(source);
+    let normalized = cowork_remote::normalize_id(id);
+    // A mistyped link/id must not turn into an account-wide title search.
+    if normalized.is_err()
+        && !id.contains("://")
+        && !id.starts_with("cse_")
+        && !id.starts_with("session_")
+        && uuid::Uuid::parse_str(id).is_err()
+    {
+        return None;
+    }
+    Some((|| {
+        let id = normalized.map_err(|error| error.to_string())?;
+        let store =
+            cowork_remote::CoworkRemoteStore::from_desktop().map_err(|error| error.to_string())?;
+        let reference = store
+            .session_ref(&id, None)
+            .map_err(|error| error.to_string())?;
+        let native = store.load(&reference).map_err(|error| error.to_string())?;
+        let common =
+            cowork_remote::CoworkRemote::to_common(&native).map_err(|error| error.to_string())?;
+        Ok((common, request))
+    })())
+}
+
+/// Dispatch only an explicitly selected live source with a full provider id.
+pub(crate) fn load_direct_remote(
+    source: &str,
+    from: Option<HarnessId>,
+) -> Option<(HarnessId, LoadedSession)> {
+    let harness = from?;
+    let loaded = match harness {
+        HarnessId::ClaudeChat => load_direct_claude_chat(source, from),
+        HarnessId::ChatGpt => load_direct_chatgpt(source, from),
+        HarnessId::CoworkRemote => load_direct_cowork_remote(source, from),
+        _ => return None,
+    }?;
+    Some((harness, loaded))
 }
 
 /// Positions of the first occurrence of each distinct id starting with
@@ -693,10 +859,66 @@ mod filter_tests {
             Some(repo)
         ));
     }
+
+    #[test]
+    fn strip_verbatim_prefix_leaves_plain_paths_alone() {
+        let p = std::path::Path::new("some/relative/dir");
+        assert_eq!(super::strip_verbatim_prefix(p), p.to_path_buf());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strip_verbatim_prefix_strips_device_and_unc_forms() {
+        assert_eq!(
+            super::strip_verbatim_prefix(std::path::Path::new(r"\\?\C:\some\repo")),
+            std::path::PathBuf::from(r"C:\some\repo")
+        );
+        assert_eq!(
+            super::strip_verbatim_prefix(std::path::Path::new(r"\\?\UNC\server\share")),
+            std::path::PathBuf::from(r"\\server\share")
+        );
+    }
+
+    // Drive-letter paths only parse where `\` separates components.
+    // The tempdir case is the reported scenario: live `dir`, vanished child.
+    #[cfg(windows)]
+    #[test]
+    fn cwd_filter_matches_vanished_child_of_live_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("packages").join("foo");
+        assert!(super::under_dir(gone.to_str().unwrap(), dir.path()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cwd_filter_handles_windows_verbatim_prefixes_and_casing() {
+        let dir = std::path::Path::new(r"C:\some\repo");
+        assert!(super::under_dir(r"C:\some\repo\packages\foo", dir));
+        assert!(super::under_dir(r"c:\Some\Repo\packages\foo", dir));
+        assert!(super::under_dir(r"C:/some/repo/packages/foo", dir));
+        assert!(!super::under_dir(r"C:\some\repo2", dir));
+        assert!(!super::under_dir(r"C:\other\repo", dir));
+    }
 }
 
 #[cfg(test)]
 mod resolve_tests {
+
+    #[test]
+    fn cowork_urls_require_explicit_source_and_invalid_urls_never_become_searches() {
+        let valid = "https://claude.ai/chat/00000000-0000-8000-8000-000000000002";
+        assert!(super::load_direct_remote(valid, None).is_none());
+        for source in [
+            "https://evil.test/cowork/cse_one",
+            "cse_../bad",
+            "https://claude.ai/chat/00000000-0000-4000-8000-000000000002",
+        ] {
+            assert!(matches!(
+                super::load_direct_remote(source, Some(txcript::HarnessId::CoworkRemote)),
+                Some((txcript::HarnessId::CoworkRemote, Err(_)))
+            ));
+        }
+    }
     use super::distinct_prefix_matches;
 
     #[test]
@@ -886,6 +1108,7 @@ mod identity_tests {
                 title: None,
                 cli_version: None,
                 model: None,
+                lineage: None,
             },
             Vec::new(),
         )
@@ -922,6 +1145,13 @@ mod identity_tests {
         );
         assert_eq!(copy.meta.id, id);
         assert_eq!(copy.meta.timestamp, ts);
+    }
+
+    #[test]
+    fn cowork_remote_is_refused_even_for_an_in_place_continue() {
+        let error =
+            ensure_resumable_source(HarnessId::CoworkRemote, HarnessId::CoworkRemote).unwrap_err();
+        assert!(error.contains("pull-only"));
     }
 
     #[test]
@@ -977,6 +1207,9 @@ fn cmd_list(
             _ => " in that time range".to_string(),
         };
         match from {
+            Some(HarnessId::CoworkRemote) => {
+                println!("no cloud Cowork sessions found{scope}{when}");
+            }
             Some(HarnessId::ClaudeChat) => {
                 println!("no Claude Chat sessions found{scope}{when}");
             }
@@ -1074,23 +1307,23 @@ mod style {
 
     const fn color(h: HarnessId) -> &'static str {
         match h {
-            HarnessId::ClaudeCode => "\x1b[33m",       // yellow
-            HarnessId::ClaudeChat => "\x1b[38;5;214m", // amber
-            HarnessId::ChatGpt => "\x1b[38;5;71m",     // OpenAI green
-            HarnessId::Codex => "\x1b[36m",            // cyan
-            HarnessId::OpenCode => "\x1b[32m",         // green
-            HarnessId::Pi => "\x1b[35m",               // magenta
-            HarnessId::Campfire => "\x1b[91m",         // bright red
-            HarnessId::Cursor => "\x1b[34m",           // blue
-            HarnessId::CursorDesktop => "\x1b[96m",    // bright cyan
-            HarnessId::Grok => "\x1b[37m",             // white
-            HarnessId::GrokBot => "\x1b[97m",          // bright white
-            HarnessId::Fx => "\x1b[38;5;39m",          // azure
-            HarnessId::Hermes => "\x1b[93m",           // bright yellow
-            HarnessId::Amp => "\x1b[95m",              // bright magenta
-            HarnessId::Antigravity => "\x1b[94m",      // bright blue
-            HarnessId::Simple => "\x1b[92m",           // bright green
-            HarnessId::Cowork => "\x1b[38;5;208m",     // orange
+            HarnessId::ClaudeCode => "\x1b[33m", // yellow
+            HarnessId::CoworkRemote | HarnessId::ClaudeChat => "\x1b[38;5;214m", // amber
+            HarnessId::ChatGpt => "\x1b[38;5;71m", // OpenAI green
+            HarnessId::Codex => "\x1b[36m",      // cyan
+            HarnessId::OpenCode => "\x1b[32m",   // green
+            HarnessId::Pi => "\x1b[35m",         // magenta
+            HarnessId::Campfire => "\x1b[91m",   // bright red
+            HarnessId::Cursor => "\x1b[34m",     // blue
+            HarnessId::CursorDesktop => "\x1b[96m", // bright cyan
+            HarnessId::Grok => "\x1b[37m",       // white
+            HarnessId::GrokBot => "\x1b[97m",    // bright white
+            HarnessId::Fx => "\x1b[38;5;39m",    // azure
+            HarnessId::Hermes => "\x1b[93m",     // bright yellow
+            HarnessId::Amp => "\x1b[95m",        // bright magenta
+            HarnessId::Antigravity => "\x1b[94m", // bright blue
+            HarnessId::Simple => "\x1b[92m",     // bright green
+            HarnessId::Cowork => "\x1b[38;5;208m", // orange
         }
     }
 }
@@ -1111,19 +1344,17 @@ fn cmd_crop(
         ensure_crop_target(target)?;
     }
 
-    if let Some(loaded) = load_direct_claude_chat(source, from) {
-        let target = with.unwrap_or(HarnessId::ClaudeChat);
+    if with.is_none()
+        && let Some(source) = from
+    {
+        ensure_crop_target(source)?;
+    }
+    if let Some((source_harness, loaded)) = load_direct_remote(source, from) {
+        let target = with.unwrap_or(source_harness);
         ensure_crop_target(target)?;
         let (common, request) = loaded?;
-        return crop_loaded(&common, HarnessId::ClaudeChat, target, request.as_ref());
+        return crop_loaded(&common, source_harness, target, request.as_ref());
     }
-    if let Some(loaded) = load_direct_chatgpt(source, from) {
-        let target = with.unwrap_or(HarnessId::ChatGpt);
-        ensure_crop_target(target)?;
-        let (common, request) = loaded?;
-        return crop_loaded(&common, HarnessId::ChatGpt, target, request.as_ref());
-    }
-
     let sessions = discover_with_spinner(from)?;
     let (id, request) = match crop_ref(source) {
         (_, Some(_)) if find_exact(&sessions, from, source).is_some() => (source, None),
@@ -1233,13 +1464,16 @@ fn cmd_continue(
         );
     }
 
-    if let Some(loaded) = load_direct_claude_chat(id, from) {
-        let target = with.unwrap_or(HarnessId::ClaudeChat);
-        ensure_resumable_source(HarnessId::ClaudeChat, target)?;
+    if let Some(source) = from {
+        ensure_resumable_source(source, with.unwrap_or(source))?;
+    }
+    if let Some((source_harness, loaded)) = load_direct_remote(id, from) {
+        let target = with.unwrap_or(source_harness);
+        ensure_resumable_source(source_harness, target)?;
         let (common, request) = loaded?;
         return continue_loaded_remote(
             common,
-            HarnessId::ClaudeChat,
+            source_harness,
             target,
             request.as_ref(),
             out.map(PathBuf::as_path),
@@ -1247,23 +1481,6 @@ fn cmd_continue(
             metadata,
         );
     }
-    if let Some(loaded) = load_direct_chatgpt(id, from) {
-        let target = with.unwrap_or(HarnessId::ChatGpt);
-        ensure_resumable_source(HarnessId::ChatGpt, target)?;
-        let (common, request) = loaded?;
-        return continue_loaded_remote(
-            common,
-            HarnessId::ChatGpt,
-            target,
-            request.as_ref(),
-            out.map(PathBuf::as_path),
-            wants_resume(target, out.is_some(), no_resume),
-            metadata,
-        );
-    }
-
-    // Locate the session by id (exact or unambiguous prefix) or exact title,
-    // optionally scoped to one harness.
     let sessions = discover_with_spinner(from)?;
     // A whole-input match (a title that itself contains `#12`) beats the
     // fragment interpretation.
@@ -1674,7 +1891,8 @@ fn continue_loaded_remote(
 fn ensure_crop_target(target: HarnessId) -> Result<(), String> {
     if matches!(
         target,
-        HarnessId::ClaudeChat
+        HarnessId::CoworkRemote
+            | HarnessId::ClaudeChat
             | HarnessId::ChatGpt
             | HarnessId::Hermes
             | HarnessId::Amp
@@ -1689,7 +1907,9 @@ fn ensure_crop_target(target: HarnessId) -> Result<(), String> {
 }
 
 fn ensure_resumable_source(source: HarnessId, target: HarnessId) -> Result<(), String> {
-    if source == HarnessId::ClaudeChat && target == HarnessId::ClaudeChat {
+    if source == HarnessId::CoworkRemote && target == HarnessId::CoworkRemote {
+        Err("cloud Cowork is pull-only; choose another --with harness".into())
+    } else if source == HarnessId::ClaudeChat && target == HarnessId::ClaudeChat {
         Err(
             "Claude Chat is pull-only: choose another --with harness; txcript never continues conversations in Claude"
                 .to_string(),
@@ -1884,7 +2104,10 @@ fn resume_workdir(cwd: Option<&str>) -> Option<PathBuf> {
 
 fn discover_with_spinner(from: Option<HarnessId>) -> Result<Vec<local::Session>, String> {
     let spinner = spin::Spinner::start("searching local sessions…");
-    let sessions = if matches!(from, Some(HarnessId::ClaudeChat | HarnessId::ChatGpt)) {
+    let sessions = if matches!(
+        from,
+        Some(HarnessId::ClaudeChat | HarnessId::CoworkRemote | HarnessId::ChatGpt)
+    ) {
         let harness = from.unwrap_or(HarnessId::ClaudeChat);
         spinner.set(format!("reading {harness}…"));
         local::discover_harness(harness).map_err(|error| error.to_string())?
@@ -2127,17 +2350,13 @@ pub use query::{Sessions, build_index, doc_key};
 mod query {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
 
-    use txcript::search::{Case, DocKey, DocMatch, Extracted, Index, Origin, Query};
-    use txcript::{HarnessId, local};
+    use txcript::search::{Case, DocKey, Extracted, Found, Index, Origin, Query, Scan};
+    use txcript::{Common, HarnessId, Transcript, local};
 
-    /// One unit of index-building work, per session.
-    enum Work {
-        /// Parse the session from its store and extract it.
-        Parse(usize),
-        /// Deserialize the cached extraction.
-        Thaw(usize, Vec<u8>),
-    }
+    use super::cache::Cache;
 
     /// The sessions behind an index, keyed by the full [`DocKey`] — source
     /// included — so two sessions sharing a (harness, id), as Claude Code
@@ -2155,14 +2374,71 @@ mod query {
         }
     }
 
-    /// Build the same filtered index used by the CLI for the MCP search tool.
+    /// Which sessions a query reads: the CLI's `--from` and `--cwd`, and
+    /// the metadata filters.
+    pub(super) struct Scope<'a> {
+        pub from: Option<HarnessId>,
+        pub cwd: Option<&'a Path>,
+        pub git_branch: Option<&'a str>,
+        pub model: Option<&'a str>,
+        pub since: Option<chrono::DateTime<chrono::Utc>>,
+        pub until: Option<chrono::DateTime<chrono::Utc>>,
+    }
+
+    impl Scope<'_> {
+        fn holds(&self, session: &local::Session) -> bool {
+            if !super::selected(session, self.from, self.cwd) {
+                return false;
+            }
+            if let Some(branch) = self.git_branch
+                && session.meta.git_branch.as_deref() != Some(branch)
+            {
+                return false;
+            }
+            if let Some(model) = self.model
+                && !session
+                    .meta
+                    .model
+                    .as_deref()
+                    .is_some_and(|m| m.to_lowercase().contains(&model.to_lowercase()))
+            {
+                return false;
+            }
+            if let Some(since) = self.since
+                && session.meta.timestamp < since
+            {
+                return false;
+            }
+            if let Some(until) = self.until
+                && session.meta.timestamp > until
+            {
+                return false;
+            }
+            true
+        }
+    }
+
+    /// One read of the sessions in a scope: with which cache, on how many
+    /// threads, and until when.
+    pub(super) struct Job<'a> {
+        pub scope: Scope<'a>,
+        /// The persistent search cache; `None` parses every session.
+        pub cache: Option<&'a Path>,
+        pub workers: usize,
+        /// Asked between sessions: once true, no further session is read.
+        pub cancelled: &'a (dyn Fn() -> bool + Sync),
+    }
+
+    /// Every core: for a person waiting on a terminal.
+    pub(super) fn every_core() -> usize {
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+    }
+
+    /// Half the cores: for a search an agent starts while its person works
+    /// on the same machine, which must not take the machine from them.
     #[cfg(feature = "mcp")]
-    pub(super) fn index_for(
-        from: Option<HarnessId>,
-        cwd: Option<&Path>,
-        cache: Option<&Path>,
-    ) -> Result<Index, String> {
-        build_index(from, cwd, cache).map(|(index, _)| index)
+    pub(super) fn half_the_cores() -> usize {
+        (every_core() / 2).max(1)
     }
 
     /// The query behind `txcript query` and the MCP search tool: the pattern
@@ -2175,70 +2451,233 @@ mod query {
         q
     }
 
+    /// [`user_query`] with the bounds of a one-shot answer, at a terminal or
+    /// to an agent: the best twenty sessions, three lines of each.
+    pub(super) fn one_shot_query(pattern: &str) -> Query {
+        let mut q = user_query(pattern);
+        q.limit = Some(20);
+        q.hits_per_doc = Some(3);
+        q
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn cmd_query(
         pattern: Option<String>,
         with: Option<HarnessId>,
         from: Option<HarnessId>,
         cwd: Option<&Path>,
+        git_branch: Option<&str>,
+        model: Option<&str>,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        until: Option<chrono::DateTime<chrono::Utc>>,
         cache: Option<&Path>,
     ) -> Result<std::process::ExitCode, String> {
-        let (index, sessions) = build_index(from, cwd, cache)?;
-        match pattern {
-            Some(pattern) => {
-                if with.is_some() {
-                    eprintln!("warning: --with ignored with a pattern");
-                }
-                one_shot(&index, &pattern);
-                Ok(std::process::ExitCode::SUCCESS)
+        if let Some(pattern) = pattern {
+            let job = Job {
+                scope: Scope {
+                    from,
+                    cwd,
+                    git_branch,
+                    model,
+                    since,
+                    until,
+                },
+                cache,
+                workers: every_core(),
+                cancelled: &|| false,
+            };
+            let found = find(&job, &one_shot_query(&pattern))?;
+            if with.is_some() {
+                eprintln!("warning: --with ignored with a pattern");
             }
-            None => match tui::pick(&index)? {
-                // Cancelled; terminal already restored, nothing to continue.
-                None => Ok(std::process::ExitCode::SUCCESS),
-                Some(key) => {
-                    let session = sessions
-                        .get(&key)
-                        .ok_or("internal error: picked session not found")?;
-                    drop(index);
-                    super::continue_session(
-                        session,
-                        with,
-                        None,
-                        None,
-                        with != Some(HarnessId::GrokBot),
-                        None,
-                    )
-                }
-            },
+            one_shot(&found, &pattern);
+            return Ok(std::process::ExitCode::SUCCESS);
+        }
+        let (index, sessions) = build_index(from, cwd, git_branch, model, since, until, cache)?;
+        match tui::pick(&index)? {
+            // Cancelled; terminal already restored, nothing to continue.
+            None => Ok(std::process::ExitCode::SUCCESS),
+            Some(key) => {
+                let session = sessions
+                    .get(&key)
+                    .ok_or("internal error: picked session not found")?;
+                drop(index);
+                super::continue_session(
+                    session,
+                    with,
+                    None,
+                    None,
+                    with != Some(HarnessId::GrokBot),
+                    None,
+                )
+            }
         }
     }
 
     /// Build the search index and session lookup over every local session
-    /// passing the `from`/`cwd` filters.
+    /// passing the `from`/`cwd` filters, and applying the optional
+    /// `git_branch`, `model`, `since`, and `until` metadata filters so that
+    /// only matching sessions are indexed and returned.
     ///
-    /// Sessions parse and extract on every core: workers pull the next
-    /// undrained session, parse it, extract its searchable lines, and send
-    /// the result back over a bounded channel; this thread folds arrivals
-    /// into the index as they land, so at most a few extracted documents are
-    /// ever in flight.
+    /// The whole index is held in memory, which is what a picker querying it
+    /// per keystroke needs; one query is answered without it (see `find`).
+    /// Sessions are read on every core, as `read_sessions` describes.
     ///
     /// With a `cache` path, sessions whose change cursor (see
     /// [`local::fingerprints`]) matches the cached one are thawed from the
-    /// cache instead of parsed, and the cache is brought up to date
-    /// afterwards. A cache that can't be opened is reported on stderr and
+    /// cache instead of parsed, and the cache is brought up to date as they
+    /// are read. A cache that can't be opened is reported on stderr and
     /// skipped: the index is built the stateless way.
     ///
     /// # Errors
     /// Returns an error when an explicitly selected live store cannot be
     /// discovered or read.
+    #[allow(clippy::too_many_arguments)]
     pub fn build_index(
         from: Option<HarnessId>,
         cwd: Option<&Path>,
+        git_branch: Option<&str>,
+        model: Option<&str>,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        until: Option<chrono::DateTime<chrono::Utc>>,
         cache: Option<&Path>,
     ) -> Result<(Index, Sessions), String> {
-        let found = super::discover_with_spinner(from)?;
-        let spinner = super::spin::Spinner::start("indexing…");
-        let mut cache = cache.and_then(|path| match super::cache::Cache::open(path) {
-            Ok(cache) => Some(cache),
+        let job = Job {
+            scope: Scope {
+                from,
+                cwd,
+                git_branch,
+                model,
+                since,
+                until,
+            },
+            cache,
+            workers: every_core(),
+            cancelled: &|| false,
+        };
+        let mut arrived = Vec::new();
+        let read = read_sessions(
+            &job,
+            "indexing…",
+            || (),
+            |(), doc| doc,
+            |n, doc| arrived.push((n, doc)),
+        )?;
+        // Insert in discovery order, not arrival order: document order
+        // breaks full score-and-timestamp ties in query results, and it
+        // should not vary run to run.
+        arrived.sort_unstable_by_key(|&(n, _)| n);
+        let mut read: Vec<Option<local::Session>> = read.into_iter().map(Some).collect();
+        let mut index = Index::new();
+        let mut sessions = Sessions::new();
+        for (n, doc) in arrived {
+            // Only sessions that parsed are in the lookup, as in the index.
+            if let Some(session) = read[n].take() {
+                sessions.insert(doc_key(&session), session);
+            }
+            index.insert_extracted(doc);
+        }
+        Ok((index, sessions))
+    }
+
+    /// The documents [`Index::query`] would return for `query` over every
+    /// session in the job's scope, found without building the index: each
+    /// session is searched as it is read and then dropped, so memory follows
+    /// the largest sessions, not how many there are.
+    ///
+    /// # Errors
+    /// When an explicitly selected live store cannot be discovered or read,
+    /// or the job was cancelled before every session was searched.
+    pub(super) fn find(job: &Job<'_>, query: &Query) -> Result<Vec<Found>, String> {
+        let mut best = Best::new(query.limit);
+        read_sessions(
+            job,
+            "searching…",
+            || Scan::new(query),
+            |scan, doc| scan.search(&doc),
+            |n, found| {
+                if let Some(found) = found {
+                    best.push(n, found);
+                }
+            },
+        )?;
+        Ok(best.finish())
+    }
+
+    /// The best documents a search has found so far.
+    struct Best {
+        limit: Option<usize>,
+        /// Each with its session's place in discovery order.
+        found: Vec<(usize, Found)>,
+    }
+
+    impl Best {
+        fn new(limit: Option<usize>) -> Best {
+            Best {
+                limit,
+                found: Vec::new(),
+            }
+        }
+
+        fn push(&mut self, n: usize, found: Found) {
+            self.found.push((n, found));
+            // Ranked and cut whenever twice the limit is held, so a pattern
+            // that matches every session keeps a few dozen results in
+            // memory, not one for each.
+            if let Some(limit) = self.limit
+                && self.found.len() >= limit.saturating_mul(2).max(16)
+            {
+                self.rank();
+            }
+        }
+
+        /// Order as [`Index::query`] does, best score first and ties newest
+        /// first, then by discovery order, which is the order an index is
+        /// filled in: results do not vary run to run. Cut to the limit.
+        fn rank(&mut self) {
+            self.found.sort_unstable_by(|(a_at, a), (b_at, b)| {
+                b.score
+                    .cmp(&a.score)
+                    .then_with(|| b.meta.timestamp.cmp(&a.meta.timestamp))
+                    .then_with(|| a_at.cmp(b_at))
+            });
+            if let Some(limit) = self.limit {
+                self.found.truncate(limit);
+            }
+        }
+
+        fn finish(mut self) -> Vec<Found> {
+            self.rank();
+            self.found.into_iter().map(|(_, found)| found).collect()
+        }
+    }
+
+    /// Read every session in the job's scope, handing each one's extraction
+    /// to `each` on the thread that read it and what `each` makes of it to
+    /// `arrive` on this one, with the session's place in the returned list.
+    /// `state` makes what `each` keeps between sessions, once per thread.
+    ///
+    /// Sessions are read as [`Pass::run`] describes. With a cache, the ones
+    /// whose change cursor (see [`local::fingerprints`]) matches the cached
+    /// one are thawed instead of parsed, and the cache is brought up to
+    /// date: parsed sessions are written as they arrive, and rows for
+    /// sessions that are gone are dropped at the end. A cache that can't be
+    /// opened is reported on stderr and skipped.
+    ///
+    /// # Errors
+    /// When an explicitly selected live store cannot be discovered or read,
+    /// or the job was cancelled before every session was read.
+    fn read_sessions<S, T: Send>(
+        job: &Job<'_>,
+        label: &str,
+        state: impl Fn() -> S + Sync,
+        each: impl Fn(&mut S, Extracted) -> T + Sync,
+        mut arrive: impl FnMut(usize, T),
+    ) -> Result<Vec<local::Session>, String> {
+        let found = super::discover_with_spinner(job.scope.from)?;
+        let spinner = super::spin::Spinner::start(label);
+        let cache = job.cache.and_then(|path| match Cache::open(path) {
+            Ok(cache) => Some(Mutex::new(cache)),
             Err(e) => {
                 eprintln!("warning: search cache unavailable ({e}); indexing without it");
                 None
@@ -2251,121 +2690,184 @@ mod query {
         } else {
             HashSet::new()
         };
-        let scoped: Vec<local::Session> = found
+        let sessions: Vec<local::Session> = found
             .into_iter()
-            .filter(|session| super::selected(session, from, cwd))
+            .filter(|session| job.scope.holds(session))
             .collect();
-        let total = scoped.len();
-
+        let total = sessions.len();
+        let keys: Vec<DocKey> = sessions.iter().map(doc_key).collect();
         // Cursors for the cache check. Empty cursors never hit, so a session
         // whose store can't say whether it changed is parsed every time.
         let cursors = cache
             .as_ref()
-            .map(|_| local::fingerprints(&scoped))
+            .map(|_| local::fingerprints(&sessions))
             .unwrap_or_default();
-        // One work item per session: thaw the cached bytes when the cursor
-        // still matches, parse the session otherwise. Only the SQLite read
-        // happens here; deserializing is CPU work like parsing, and the
-        // workers share it across cores the same way.
-        let work: Vec<Work> = (0..total)
-            .map(|i| {
-                cache
-                    .as_ref()
-                    .and_then(|cache| cache.get_raw(&doc_key(&scoped[i]), &cursors[i]))
-                    .map_or(Work::Parse(i), |bytes| Work::Thaw(i, bytes))
-            })
-            .collect();
-        let from_cache = work.iter().filter(|w| matches!(w, Work::Thaw(..))).count();
 
-        let workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-        let mut index = Index::new();
-        // Which sessions parsed cleanly, by position in `scoped`; the lookup
-        // map is built from these after the workers release their borrow.
-        let mut indexed = vec![false; total];
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let (tx, rx) = std::sync::mpsc::sync_channel(workers * 2);
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                let tx = tx.clone();
-                let (next, scoped, work) = (&next, &scoped, &work);
-                scope.spawn(move || {
-                    std::iter::from_fn(|| {
-                        let n = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        work.get(n)
-                    })
-                    .filter_map(|item| match item {
-                        // Unreadable sessions are skipped, matching discover.
-                        Work::Parse(i) => scoped[*i].read().ok().map(|common| {
-                            (*i, Extracted::new(doc_key(&scoped[*i]), &common), true)
-                        }),
-                        // A row that no longer deserializes (a hand-edited
-                        // or truncated cache) is re-parsed and rewritten.
-                        Work::Thaw(i, bytes) => match serde_json::from_slice(bytes) {
-                            Ok(doc) => Some((*i, doc, false)),
-                            Err(_) => scoped[*i].read().ok().map(|common| {
-                                (*i, Extracted::new(doc_key(&scoped[*i]), &common), true)
-                            }),
-                        },
-                    })
-                    .for_each(|extracted| {
-                        // A send only fails when the receiver is gone, and
-                        // this thread's scope outlives it.
-                        let _ = tx.send(extracted);
-                    });
-                });
+        let mut arrived = 0;
+        Pass {
+            keys: &keys,
+            cursors: &cursors,
+            // Unreadable sessions are skipped, matching discover.
+            read: &|n| sessions[n].read().ok(),
+            cache: cache.as_ref(),
+            workers: job.workers,
+            cancelled: job.cancelled,
+        }
+        .run(state, each, |n, out| {
+            if arrived % 32 == 0 {
+                spinner.set(format!("{label} ({arrived}/{total})"));
             }
-            // Workers hold the remaining clones; the receive loop below ends
-            // when the last of them finishes.
-            drop(tx);
-            let mut arrived = Vec::with_capacity(total);
-            for (i, extracted, fresh) in rx {
-                if arrived.len() % 32 == 0 {
-                    spinner.set(match from_cache {
-                        0 => format!("indexing… ({}/{total})", arrived.len()),
-                        n => format!("indexing… ({}/{total}, {n} cached)", arrived.len()),
-                    });
-                }
-                arrived.push((i, extracted, fresh));
-                indexed[i] = true;
-            }
-            // Freshly parsed documents go into the cache before the index
-            // takes ownership of them. Best-effort: a cache write failure
-            // costs the next run a re-parse, not this run its results.
-            if let Some(cache) = cache.as_mut() {
-                let written = cache.put_many(
-                    arrived
-                        .iter()
-                        .filter(|(_, _, fresh)| *fresh)
-                        .map(|(i, doc, _)| (doc, cursors[*i].as_str())),
-                );
-                if let Err(e) = written.and_then(|()| cache.retain(&live)) {
-                    eprintln!("warning: search cache not updated: {e}");
-                }
-            }
-            // Insert in discovery order, not arrival order: document order
-            // breaks full score-and-timestamp ties in query results, and it
-            // should not vary run to run.
-            arrived.sort_unstable_by_key(|&(i, _, _)| i);
-            for (_, extracted, _) in arrived {
-                index.insert_extracted(extracted);
-            }
+            arrived += 1;
+            arrive(n, out);
         });
-        let sessions: Sessions = scoped
-            .into_iter()
-            .zip(&indexed)
-            .filter_map(|(session, &ok)| ok.then(|| (doc_key(&session), session)))
-            .collect();
+        let cancelled = (job.cancelled)();
+        if let Some(cache) = cache.as_ref().filter(|_| !cancelled)
+            && let Err(e) = lock(cache).retain(&live)
+        {
+            eprintln!("warning: search cache not updated: {e}");
+        }
         spinner.finish();
-        Ok((index, sessions))
+        if cancelled {
+            return Err("cancelled before every session was read".to_string());
+        }
+        Ok(sessions)
+    }
+
+    /// Rows of the cache written in one transaction: this many, or this
+    /// many bytes of them, whichever is reached first. What a first run
+    /// over a large history holds waiting to be written.
+    const BATCH_ROWS: usize = 64;
+    const BATCH_BYTES: usize = 32 * 1024 * 1024;
+
+    /// One pass over sessions: what there is to read, with what, and until
+    /// when.
+    struct Pass<'a> {
+        /// The key each session's extraction is cached under, by position.
+        keys: &'a [DocKey],
+        /// Each session's change cursor, by position; empty without a cache.
+        cursors: &'a [String],
+        /// Parse the session at a position. `None` when it can't be read.
+        read: &'a (dyn Fn(usize) -> Option<Transcript<Common>> + Sync),
+        cache: Option<&'a Mutex<Cache>>,
+        workers: usize,
+        cancelled: &'a (dyn Fn() -> bool + Sync),
+    }
+
+    impl Pass<'_> {
+        /// Extract every session and hand each extraction to `each` on the
+        /// thread that made it, and what `each` returns to `arrive` on this
+        /// one, in the order they finish.
+        ///
+        /// Workers pull the next unread session, thaw or parse it, run
+        /// `each`, and send the result over a bounded channel, so at most a
+        /// few extractions are in memory at once unless `each` hands the
+        /// extraction itself back. A session that can't be read is skipped,
+        /// and nothing arrives for it. Once `cancelled` says so, no worker
+        /// starts another session.
+        fn run<S, T: Send>(
+            &self,
+            state: impl Fn() -> S + Sync,
+            each: impl Fn(&mut S, Extracted) -> T + Sync,
+            mut arrive: impl FnMut(usize, T),
+        ) {
+            let next = AtomicUsize::new(0);
+            let (tx, rx) = std::sync::mpsc::sync_channel(self.workers.max(1) * 2);
+            std::thread::scope(|scope| {
+                for _ in 0..self.workers.max(1).min(self.keys.len()) {
+                    let tx = tx.clone();
+                    let (next, state, each) = (&next, &state, &each);
+                    scope.spawn(move || {
+                        let mut state = state();
+                        while !(self.cancelled)() {
+                            let n = next.fetch_add(1, Ordering::Relaxed);
+                            if n >= self.keys.len() {
+                                break;
+                            }
+                            let Some((doc, row)) = self.extract(n) else {
+                                continue;
+                            };
+                            // A send only fails when the receiver is gone,
+                            // and this thread's scope outlives it.
+                            let _ = tx.send((n, row, each(&mut state, doc)));
+                        }
+                    });
+                }
+                // Workers hold the remaining clones; the receive loop below
+                // ends when the last of them finishes.
+                drop(tx);
+                let mut rows: Vec<(usize, Vec<u8>)> = Vec::new();
+                let mut bytes = 0;
+                // Best-effort: a cache write failure costs the next run a
+                // re-parse, not this run its results. Said once.
+                let mut caching = true;
+                for (n, row, out) in rx {
+                    if let Some(row) = row.filter(|_| caching) {
+                        bytes += row.len();
+                        rows.push((n, row));
+                        if rows.len() >= BATCH_ROWS || bytes >= BATCH_BYTES {
+                            caching = self.store(&mut rows);
+                            bytes = 0;
+                        }
+                    }
+                    arrive(n, out);
+                }
+                self.store(&mut rows);
+            });
+        }
+
+        /// The extraction of the session at `n`, and the row to cache it
+        /// under when it had to be parsed: serialized here, on the worker,
+        /// so writing it is all the receiving thread does. `None` when the
+        /// session can't be read.
+        fn extract(&self, n: usize) -> Option<(Extracted, Option<Vec<u8>>)> {
+            let key = &self.keys[n];
+            let cached = self
+                .cache
+                .and_then(|cache| lock(cache).get_raw(key, self.cursor(n)));
+            // A row that no longer deserializes (a hand-edited or truncated
+            // cache) is re-parsed and rewritten.
+            if let Some(doc) = cached.and_then(|bytes| serde_json::from_slice(&bytes).ok()) {
+                return Some((doc, None));
+            }
+            let doc = Extracted::new(key.clone(), &(self.read)(n)?);
+            let row = self.cache.and_then(|_| serde_json::to_vec(&doc).ok());
+            Some((doc, row))
+        }
+
+        fn cursor(&self, n: usize) -> &str {
+            self.cursors.get(n).map_or("", String::as_str)
+        }
+
+        /// Write the waiting rows to the cache and forget them. Whether the
+        /// cache took them.
+        fn store(&self, rows: &mut Vec<(usize, Vec<u8>)>) -> bool {
+            let Some(cache) = self.cache.filter(|_| !rows.is_empty()) else {
+                return true;
+            };
+            let written = lock(cache).put_raw(
+                rows.iter()
+                    .map(|(n, row)| (&self.keys[*n], self.cursor(*n), row.as_slice())),
+            );
+            rows.clear();
+            match written {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("warning: search cache not updated: {e}");
+                    false
+                }
+            }
+        }
+    }
+
+    /// The cache, whatever became of the thread that last held it: a
+    /// transaction it left open was rolled back as it unwound.
+    fn lock(cache: &Mutex<Cache>) -> MutexGuard<'_, Cache> {
+        cache.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Print ranked hits for a pattern, colorized when stdout is a terminal.
-    fn one_shot(index: &Index, pattern: &str) {
+    fn one_shot(matches: &[Found], pattern: &str) {
         use std::io::{IsTerminal, Write};
-        let mut q = user_query(pattern);
-        q.limit = Some(20);
-        q.hits_per_doc = Some(3);
-        let matches = index.query(&q);
         if matches.is_empty() {
             println!("no matches for `{pattern}`");
         } else {
@@ -2373,7 +2875,7 @@ mod query {
             // A failed write means the reader is gone (`… | head`): stop
             // quietly instead of panicking the way `println!` would.
             let mut out = std::io::stdout().lock();
-            for m in &matches {
+            for m in matches {
                 if writeln!(out, "{}", doc_line(m, color)).is_err() {
                     return;
                 }
@@ -2403,7 +2905,7 @@ mod query {
         }
     }
 
-    fn doc_line(m: &DocMatch<'_>, color: bool) -> String {
+    fn doc_line(m: &Found, color: bool) -> String {
         let label = m
             .meta
             .title
@@ -3015,8 +3517,16 @@ mod query {
 
     #[cfg(test)]
     mod tests {
-        use super::user_query;
-        use txcript::search::{Case, Mode};
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use chrono::{TimeZone, Utc};
+        use txcript::common::{Block, Message, Meta, Role};
+        use txcript::search::{Case, DocKey, Hit, Index, Mode, Query, Scan};
+        use txcript::{Common, HarnessId, Transcript};
+
+        use super::{Best, Pass, one_shot_query, user_query};
+        use crate::cache::Cache;
 
         #[test]
         fn patterns_are_literal_and_case_insensitive() {
@@ -3025,6 +3535,162 @@ mod query {
             assert_eq!(q.case, Case::Insensitive);
             // One needle, spaces included: the space is not an atom separator.
             assert_eq!(q.pattern, "Cargo build");
+        }
+
+        /// More sessions than one cache transaction holds. Most say
+        /// "needle", placed so their scores differ, and they start at one of
+        /// seven times, so the ranking has score-and-time ties for discovery
+        /// order to settle.
+        fn corpus() -> Vec<(DocKey, Transcript<Common>)> {
+            const SAID: [&str; 5] = [
+                "needle",
+                "there is a needle in here\nand a second needle\nNEEDLE, a third\nneedle four",
+                "xneedlex",
+                "nothing of the kind",
+                "the Needle",
+            ];
+            (0..150)
+                .map(|n: u32| {
+                    let at = Utc
+                        .timestamp_opt(1_780_000_000 + i64::from(n % 7) * 100, 0)
+                        .single()
+                        .unwrap_or_default();
+                    let meta = Meta {
+                        id: format!("s{n}"),
+                        timestamp: at,
+                        cwd: Some("/work/app".to_string()),
+                        git_branch: None,
+                        title: Some(format!("session {n}")),
+                        cli_version: None,
+                        model: None,
+                        lineage: None,
+                    };
+                    let said = Message {
+                        role: Role::User,
+                        content: vec![Block::Text {
+                            text: SAID[n as usize % SAID.len()].to_string(),
+                        }],
+                        timestamp: at,
+                        model: None,
+                        stop_reason: None,
+                        usage: None,
+                    };
+                    let key = DocKey {
+                        harness: HarnessId::Codex,
+                        id: format!("s{n}"),
+                        source: Some(format!("/sessions/s{n}.jsonl")),
+                    };
+                    (key, Transcript::new(meta, vec![said]))
+                })
+                .collect()
+        }
+
+        /// What `find` does with the sessions in hand: search each as it is
+        /// read and keep the best, as `(key, score, hits)`.
+        fn found(pass: &Pass<'_>, query: &Query) -> Vec<(DocKey, u32, Vec<Hit>)> {
+            let mut best = Best::new(query.limit);
+            pass.run(
+                || Scan::new(query),
+                |scan, doc| scan.search(&doc),
+                |n, found| {
+                    if let Some(found) = found {
+                        best.push(n, found);
+                    }
+                },
+            );
+            best.finish()
+                .into_iter()
+                .map(|found| (found.key, found.score, found.hits))
+                .collect()
+        }
+
+        #[test]
+        fn a_search_returns_what_an_index_of_the_same_sessions_would() {
+            let corpus = corpus();
+            let keys: Vec<DocKey> = corpus.iter().map(|(key, _)| key.clone()).collect();
+            let mut index = Index::new();
+            for (key, transcript) in &corpus {
+                index.insert(key.clone(), transcript);
+            }
+            let pass = Pass {
+                keys: &keys,
+                cursors: &[],
+                read: &|n| Some(corpus[n].1.clone()),
+                cache: None,
+                workers: 4,
+                cancelled: &|| false,
+            };
+
+            let mut few = one_shot_query("needle");
+            few.limit = Some(5);
+            let mut newest = user_query("  ");
+            newest.limit = Some(3);
+            for query in [one_shot_query("needle"), few, user_query("needle"), newest] {
+                let indexed: Vec<_> = index
+                    .query(&query)
+                    .into_iter()
+                    .map(|m| (m.key.clone(), m.score, m.hits))
+                    .collect();
+                assert!(!indexed.is_empty(), "{query:?} matches something");
+                assert_eq!(found(&pass, &query), indexed, "{query:?}");
+            }
+        }
+
+        #[test]
+        fn a_second_search_parses_only_the_sessions_that_changed() {
+            let dir = tempfile::tempdir().unwrap();
+            let cache = Mutex::new(Cache::open(&dir.path().join("cache.sqlite")).unwrap());
+            let corpus = corpus();
+            let keys: Vec<DocKey> = corpus.iter().map(|(key, _)| key.clone()).collect();
+            let mut cursors: Vec<String> = (0..corpus.len()).map(|n| format!("{n}:1")).collect();
+            let parsed = AtomicUsize::new(0);
+            let query = one_shot_query("needle");
+            let search = |cursors: &[String]| {
+                let pass = Pass {
+                    keys: &keys,
+                    cursors,
+                    read: &|n| {
+                        parsed.fetch_add(1, Ordering::Relaxed);
+                        Some(corpus[n].1.clone())
+                    },
+                    cache: Some(&cache),
+                    workers: 3,
+                    cancelled: &|| false,
+                };
+                found(&pass, &query)
+            };
+
+            let first = search(&cursors);
+            assert_eq!(parsed.swap(0, Ordering::Relaxed), corpus.len());
+
+            let second = search(&cursors);
+            assert_eq!(parsed.swap(0, Ordering::Relaxed), 0, "all from the cache");
+            assert_eq!(second, first);
+
+            cursors[7] = "7:2".to_string();
+            assert_eq!(search(&cursors), first);
+            assert_eq!(parsed.load(Ordering::Relaxed), 1, "only the changed one");
+        }
+
+        #[test]
+        fn a_cancelled_search_starts_no_further_session() {
+            let corpus = corpus();
+            let keys: Vec<DocKey> = corpus.iter().map(|(key, _)| key.clone()).collect();
+            let read = AtomicUsize::new(0);
+            let mut arrived = 0;
+            Pass {
+                keys: &keys,
+                cursors: &[],
+                read: &|n| {
+                    read.fetch_add(1, Ordering::Relaxed);
+                    Some(corpus[n].1.clone())
+                },
+                cache: None,
+                workers: 1,
+                cancelled: &|| read.load(Ordering::Relaxed) >= 3,
+            }
+            .run(|| (), |(), doc| drop(doc), |_, ()| arrived += 1);
+            assert_eq!(arrived, 3);
         }
     }
 }

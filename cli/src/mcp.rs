@@ -8,12 +8,14 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{Implementation, JsonObject, ServerCapabilities, ServerInfo};
 use rmcp::schemars::JsonSchema;
+use rmcp::service::RequestContext;
 use rmcp::{
-    ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router, transport::stdio,
+    ErrorData, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router,
+    transport::stdio,
 };
 use serde::{Deserialize, Serialize};
 use txcript::common::Meta;
-use txcript::search::{DocMatch, Hit, Origin};
+use txcript::search::{Found, Hit, Origin};
 use txcript::{HarnessId, Span, local, text};
 
 /// Ceiling on one `read_session` response, in rendered bytes. Reads over it
@@ -50,6 +52,18 @@ struct SearchSessionsRequest {
     /// Omit to search every directory. Sessions without a recorded cwd are
     /// excluded when this filter is present.
     cwd: Option<String>,
+    /// Only sessions on this git branch (exact match). Omit to include all
+    /// branches.
+    git_branch: Option<String>,
+    /// Only sessions that used this model (case-insensitive substring).
+    /// Omit to include all models.
+    model: Option<String>,
+    /// Only sessions started at or after this time. RFC3339 string, e.g.
+    /// `2025-01-01T00:00:00Z` or bare date `2025-01-01` (UTC midnight).
+    since: Option<String>,
+    /// Only sessions started at or before this time. RFC3339 string, e.g.
+    /// `2025-12-31T23:59:59Z` or bare date `2025-12-31` (end of UTC day).
+    until: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -111,9 +125,9 @@ struct SearchMatch {
 }
 
 impl SearchMatch {
-    fn new(found: &DocMatch<'_>) -> Self {
+    fn new(found: &Found) -> Self {
         Self {
-            session: SessionSummary::new(found.key.harness, found.meta),
+            session: SessionSummary::new(found.key.harness, &found.meta),
             score: found.score,
             hits: found.hits.iter().map(SearchHit::from).collect(),
         }
@@ -161,14 +175,14 @@ fn origin_name(origin: Origin) -> &'static str {
 #[derive(Clone)]
 pub struct SessionServer {
     tool_router: ToolRouter<Self>,
-    /// Persistent search cache for `search_sessions`; `None` rebuilds the
-    /// index from scratch on every call.
+    /// Persistent search cache for `search_sessions`; `None` parses every
+    /// session on every call.
     cache: Option<PathBuf>,
 }
 
 impl SessionServer {
     /// Create the session server. `cache` has the same semantics as the CLI's
-    /// global `--cache`: `None` rebuilds the search index on each call.
+    /// global `--cache`: `None` parses every session on each search.
     #[must_use]
     pub fn new(cache: Option<PathBuf>) -> Self {
         let mut tool_router = Self::tool_router();
@@ -259,7 +273,10 @@ impl SessionServer {
         let from = parse_from(request.from.as_deref())?;
         // Enumerating a live web account is not offered over MCP; the
         // refusal is explicit so an agent doesn't read "no sessions" as truth.
-        if matches!(from, Some(HarnessId::ClaudeChat | HarnessId::ChatGpt)) {
+        if matches!(
+            from,
+            Some(HarnessId::ClaudeChat | HarnessId::CoworkRemote | HarnessId::ChatGpt)
+        ) {
             let name = from.map_or("live source", HarnessId::as_str);
             return Err(ErrorData::invalid_params(
                 format!(
@@ -290,23 +307,56 @@ impl SessionServer {
 
     /// Search local session content with the same matching, harness, and
     /// working-directory behavior as `txcript query <pattern>`.
+    ///
+    /// The server runs beside whatever its person is doing, so the search
+    /// keeps to half the cores and holds no index: each session is searched
+    /// as it is read. It runs off the async threads, so the server goes on
+    /// hearing the client, and stops reading sessions once the client
+    /// cancels the request or is gone.
     #[tool(
-        description = "Search local coding-agent sessions for a literal, case-insensitive pattern: it must appear in a line exactly as written, spaces included. Optional `from` and `cwd` filters match the txcript CLI; omitted filters search all harnesses or directories.",
+        description = "Search local coding-agent sessions for a literal, case-insensitive pattern: it must appear in a line exactly as written, spaces included. Optional `from`, `cwd`, `git_branch`, `model`, `since`, and `until` filters match the txcript CLI flags; omitted filters search all sessions.",
         annotations(title = "Search sessions", read_only_hint = true)
     )]
-    fn search_sessions(
+    async fn search_sessions(
         &self,
         Parameters(request): Parameters<SearchSessionsRequest>,
+        context: RequestContext<RoleServer>,
     ) -> Result<Json<SearchResults>, ErrorData> {
         let from = parse_from(request.from.as_deref())?;
-        let cwd = request.cwd.as_deref().map(Path::new);
-        let index = super::query::index_for(from, cwd, self.cache.as_deref())
-            .map_err(|error| ErrorData::internal_error(error, None))?;
-        let mut query = super::query::user_query(&request.pattern);
-        // Match the CLI's one-shot output bounds.
-        query.limit = Some(20);
-        query.hits_per_doc = Some(3);
-        let matches = index.query(&query).iter().map(SearchMatch::new).collect();
+        let since = request
+            .since
+            .as_deref()
+            .map(super::parse_since)
+            .transpose()
+            .map_err(|e| ErrorData::invalid_params(format!("`since`: {e}"), None))?;
+        let until = request
+            .until
+            .as_deref()
+            .map(super::parse_until)
+            .transpose()
+            .map_err(|e| ErrorData::invalid_params(format!("`until`: {e}"), None))?;
+        let cache = self.cache.clone();
+        let cancelled = context.ct;
+        let found = tokio::task::spawn_blocking(move || {
+            let job = super::query::Job {
+                scope: super::query::Scope {
+                    from,
+                    cwd: request.cwd.as_deref().map(Path::new),
+                    git_branch: request.git_branch.as_deref(),
+                    model: request.model.as_deref(),
+                    since,
+                    until,
+                },
+                cache: cache.as_deref(),
+                workers: super::query::half_the_cores(),
+                cancelled: &|| cancelled.is_cancelled(),
+            };
+            super::query::find(&job, &super::query::one_shot_query(&request.pattern))
+        })
+        .await
+        .map_err(|error| ErrorData::internal_error(format!("searching: {error}"), None))?
+        .map_err(|error| ErrorData::internal_error(error, None))?;
+        let matches = found.iter().map(SearchMatch::new).collect();
         Ok(Json(SearchResults { matches }))
     }
 
@@ -322,13 +372,7 @@ impl SessionServer {
         Parameters(request): Parameters<ReadSessionRequest>,
     ) -> Result<String, ErrorData> {
         let from = parse_from(request.from.as_deref())?;
-        if let Some(loaded) = super::load_direct_claude_chat(&request.id, from) {
-            let (common, span_req) =
-                loaded.map_err(|error| ErrorData::internal_error(error, None))?;
-            let src = crate::fragment::parse_ref(&request.id).0;
-            return render_read_session(src, &common, span_req.as_ref());
-        }
-        if let Some(loaded) = super::load_direct_chatgpt(&request.id, from) {
+        if let Some((_, loaded)) = super::load_direct_remote(&request.id, from) {
             let (common, span_req) =
                 loaded.map_err(|error| ErrorData::internal_error(error, None))?;
             let src = crate::fragment::parse_ref(&request.id).0;
@@ -613,6 +657,20 @@ mod tests {
         assert_eq!(chunk_ranges(&[60, 60], 4, 100), [4..5, 5..6]);
         // Everything fitting the budget means one whole-span range.
         assert_eq!(chunk_ranges(&[10, 10], 0, 100), vec![0..2]);
+    }
+
+    #[test]
+    fn list_sessions_refuses_cowork_remote() {
+        let error = SessionServer::new(None)
+            .list_sessions(Parameters(ListSessionsRequest {
+                from: Some("cowork_remote".into()),
+                cwd: None,
+                limit: None,
+                offset: None,
+            }))
+            .err()
+            .unwrap_or_else(|| panic!("cowork_remote listing is refused"));
+        assert!(error.message.contains("does not enumerate cowork_remote"));
     }
 
     #[test]

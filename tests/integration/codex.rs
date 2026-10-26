@@ -182,6 +182,123 @@ fn discover_extracts_metadata() {
     assert_eq!(meta.cli_version.as_deref(), Some("0.104.0"));
 }
 
+/// Codex's own `/archive` (TUI) / `codex archive` (CLI) moves a rollout out
+/// of the dated `sessions_dir` tree into a flat sibling `archived_sessions`
+/// directory. Discovery must still find it there.
+#[test]
+fn discover_includes_archived_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    let nested = sessions.join("2026").join("01").join("02");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        nested.join("rollout-2026-01-02T03-04-05-sess-active.jsonl"),
+        format!(
+            "{}\n",
+            r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"session_meta","payload":{"id":"sess-active"}}"#,
+        ),
+    )
+    .unwrap();
+
+    let archived = dir.path().join("archived_sessions");
+    std::fs::create_dir_all(&archived).unwrap();
+    std::fs::write(
+        archived.join("rollout-2025-12-01T00-00-00-sess-archived.jsonl"),
+        format!(
+            "{}\n",
+            r#"{"timestamp":"2025-12-01T00:00:00.000Z","type":"session_meta","payload":{"id":"sess-archived"}}"#,
+        ),
+    )
+    .unwrap();
+
+    let store = codex::CodexStore::new(&sessions).with_archived_sessions_dir(&archived);
+    let mut ids: Vec<_> = store
+        .discover()
+        .unwrap()
+        .into_iter()
+        .map(|d| d.meta.id)
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["sess-active", "sess-archived"]);
+}
+
+/// A store with no known archived directory (the common case for a
+/// hand-built `sessions_dir`) only discovers the active tree.
+#[test]
+fn discover_without_archived_dir_only_finds_active_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("rollout-2026-01-02T03-04-05-sess-1.jsonl"),
+        format!(
+            "{}\n",
+            r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"session_meta","payload":{"id":"sess-1"}}"#,
+        ),
+    )
+    .unwrap();
+
+    let found = codex::CodexStore::new(dir.path()).discover().unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].meta.id, "sess-1");
+}
+
+/// Codex reads the plain rollout when a compressed copy sits beside it, as
+/// one does for a moment while Codex compresses or expands a session.
+/// Discovery lists that one, so the session appears once.
+#[cfg(feature = "codex_zstd")]
+#[test]
+fn discover_lists_a_rollout_once_when_both_forms_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let rollout = format!(
+        "{}\n",
+        r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"session_meta","payload":{"id":"sess-1"}}"#,
+    );
+    let plain = dir.path().join("rollout-2026-01-02T03-04-05-sess-1.jsonl");
+    std::fs::write(&plain, &rollout).unwrap();
+    std::fs::write(
+        dir.path()
+            .join("rollout-2026-01-02T03-04-05-sess-1.jsonl.zst"),
+        zstd::stream::encode_all(rollout.as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+
+    let found = codex::CodexStore::new(dir.path()).discover().unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].reference, plain);
+}
+
+/// A rollout with no id inside takes its file name's, and a compressed
+/// rollout's name is the plain name with `.zst` after it: both forms of one
+/// session must come out with the same id.
+#[cfg(feature = "codex_zstd")]
+#[test]
+fn load_names_a_compressed_rollout_as_its_plain_form() {
+    let dir = tempfile::tempdir().unwrap();
+    let rollout = format!(
+        "{}\n",
+        r#"{"timestamp":"2026-01-02T03:04:06.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#,
+    );
+    let plain = dir.path().join("rollout-2026-01-02T03-04-05-sess-1.jsonl");
+    let compressed = dir
+        .path()
+        .join("rollout-2026-01-02T03-04-05-sess-2.jsonl.zst");
+    std::fs::write(&plain, &rollout).unwrap();
+    std::fs::write(
+        &compressed,
+        zstd::stream::encode_all(rollout.as_bytes(), 3).unwrap(),
+    )
+    .unwrap();
+
+    let store = codex::CodexStore::new(dir.path());
+    assert_eq!(
+        store.load(&plain).unwrap().meta.id,
+        "rollout-2026-01-02T03-04-05-sess-1"
+    );
+    assert_eq!(
+        store.load(&compressed).unwrap().meta.id,
+        "rollout-2026-01-02T03-04-05-sess-2"
+    );
+}
+
 /// Shaped at codex's granularity: each assistant block is its own message
 /// (codex stores one `response_item` per line), every assistant turn carries a
 /// model, only the final text turn carries usage, and `stop_reason` is None
@@ -196,6 +313,7 @@ fn sample_common() -> Transcript<Common> {
         title: None,
         cli_version: Some("0.104.0".into()),
         model: Some("gpt-5.2-codex".into()),
+        lineage: None,
     };
     let model = || Some("gpt-5.2-codex".to_string());
     let body = vec![
@@ -275,4 +393,461 @@ fn codec_fixpoint_through_common_loses_nothing() {
     let native = codex::Codex::from_common(&common).unwrap();
     let back = codex::Codex::to_common(&native).unwrap();
     assert_eq!(common, back);
+}
+
+#[test]
+fn from_common_preserves_interleaved_block_ordering() {
+    let meta = common::Meta {
+        id: "interleave-1".into(),
+        timestamp: ts("2026-01-02T03:04:05.000Z"),
+        cwd: Some("/repo".into()),
+        git_branch: Some("main".into()),
+        title: None,
+        cli_version: Some("0.104.0".into()),
+        model: Some("gpt-5.2-codex".into()),
+        lineage: None,
+    };
+    let body = vec![common::Message {
+        role: common::Role::Assistant,
+        content: vec![
+            common::Block::Text {
+                text: "Checking the directory first.".into(),
+            },
+            common::Block::ToolUse {
+                id: "call-ls".into(),
+                tool: common::Tool::Bash {
+                    command: "ls".into(),
+                    workdir: None,
+                    timeout_ms: None,
+                    description: None,
+                    run_in_background: false,
+                },
+            },
+            common::Block::Text {
+                text: "Directory check completed.".into(),
+            },
+        ],
+        timestamp: ts("2026-01-02T03:04:06.000Z"),
+        model: Some("gpt-5.2-codex".into()),
+        stop_reason: None,
+        usage: None,
+    }];
+    let transcript = Transcript::new(meta, body);
+    let native = codex::Codex::from_common(&transcript).unwrap();
+
+    let kinds: Vec<(&str, Option<&str>)> = native
+        .body
+        .iter()
+        .map(|line| {
+            let line_type = line.kind.as_str();
+            let payload_type = line.payload.get("type").and_then(serde_json::Value::as_str);
+            (line_type, payload_type)
+        })
+        .collect();
+
+    assert_eq!(
+        kinds,
+        vec![
+            ("session_meta", None),
+            ("turn_context", None),
+            ("response_item", Some("message")),
+            ("event_msg", Some("agent_message")),
+            ("response_item", Some("function_call")),
+            ("response_item", Some("message")),
+            ("event_msg", Some("agent_message")),
+        ]
+    );
+
+    // Verify first message text came before the tool call
+    let first_text = native.body[2].payload["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert_eq!(first_text, "Checking the directory first.");
+
+    let call_id = native.body[4].payload["call_id"].as_str().unwrap();
+    assert_eq!(call_id, "call-ls");
+
+    let second_text = native.body[5].payload["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert_eq!(second_text, "Directory check completed.");
+}
+
+#[test]
+fn from_common_denormalizes_bash_to_exec_command() {
+    let mut common = sample_common();
+    if let common::Block::ToolUse {
+        tool: common::Tool::Bash { workdir, .. },
+        ..
+    } = &mut common.body[2].content[0]
+    {
+        *workdir = Some("/repo with spaces".into());
+    }
+    let native = codex::Codex::from_common(&common).unwrap();
+    let mut found = false;
+    for line in &native.body {
+        if line.kind != "response_item"
+            || line.payload.get("type").and_then(serde_json::Value::as_str) != Some("function_call")
+        {
+            continue;
+        }
+        let name = line
+            .payload
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        // No generic canonical name may leak: Codex knows only exec_command.
+        assert_ne!(
+            name, "Bash",
+            "from_common must not emit the canonical Bash name"
+        );
+        if name == "exec_command" {
+            let args: serde_json::Value = line
+                .payload
+                .get("arguments")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(serde_json::Value::Null);
+            if args.get("cmd").and_then(serde_json::Value::as_str) == Some("ls") {
+                assert_eq!(args["workdir"], "/repo with spaces");
+                assert_eq!(line.payload["call_id"], "call-x");
+                found = true;
+            }
+        }
+    }
+    assert!(
+        found,
+        "from_common must emit native exec_command instead of generic Bash"
+    );
+}
+
+#[test]
+fn from_common_denormalizes_edit_to_apply_patch_with_error_result() {
+    let mut common = sample_common();
+    common.body.push(common::Message {
+        role: common::Role::Assistant,
+        content: vec![common::Block::ToolUse {
+            id: "call-patch".into(),
+            tool: common::Tool::Edit {
+                file_path: "src/main.rs".into(),
+                old_string: "old".into(),
+                new_string: "new".into(),
+                replace_all: false,
+            },
+        }],
+        timestamp: ts("2026-01-02T03:04:11.000Z"),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    });
+    common.body.push(common::Message {
+        role: common::Role::User,
+        content: vec![common::Block::ToolResult {
+            tool_use_id: "call-patch".into(),
+            content: common::ToolOutput::Text("Success.".into()),
+            is_error: true,
+        }],
+        timestamp: ts("2026-01-02T03:04:12.000Z"),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    });
+    // Structured output keeps its shape through the envelope's `output`
+    // field instead of flattening to text as `function_call_output` did.
+    common.body.push(common::Message {
+        role: common::Role::Assistant,
+        content: vec![common::Block::ToolUse {
+            id: "call-patch-json".into(),
+            tool: common::Tool::Write {
+                file_path: "src/new.rs".into(),
+                content: "fn main() {}".into(),
+            },
+        }],
+        timestamp: ts("2026-01-02T03:04:13.000Z"),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    });
+    common.body.push(common::Message {
+        role: common::Role::User,
+        content: vec![common::Block::ToolResult {
+            tool_use_id: "call-patch-json".into(),
+            content: common::ToolOutput::Json(serde_json::json!({"files": ["src/new.rs"]})),
+            is_error: false,
+        }],
+        timestamp: ts("2026-01-02T03:04:14.000Z"),
+        model: None,
+        stop_reason: None,
+        usage: None,
+    });
+    let native = codex::Codex::from_common(&common).unwrap();
+    assert!(
+        native.body.iter().any(|line| {
+            line.kind == "response_item"
+                && line.payload.get("type").and_then(serde_json::Value::as_str)
+                    == Some("custom_tool_call")
+                && line.payload.get("name").and_then(serde_json::Value::as_str)
+                    == Some("apply_patch")
+        }),
+        "from_common must emit native apply_patch instead of generic Edit"
+    );
+    // The envelope round-trips through to_common losslessly, including the
+    // error bit via exit_code.
+    let back = codex::Codex::to_common(&native).unwrap();
+    assert_eq!(common, back);
+}
+
+#[test]
+fn from_common_patch_envelopes_encode_multiline_and_empty_files() {
+    for (tool, expected_input) in [
+        (
+            common::Tool::Edit {
+                file_path: "src/main.rs".into(),
+                old_string: "old\n\n".into(),
+                new_string: "new\n\n".into(),
+                replace_all: false,
+            },
+            "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n-\n+new\n+\n*** End Patch",
+        ),
+        (
+            common::Tool::Write {
+                file_path: "notes.md".into(),
+                content: "first\nsecond\n\n".into(),
+            },
+            "*** Begin Patch\n*** Add File: notes.md\n+first\n+second\n+\n*** End Patch",
+        ),
+        (
+            common::Tool::Write {
+                file_path: "empty.txt".into(),
+                content: String::new(),
+            },
+            "*** Begin Patch\n*** Add File: empty.txt\n*** End Patch",
+        ),
+    ] {
+        let mut common = sample_common();
+        common.body[2].content = vec![common::Block::ToolUse {
+            id: "call-x".into(),
+            tool,
+        }];
+        let native = codex::Codex::from_common(&common).unwrap();
+        let call = native
+            .body
+            .iter()
+            .find(|line| line.kind == "response_item" && line.payload["type"] == "custom_tool_call")
+            .unwrap();
+        assert_eq!(call.payload["input"], expected_input);
+    }
+}
+
+#[test]
+fn from_common_raw_patch_inputs_are_always_strings() {
+    let patch =
+        "*** Begin Patch\n*** Delete File: old.rs\n*** Add File: new.rs\n+hello\n*** End Patch";
+    for input in [
+        serde_json::json!({"patch": patch, "files": ["old.rs", "new.rs"]}),
+        // Failed native calls can carry malformed arguments. Their history
+        // still needs a string input, as required by Codex's CustomToolCall.
+        serde_json::json!({"unexpected": "argument"}),
+        serde_json::json!(["unexpected", "array"]),
+        serde_json::Value::Null,
+    ] {
+        let mut common = sample_common();
+        common.body[2].content = vec![common::Block::ToolUse {
+            id: "call-x".into(),
+            tool: common::Tool::Raw {
+                tool_name: "ApplyPatch".into(),
+                input,
+            },
+        }];
+        let native = codex::Codex::from_common(&common).unwrap();
+        let call = native
+            .body
+            .iter()
+            .find(|line| line.kind == "response_item" && line.payload["type"] == "custom_tool_call")
+            .unwrap();
+        assert!(call.payload["input"].is_string(), "{call:?}");
+        let result = native
+            .body
+            .iter()
+            .find(|line| {
+                line.kind == "response_item" && line.payload["type"] == "custom_tool_call_output"
+            })
+            .unwrap();
+        assert_eq!(call.payload["call_id"], result.payload["call_id"]);
+        let back = codex::Codex::to_common(&native).unwrap();
+        assert_eq!(common, back);
+    }
+}
+
+#[test]
+fn from_common_keeps_foreign_web_search_paired_with_its_function_result() {
+    let mut common = sample_common();
+    common.body[2].content = vec![common::Block::ToolUse {
+        id: "call-x".into(),
+        tool: common::Tool::Raw {
+            tool_name: "WebSearch".into(),
+            input: serde_json::json!({"query": "rust lang"}),
+        },
+    }];
+    let native = codex::Codex::from_common(&common).unwrap();
+    // A foreign search input has no native WebSearchAction type tag, and
+    // its function result must keep a corresponding function call.
+    assert!(
+        !native.body.iter().any(|line| {
+            line.kind == "response_item" && line.payload["type"] == "web_search_call"
+        })
+    );
+    assert!(native.body.iter().any(|line| {
+        line.kind == "response_item"
+            && line.payload["type"] == "function_call"
+            && line.payload["name"] == "WebSearch"
+            && line.payload["call_id"] == "call-x"
+    }));
+    assert_eq!(common, codex::Codex::to_common(&native).unwrap());
+}
+
+#[test]
+fn interleaved_tool_calls_keep_their_results_through_disk() {
+    use common::{Block, Tool, ToolOutput};
+
+    let call = |id: &str, tool| Block::ToolUse {
+        id: id.into(),
+        tool,
+    };
+    let result = |id: &str, content, is_error| Block::ToolResult {
+        tool_use_id: id.into(),
+        content,
+        is_error,
+    };
+    let shell = Tool::Bash {
+        command: "ls".into(),
+        workdir: Some("/repo with spaces".into()),
+        timeout_ms: None,
+        description: None,
+        run_in_background: false,
+    };
+    let mut common = sample_common();
+    let mut calls = common.body[2].clone();
+    calls.content = vec![
+        call(
+            "a",
+            Tool::Edit {
+                file_path: "main.rs".into(),
+                old_string: "old".into(),
+                new_string: "new".into(),
+                replace_all: false,
+            },
+        ),
+        call(
+            "b",
+            Tool::Write {
+                file_path: "new.rs".into(),
+                content: "new".into(),
+            },
+        ),
+        call("c", shell.clone()),
+    ];
+    // Finish c and b first, then reuse b while a is still pending.
+    let mut results = common.body[3].clone();
+    results.content = vec![
+        result("c", ToolOutput::Text("shell c".into()), false),
+        result("b", ToolOutput::Text("write b".into()), false),
+    ];
+    let mut reused = calls.clone();
+    reused.content = vec![call("b", shell)];
+    let mut remaining = results.clone();
+    remaining.content = vec![
+        result(
+            "a",
+            ToolOutput::Json(serde_json::json!({"error": "conflict"})),
+            true,
+        ),
+        result("b", ToolOutput::Text("shell b".into()), false),
+    ];
+    common.body = vec![calls, results, reused, remaining];
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = codex::CodexStore::new(dir.path());
+    let native = codex::Codex::from_common(&common).unwrap();
+    let saved = store.save(&native).unwrap();
+    let reloaded = store.load(&saved.reference).unwrap();
+    let kinds: Vec<_> = reloaded
+        .body
+        .iter()
+        .filter(|line| line.kind == "response_item")
+        .map(|line| {
+            (
+                line.payload["call_id"].as_str().unwrap(),
+                line.payload["type"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("a", "custom_tool_call"),
+            ("b", "custom_tool_call"),
+            ("c", "function_call"),
+            ("c", "function_call_output"),
+            ("b", "custom_tool_call_output"),
+            ("b", "function_call"),
+            ("a", "custom_tool_call_output"),
+            ("b", "function_call_output"),
+        ]
+    );
+    let back = codex::Codex::to_common(&reloaded).unwrap();
+    // Codex stores one response item per block, splitting multi-block messages.
+    let blocks = |transcript: Transcript<Common>| {
+        transcript
+            .body
+            .into_iter()
+            .flat_map(|msg| msg.content)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(blocks(common), blocks(back));
+}
+
+/// `discover` resolves lineage straight from `session_meta` — no `load` or
+/// full parse needed. Covers a `thread_spawn` subagent (spawn) and a plain
+/// `forked_from_id` session (fork) side by side.
+#[test]
+fn discover_resolves_lineage_from_session_meta() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("rollout-2026-01-02T03-04-05-spawned.jsonl"),
+        format!(
+            "{}\n",
+            r#"{"timestamp":"2026-01-02T03:04:05.000Z","type":"session_meta","payload":{"id":"spawned","source":{"subagent":{"thread_spawn":{"parent_thread_id":"lead"}}}}}"#,
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("rollout-2026-01-02T03-04-06-forked.jsonl"),
+        format!(
+            "{}\n",
+            r#"{"timestamp":"2026-01-02T03:04:06.000Z","type":"session_meta","payload":{"id":"forked","forked_from_id":"origin"}}"#,
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("rollout-2026-01-02T03-04-07-plain.jsonl"),
+        format!(
+            "{}\n",
+            r#"{"timestamp":"2026-01-02T03:04:07.000Z","type":"session_meta","payload":{"id":"plain"}}"#,
+        ),
+    )
+    .unwrap();
+
+    let found = codex::CodexStore::new(dir.path()).discover().unwrap();
+    let by_id = |id: &str| found.iter().find(|d| d.meta.id == id).unwrap();
+
+    let spawned = by_id("spawned").meta.lineage.as_ref().unwrap();
+    assert_eq!(spawned.parent, "lead");
+    assert_eq!(spawned.relation, common::Relation::Spawn);
+
+    let forked = by_id("forked").meta.lineage.as_ref().unwrap();
+    assert_eq!(forked.parent, "origin");
+    assert_eq!(forked.relation, common::Relation::Fork);
+
+    assert!(by_id("plain").meta.lineage.is_none());
 }

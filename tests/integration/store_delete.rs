@@ -22,6 +22,7 @@ fn small_common(id: &str) -> Transcript<Common> {
         title: Some("deletable".to_string()),
         cli_version: None,
         model: None,
+        lineage: None,
     };
     let message = Message {
         role: Role::User,
@@ -235,7 +236,8 @@ mod opencode_archive {
         let conn = rusqlite::Connection::open(path).unwrap_or_else(|e| panic!("open: {e}"));
         conn.execute_batch(
             "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT,
-                 version TEXT, time_created INTEGER, time_archived INTEGER, model TEXT);
+                 version TEXT, time_created INTEGER, time_archived INTEGER, model TEXT,
+                 parent_id TEXT);
              CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
              CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT);
              INSERT INTO session (id, directory, title, version, time_created, model)
@@ -272,4 +274,78 @@ mod opencode_archive {
         assert!(store.delete(&"ses_1".to_string()).is_err());
         assert!(store.delete(&"nope".to_string()).is_err());
     }
+}
+
+#[test]
+fn codex_delete_archived_session_with_or_without_active_directory() {
+    for keep_active_dir in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let archived = dir.path().join("archived_sessions");
+        let store = codex::CodexStore::new(&sessions).with_archived_sessions_dir(&archived);
+        let native = codex::Codex::from_common(&small_common("archived-session")).unwrap();
+        let saved = store.save(&native).unwrap();
+        assert!(saved.reference.starts_with(&sessions));
+
+        std::fs::create_dir_all(&archived).unwrap();
+        let reference = archived.join(saved.reference.file_name().unwrap());
+        std::fs::rename(&saved.reference, &reference).unwrap();
+        if !keep_active_dir {
+            std::fs::remove_dir_all(&sessions).unwrap();
+        }
+
+        let found = store.discover().unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].reference, reference);
+        assert_eq!(store.load(&reference).unwrap().meta.id, saved.id);
+        store.delete(&reference).unwrap();
+        assert!(!reference.exists());
+        assert!(store.discover().unwrap().is_empty());
+        assert!(
+            archived.is_dir(),
+            "deleting a rollout must keep its directory"
+        );
+        assert!(store.delete(&reference).is_err());
+    }
+}
+
+/// A session Codex has compressed is still the user's to delete, and no
+/// other `.zst` file is a session.
+#[cfg(feature = "codex_zstd")]
+#[test]
+fn codex_delete_removes_a_compressed_rollout() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = codex::CodexStore::new(dir.path());
+    let native = codex::Codex::from_common(&small_common("cold-session")).unwrap();
+    let saved = store.save(&native).unwrap();
+
+    // What Codex leaves behind: `<name>.jsonl.zst`, the plain file gone.
+    let mut name = saved.reference.clone().into_os_string();
+    name.push(".zst");
+    let reference = std::path::PathBuf::from(name);
+    let plain = std::fs::read(&saved.reference).unwrap();
+    std::fs::write(&reference, zstd::stream::encode_all(&plain[..], 3).unwrap()).unwrap();
+    std::fs::remove_file(&saved.reference).unwrap();
+
+    let found = store.discover().unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].reference, reference);
+    store.delete(&reference).unwrap();
+    assert!(!reference.exists());
+    assert!(store.discover().unwrap().is_empty());
+
+    let other = dir.path().join("notes.zst");
+    std::fs::write(&other, b"not a session").unwrap();
+    assert!(store.delete(&other).is_err());
+    assert!(other.exists());
+}
+
+#[test]
+fn codex_active_delete_works_when_archive_directory_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    let archived = dir.path().join("archived_sessions");
+    let store = codex::CodexStore::new(&sessions).with_archived_sessions_dir(&archived);
+    roundtrip(&store);
+    assert!(!archived.exists());
 }
