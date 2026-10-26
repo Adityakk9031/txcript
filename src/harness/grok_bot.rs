@@ -579,6 +579,8 @@ fn meta_from_records(records: &[Value]) -> Meta {
         title,
         cli_version: None,
         model: None,
+        // grok_bot's transcript entries carry no parent/fork/spawn signal.
+        lineage: None,
     }
 }
 
@@ -718,6 +720,7 @@ impl GrokBotStore {
                         title,
                         cli_version: None,
                         model: None,
+                        lineage: None,
                     },
                     // Prefer the agent directory as the list locator so mtime
                     // reflects the live bot; load still resolves JSONL by id.
@@ -1069,6 +1072,7 @@ pub fn ui_entries_to_common(
             title,
             cli_version: None,
             model: None,
+            lineage: None,
         },
         messages,
     )
