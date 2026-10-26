@@ -12,17 +12,23 @@
 //! `from_common` emits both `response_item` and `event_msg` logs so Codex can
 //! resume and replay the session. It also emits `turn_context`, `token_count`,
 //! and `task_complete` records for model and usage metadata.
+//!
+//! Codex compresses a rollout it hasn't written to for a week, in place, to
+//! `rollout-<ts>-<id>.jsonl.zst`, and expands it again when the session is
+//! resumed. The store reads both; it always writes the plain form.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::common::{Block, ImageSource, Message, Meta, Role, Tool, ToolOutput, Usage};
+use crate::common::{
+    Block, ImageSource, Lineage, Message, Meta, Relation, Role, Tool, ToolOutput, Usage,
+};
 use crate::error::{Error, Result};
 use crate::harness::jsonl;
 use crate::transcript::{Codec, Common, Discovered, Harness, Saved, Store, TextCodec, Transcript};
@@ -578,7 +584,34 @@ fn messages_to_lines(meta: &Meta, messages: &[Message]) -> Vec<Line> {
     lines
 }
 
-/// Emit the `response_item` (and paired display `event_msg`) lines for one message.
+fn flush_message_content(
+    lines: &mut Vec<Line>,
+    message_content: &mut Vec<Value>,
+    text_chunks: &mut Vec<String>,
+    role: Role,
+    role_str: &str,
+    ts: &str,
+) {
+    if !message_content.is_empty() {
+        lines.push(meta_line_str(
+            ts,
+            "response_item",
+            json!({ "type": "message", "role": role_str, "content": std::mem::take(message_content) }),
+        ));
+        if !text_chunks.is_empty() {
+            let combined = std::mem::take(text_chunks).join("\n\n");
+            let event = match role {
+                Role::User => {
+                    json!({ "type": "user_message", "message": combined, "kind": "plain" })
+                }
+                Role::Assistant => json!({ "type": "agent_message", "message": combined }),
+            };
+            lines.push(meta_line_str(ts, "event_msg", event));
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 fn push_message_lines<'a>(
     lines: &mut Vec<Line>,
     msg: &'a Message,
@@ -618,6 +651,14 @@ fn push_message_lines<'a>(
                 text_chunks.push(text);
             }
             Block::Thinking { text, .. } => {
+                flush_message_content(
+                    lines,
+                    &mut message_content,
+                    &mut text_chunks,
+                    msg.role,
+                    role_str,
+                    ts,
+                );
                 lines.push(meta_line_str(
                     ts,
                     "response_item",
@@ -634,6 +675,14 @@ fn push_message_lines<'a>(
                 ));
             }
             Block::ToolUse { id, tool } => {
+                flush_message_content(
+                    lines,
+                    &mut message_content,
+                    &mut text_chunks,
+                    msg.role,
+                    role_str,
+                    ts,
+                );
                 if is_patch_tool(tool) {
                     pending_patch_ids.insert(id.as_str());
                 } else {
@@ -646,6 +695,14 @@ fn push_message_lines<'a>(
                 content,
                 is_error,
             } => {
+                flush_message_content(
+                    lines,
+                    &mut message_content,
+                    &mut text_chunks,
+                    msg.role,
+                    role_str,
+                    ts,
+                );
                 let (kind, output) = if pending_patch_ids.remove(tool_use_id.as_str()) {
                     (
                         "custom_tool_call_output",
@@ -663,23 +720,14 @@ fn push_message_lines<'a>(
         }
     }
 
-    if !message_content.is_empty() {
-        lines.push(meta_line_str(
-            ts,
-            "response_item",
-            json!({ "type": "message", "role": role_str, "content": message_content }),
-        ));
-        if !text_chunks.is_empty() {
-            let combined = text_chunks.join("\n\n");
-            let event = match msg.role {
-                Role::User => {
-                    json!({ "type": "user_message", "message": combined, "kind": "plain" })
-                }
-                Role::Assistant => json!({ "type": "agent_message", "message": combined }),
-            };
-            lines.push(meta_line_str(ts, "event_msg", event));
-        }
-    }
+    flush_message_content(
+        lines,
+        &mut message_content,
+        &mut text_chunks,
+        msg.role,
+        role_str,
+        ts,
+    );
 }
 
 /// Emit the native call line for one tool invocation: `exec_command` for
@@ -932,10 +980,10 @@ impl Store for CodexStore {
             // mean pulling every byte of every rollout on the machine
             // through a JSON probe to learn nothing more.
             let has_id = |l: &Line| l.payload.get("id").and_then(Value::as_str).is_some();
-            let file = fs::File::open(path).ok()?;
+            let rollout = open_rollout(path).ok()?;
             let mut first: Option<Line> = None;
             let mut found_id = false;
-            for line in BufReader::new(file).lines().map_while(std::io::Result::ok) {
+            for line in rollout.lines().map_while(io::Result::ok) {
                 if line.trim().is_empty() || !is_session_meta(&line) {
                     continue;
                 }
@@ -954,7 +1002,7 @@ impl Store for CodexStore {
             found_id.then(|| {
                 let mut meta = meta_from_lines(std::slice::from_ref(&first));
                 if meta.id.is_empty() {
-                    meta.id = jsonl::file_id(path);
+                    meta.id = file_id(path);
                 }
                 Discovered {
                     meta,
@@ -965,9 +1013,9 @@ impl Store for CodexStore {
     }
 
     fn load(&self, reference: &PathBuf) -> Result<Transcript<Codex>> {
-        let mut transcript = Codex::from_text(&fs::read_to_string(reference)?)?;
+        let mut transcript = Codex::from_text(&read_rollout(reference)?)?;
         if transcript.meta.id.is_empty() {
-            transcript.meta.id = jsonl::file_id(reference);
+            transcript.meta.id = file_id(reference);
         }
         Ok(transcript)
     }
@@ -1040,10 +1088,11 @@ impl Store for CodexStore {
     }
 
     /// Removes a Codex rollout log. Guarded on shape and containment:
-    /// the reference must be a `.jsonl` file resolving within `sessions_dir`
-    /// or the configured `archived_sessions_dir`. Neither root itself is deletable.
+    /// the reference must be a `.jsonl` or `.jsonl.zst` file resolving within
+    /// `sessions_dir` or the configured `archived_sessions_dir`. Neither root
+    /// itself is deletable.
     fn delete(&self, reference: &PathBuf) -> Result<()> {
-        if reference.extension().is_none_or(|ext| ext != "jsonl") {
+        if reference.extension().is_none_or(|ext| ext != "jsonl") && !is_compressed(reference) {
             return Err(Error::Malformed {
                 harness: Codex::NAME,
                 detail: format!("not a codex session file: {}", reference.display()),
@@ -1101,6 +1150,7 @@ fn meta_from_lines(lines: &[Line]) -> Meta {
         title: None,
         cli_version: None,
         model: None,
+        lineage: None,
     };
     // Only the first session_meta names the session.
     if let Some(p) = lines
@@ -1135,8 +1185,58 @@ fn meta_from_lines(lines: &[Line]) -> Meta {
         {
             meta.timestamp = ts;
         }
+        meta.lineage = lineage_from_session_meta(p);
     }
     meta
+}
+
+/// Codex's `session_meta.payload` names its parent two ways, per
+/// `codex-rs/protocol.rs`'s `SessionMeta`/`SubAgentSource`:
+///
+/// - `source.subagent` present → this thread was spawned. The parent lives
+///   in `source.subagent.thread_spawn.parent_thread_id` when that shape is
+///   present; the guardian-review shape (`source.subagent.other == "guardian"`,
+///   often paired with `thread_source == "guardian_review"`) and any other
+///   subagent shape instead carry it in the top-level `parent_thread_id`.
+/// - No `source.subagent`, but a top-level `parent_thread_id` → also a spawn
+///   (reserved for a shape this file hasn't seen yet on this machine).
+/// - Otherwise, `forked_from_id` → a fork (`/fork`, resume-from-point).
+///
+/// Spawn wins when both `source.subagent` and `forked_from_id` are present:
+/// a subagent thread forked from the parent's history at spawn time carries
+/// both, and the relationship that matters is that it was spawned.
+fn lineage_from_session_meta(payload: &Value) -> Option<Lineage> {
+    let top_level_parent = || {
+        payload
+            .get("parent_thread_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    if let Some(subagent) = payload.get("source").and_then(|s| s.get("subagent")) {
+        let parent = subagent
+            .get("thread_spawn")
+            .and_then(|spawn| spawn.get("parent_thread_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(top_level_parent)?;
+        return Some(Lineage {
+            parent,
+            relation: Relation::Spawn,
+        });
+    }
+    if let Some(parent) = top_level_parent() {
+        return Some(Lineage {
+            parent,
+            relation: Relation::Spawn,
+        });
+    }
+    payload
+        .get("forked_from_id")
+        .and_then(Value::as_str)
+        .map(|parent| Lineage {
+            parent: parent.to_string(),
+            relation: Relation::Fork,
+        })
 }
 
 fn collect_rollouts(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -1151,13 +1251,78 @@ fn collect_rollouts(dir: &Path, out: &mut Vec<PathBuf>) {
                 collect_rollouts(&path, out);
             } else if let Some(name) = path.file_name().and_then(|n| n.to_str())
                 && name.starts_with("rollout-")
-                && path
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
+                && (has_extension(&path, "jsonl") || lists_compressed(&path))
             {
                 out.push(path);
             }
         }
+    }
+}
+
+fn has_extension(path: &Path, extension: &str) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(extension))
+}
+
+/// Whether `path` names a rollout Codex has compressed: `….jsonl.zst`, per
+/// upstream `codex-rs/rollout/src/compression.rs`.
+fn is_compressed(path: &Path) -> bool {
+    has_extension(path, "zst")
+        && path
+            .file_stem()
+            .is_some_and(|stem| has_extension(Path::new(stem), "jsonl"))
+}
+
+/// Whether discovery lists a compressed rollout. Codex reads the plain file
+/// when both forms are on disk, which they are for a moment while it
+/// compresses or expands one, so only that one lists and the session doesn't
+/// appear twice. Without the feature nothing could read it, so it isn't a
+/// session.
+fn lists_compressed(path: &Path) -> bool {
+    cfg!(feature = "codex_zstd") && is_compressed(path) && !path.with_extension("").exists()
+}
+
+/// A rollout's lines, decoded as they're read when Codex has compressed it.
+fn open_rollout(path: &Path) -> io::Result<Box<dyn BufRead>> {
+    let file = fs::File::open(path)?;
+    if is_compressed(path) {
+        decoded(file)
+    } else {
+        Ok(Box::new(BufReader::new(file)))
+    }
+}
+
+#[cfg(feature = "codex_zstd")]
+fn decoded(file: fs::File) -> io::Result<Box<dyn BufRead>> {
+    Ok(Box::new(BufReader::new(zstd::stream::read::Decoder::new(
+        file,
+    )?)))
+}
+
+#[cfg(not(feature = "codex_zstd"))]
+fn decoded(_: fs::File) -> io::Result<Box<dyn BufRead>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "a compressed rollout needs txcript's `codex_zstd` feature",
+    ))
+}
+
+/// A whole rollout as text.
+fn read_rollout(path: &Path) -> io::Result<String> {
+    if !is_compressed(path) {
+        return fs::read_to_string(path);
+    }
+    let mut text = String::new();
+    open_rollout(path)?.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+/// The id a rollout's file name carries, in either form.
+fn file_id(path: &Path) -> String {
+    if is_compressed(path) {
+        jsonl::file_id(&path.with_extension(""))
+    } else {
+        jsonl::file_id(path)
     }
 }
 
@@ -1628,4 +1793,90 @@ fn file_fingerprint(path: &Path) -> String {
 
 fn home() -> Option<PathBuf> {
     super::home_dir()
+}
+
+#[cfg(test)]
+mod lineage_tests {
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
+    use super::lineage_from_session_meta;
+    use crate::common::Relation;
+    use serde_json::json;
+
+    /// A plain session carries neither field: no lineage.
+    #[test]
+    fn no_field_means_no_lineage() {
+        let payload = json!({"id": "s1"});
+        assert!(lineage_from_session_meta(&payload).is_none());
+    }
+
+    /// `thread_spawn`'s nested `parent_thread_id` names the parent of a
+    /// spawned subagent thread.
+    #[test]
+    fn thread_spawn_is_a_spawn() {
+        let payload = json!({
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent-1"}}}
+        });
+        let lineage = lineage_from_session_meta(&payload).expect("spawn lineage");
+        assert_eq!(lineage.parent, "parent-1");
+        assert_eq!(lineage.relation, Relation::Spawn);
+    }
+
+    /// The guardian-review subagent shape carries its parent at the
+    /// top level, not under `thread_spawn`.
+    #[test]
+    fn guardian_review_subagent_is_a_spawn_via_top_level_parent() {
+        let payload = json!({
+            "parent_thread_id": "parent-2",
+            "source": {"subagent": {"other": "guardian"}},
+            "thread_source": "guardian_review",
+        });
+        let lineage = lineage_from_session_meta(&payload).expect("spawn lineage");
+        assert_eq!(lineage.parent, "parent-2");
+        assert_eq!(lineage.relation, Relation::Spawn);
+    }
+
+    /// Any other `source.subagent` shape still falls back to the top-level
+    /// `parent_thread_id` — the subagent signal alone means spawn.
+    #[test]
+    fn unrecognized_subagent_shape_still_falls_back_to_top_level_parent() {
+        let payload = json!({
+            "parent_thread_id": "parent-3",
+            "source": {"subagent": {"something_new": true}},
+        });
+        let lineage = lineage_from_session_meta(&payload).expect("spawn lineage");
+        assert_eq!(lineage.parent, "parent-3");
+        assert_eq!(lineage.relation, Relation::Spawn);
+    }
+
+    /// A top-level `parent_thread_id` with no `source.subagent` at all is
+    /// still a spawn (the design reserves this for a shape not yet seen).
+    #[test]
+    fn top_level_parent_without_subagent_is_a_spawn() {
+        let payload = json!({"parent_thread_id": "parent-4"});
+        let lineage = lineage_from_session_meta(&payload).expect("spawn lineage");
+        assert_eq!(lineage.parent, "parent-4");
+        assert_eq!(lineage.relation, Relation::Spawn);
+    }
+
+    /// No subagent signal, but `forked_from_id`: a fork.
+    #[test]
+    fn forked_from_id_alone_is_a_fork() {
+        let payload = json!({"forked_from_id": "parent-5"});
+        let lineage = lineage_from_session_meta(&payload).expect("fork lineage");
+        assert_eq!(lineage.parent, "parent-5");
+        assert_eq!(lineage.relation, Relation::Fork);
+    }
+
+    /// A subagent thread spawned from the parent's history carries both
+    /// `source.subagent` and `forked_from_id`; spawn wins.
+    #[test]
+    fn spawn_wins_over_fork_when_both_present() {
+        let payload = json!({
+            "forked_from_id": "parent-6",
+            "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent-6"}}},
+        });
+        let lineage = lineage_from_session_meta(&payload).expect("spawn lineage");
+        assert_eq!(lineage.relation, Relation::Spawn);
+    }
 }
