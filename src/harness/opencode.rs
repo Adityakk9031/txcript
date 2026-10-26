@@ -118,6 +118,9 @@ fn meta_from_info(info: &Value) -> Meta {
         title,
         cli_version: string("version"),
         model,
+        // OpenCode's parent-session signal is the SQLite `session.parent_id`
+        // column, not a field in the export/import JSON this path reads.
+        lineage: None,
     }
 }
 
@@ -321,102 +324,151 @@ fn parse_tool(part: &Value) -> Option<(Block, Option<Block>)> {
 
 // ── codec: from_common ─────────────────────────────────────────────────
 
-fn build_export(meta: &Meta, messages: &[Message]) -> Export {
-    // `opencode import` rejects ids that don't start with "ses"; sessions
-    // converted from other harnesses carry plain UUIDs. Re-shape those
-    // deterministically so re-importing the same session keeps its id.
-    let session_id = if meta.id.is_empty() {
+fn format_session_id(id: &str) -> String {
+    if id.is_empty() {
         format!("ses_{}", Uuid::new_v4().simple())
-    } else if meta.id.starts_with("ses") {
-        meta.id.clone()
+    } else if id.starts_with("ses") {
+        id.to_string()
     } else {
-        format!("ses_{}", meta.id.replace('-', ""))
-    };
+        format!("ses_{}", id.replace('-', ""))
+    }
+}
+
+struct ExportContext<'a> {
+    session_id: &'a str,
+    cwd: &'a str,
+    default_model: Option<&'a str>,
+    messages: &'a [Message],
+}
+
+fn build_user_record(
+    ctx: &ExportContext<'_>,
+    msg: &Message,
+    msg_id: &str,
+    idx: usize,
+) -> (MessageRecord, bool) {
+    let msg_ms = msg.timestamp.timestamp_millis();
+    let mut info = Map::new();
+    info.insert("id".into(), json!(msg_id));
+    info.insert("sessionID".into(), json!(ctx.session_id));
+    info.insert(
+        "time".into(),
+        json!({ "created": msg_ms, "completed": msg_ms }),
+    );
+    info.insert("role".into(), json!("user"));
+    info.insert("agent".into(), json!("build"));
+    let model = msg
+        .model
+        .as_deref()
+        .or(ctx.default_model)
+        .unwrap_or("unknown");
+    info.insert(
+        "model".into(),
+        json!({ "providerID": "anthropic", "modelID": model }),
+    );
+    let mut parts = Vec::new();
+    for (j, block) in msg.content.iter().enumerate() {
+        if let Some(part) = user_part(block, ctx.session_id, msg_id, idx, j, msg_ms) {
+            parts.push(part);
+        }
+    }
+    let emitted = !parts.is_empty();
+    (
+        MessageRecord {
+            info: Value::Object(info),
+            parts,
+        },
+        emitted,
+    )
+}
+
+fn build_assistant_record(
+    ctx: &ExportContext<'_>,
+    msg: &Message,
+    msg_id: &str,
+    parent_id: &str,
+    idx: &mut usize,
+) -> MessageRecord {
+    let msg_ms = msg.timestamp.timestamp_millis();
+    let mut info = Map::new();
+    info.insert("id".into(), json!(msg_id));
+    info.insert("sessionID".into(), json!(ctx.session_id));
+    info.insert(
+        "time".into(),
+        json!({ "created": msg_ms, "completed": msg_ms }),
+    );
+    info.insert("role".into(), json!("assistant"));
+    let model = msg
+        .model
+        .as_deref()
+        .or(ctx.default_model)
+        .unwrap_or("unknown");
+    info.insert("modelID".into(), json!(model));
+    info.insert("providerID".into(), json!("anthropic"));
+    info.insert("mode".into(), json!("build"));
+    info.insert("agent".into(), json!("build"));
+    info.insert("parentID".into(), json!(parent_id));
+    info.insert("path".into(), json!({ "cwd": ctx.cwd, "root": ctx.cwd }));
+    info.insert("finish".into(), json!(finish_str(msg.stop_reason.as_ref())));
+    info.insert("cost".into(), json!(0.0));
+    info.insert("tokens".into(), tokens_value(msg.usage.as_ref()));
+
+    let mut parts = vec![json!({
+        "id": format!("prt_{}", det_hex(ctx.session_id, *idx, 0)),
+        "sessionID": ctx.session_id,
+        "messageID": msg_id,
+        "type": "step-start",
+    })];
+    for (j, block) in msg.content.iter().enumerate() {
+        let part = assistant_part(
+            block,
+            ctx.session_id,
+            msg_id,
+            *idx,
+            j + 1,
+            msg_ms,
+            ctx.messages,
+            idx,
+        );
+        parts.push(part);
+    }
+    MessageRecord {
+        info: Value::Object(info),
+        parts,
+    }
+}
+
+fn build_export(meta: &Meta, messages: &[Message]) -> Export {
+    let session_id = format_session_id(&meta.id);
     let now = meta.timestamp.timestamp_millis();
-    // `opencode import` validates messages against its live schema, which
-    // requires an agent, a model, and (on assistant turns) a mode, a path,
-    // and the id of the user message that prompted the turn.
-    let model_id = |msg: &Message| {
-        msg.model
-            .clone()
-            .or_else(|| meta.model.clone())
-            .unwrap_or_else(|| "unknown".to_string())
+    let ctx = ExportContext {
+        session_id: &session_id,
+        cwd: meta.cwd.as_deref().unwrap_or_default(),
+        default_model: meta.model.as_deref(),
+        messages,
     };
-    let cwd = meta.cwd.clone().unwrap_or_default();
 
     let mut out: Vec<MessageRecord> = Vec::new();
     let mut last_user_msg_id: Option<String> = None;
     let mut idx = 0usize;
     while idx < messages.len() {
         let msg = &messages[idx];
-        let msg_ms = msg.timestamp.timestamp_millis();
         let msg_id = format!("msg_{}", det_hex(&session_id, idx, 0));
 
-        let mut info = Map::new();
-        info.insert("id".into(), json!(msg_id));
-        info.insert("sessionID".into(), json!(session_id));
-        info.insert(
-            "time".into(),
-            json!({ "created": msg_ms, "completed": msg_ms }),
-        );
-
-        let mut parts: Vec<Value> = Vec::new();
         match msg.role {
             Role::User => {
-                info.insert("role".into(), json!("user"));
-                info.insert("agent".into(), json!("build"));
-                info.insert(
-                    "model".into(),
-                    json!({ "providerID": "anthropic", "modelID": model_id(msg) }),
-                );
-                last_user_msg_id = Some(msg_id.clone());
-                for (j, block) in msg.content.iter().enumerate() {
-                    if let Some(part) = user_part(block, &session_id, &msg_id, idx, j, msg_ms) {
-                        parts.push(part);
-                    }
+                let (record, emitted) = build_user_record(&ctx, msg, &msg_id, idx);
+                if emitted {
+                    last_user_msg_id = Some(msg_id.clone());
+                    out.push(record);
                 }
             }
             Role::Assistant => {
-                info.insert("role".into(), json!("assistant"));
-                info.insert("modelID".into(), json!(model_id(msg)));
-                info.insert("providerID".into(), json!("anthropic"));
-                info.insert("mode".into(), json!("build"));
-                info.insert("agent".into(), json!("build"));
-                info.insert(
-                    "parentID".into(),
-                    json!(last_user_msg_id.clone().unwrap_or_else(|| msg_id.clone())),
-                );
-                info.insert("path".into(), json!({ "cwd": cwd, "root": cwd }));
-                info.insert("finish".into(), json!(finish_str(msg.stop_reason.as_ref())));
-                info.insert("cost".into(), json!(0.0));
-                info.insert("tokens".into(), tokens_value(msg.usage.as_ref()));
-
-                // Every assistant turn opens with a step-start part.
-                parts.push(json!({
-                    "id": format!("prt_{}", det_hex(&session_id, idx, 0)),
-                    "sessionID": session_id,
-                    "messageID": msg_id,
-                    "type": "step-start",
-                }));
-                for (j, block) in msg.content.iter().enumerate() {
-                    let part = assistant_part(
-                        block,
-                        &session_id,
-                        &msg_id,
-                        idx,
-                        j + 1,
-                        msg_ms,
-                        messages,
-                        &mut idx,
-                    );
-                    parts.push(part);
-                }
+                let parent_id = last_user_msg_id.as_deref().unwrap_or(&msg_id);
+                let record = build_assistant_record(&ctx, msg, &msg_id, parent_id, &mut idx);
+                out.push(record);
             }
         }
-        out.push(MessageRecord {
-            info: Value::Object(info),
-            parts,
-        });
         idx += 1;
     }
 
@@ -523,27 +575,26 @@ fn assistant_part(
                 "metadata": {},
                 "time": time,
             });
-            // Fold the immediately-following ToolResult into state.output.
+            // Fold matching ToolResult from the following user turn into state.output.
             if let Some(next) = messages.get(*idx + 1)
                 && matches!(next.role, Role::User)
-                && next.content.len() == 1
-                && let Block::ToolResult {
-                    tool_use_id,
-                    content,
-                    is_error,
-                } = &next.content[0]
-                && tool_use_id == id
+                && let Some(result) = next.content.iter().find_map(|b| match b {
+                    Block::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } if tool_use_id == id => Some((content, *is_error)),
+                    _ => None,
+                })
+                && let Value::Object(obj) = &mut state
             {
-                if let Value::Object(obj) = &mut state {
-                    if *is_error {
-                        obj.insert("status".into(), json!("error"));
-                        obj.insert("error".into(), json!(output_to_string(content)));
-                        obj.remove("output");
-                    } else {
-                        obj.insert("output".into(), json!(output_to_string(content)));
-                    }
+                if result.1 {
+                    obj.insert("status".into(), json!("error"));
+                    obj.insert("error".into(), json!(output_to_string(result.0)));
+                    obj.remove("output");
+                } else {
+                    obj.insert("output".into(), json!(output_to_string(result.0)));
                 }
-                *idx += 1;
             }
             json!({ "type": "tool", "tool": oc_name, "callID": id, "state": state })
         }
@@ -789,7 +840,7 @@ mod store {
     use serde_json::Value;
 
     use super::{Export, MessageRecord, OpenCode};
-    use crate::common::Meta;
+    use crate::common::{Lineage, Meta, Relation};
     use crate::error::{Error, Result};
     use crate::transcript::{Discovered, Saved, Store, Transcript};
     use chrono::{DateTime, Utc};
@@ -847,7 +898,7 @@ mod store {
                 let conn = self.open()?;
                 let mut stmt = conn
                     .prepare(
-                        "SELECT id, directory, title, version, time_created, model \
+                        "SELECT id, directory, title, version, time_created, model, parent_id \
                          FROM session WHERE time_archived IS NULL ORDER BY time_created DESC",
                     )
                     .map_err(sqlite_err)?;
@@ -860,6 +911,7 @@ mod store {
                             row.get::<_, Option<String>>(3)?,
                             row.get::<_, Option<i64>>(4)?,
                             row.get::<_, Option<String>>(5)?,
+                            row.get::<_, Option<String>>(6)?,
                         ))
                     })
                     .map_err(sqlite_err)?;
@@ -867,19 +919,22 @@ mod store {
                 Ok(raw
                     .into_iter()
                     .map(
-                        |(id, directory, title, version, time_created, model_json)| Discovered {
-                            meta: Meta {
-                                id: id.clone(),
-                                timestamp: time_created
-                                    .and_then(DateTime::from_timestamp_millis)
-                                    .unwrap_or_else(Utc::now),
-                                cwd: directory,
-                                git_branch: None,
-                                title: title.filter(|t| !is_placeholder_title(t)),
-                                cli_version: version,
-                                model: model_json.as_deref().and_then(model_id),
-                            },
-                            reference: id,
+                        |(id, directory, title, version, time_created, model_json, parent_id)| {
+                            Discovered {
+                                meta: Meta {
+                                    id: id.clone(),
+                                    timestamp: time_created
+                                        .and_then(DateTime::from_timestamp_millis)
+                                        .unwrap_or_else(Utc::now),
+                                    cwd: directory,
+                                    git_branch: None,
+                                    title: title.filter(|t| !is_placeholder_title(t)),
+                                    cli_version: version,
+                                    model: model_json.as_deref().and_then(model_id),
+                                    lineage: lineage_from_parent_id(parent_id),
+                                },
+                                reference: id,
+                            }
                         },
                     )
                     .collect())
@@ -1063,7 +1118,8 @@ mod store {
     fn session_row(conn: &Connection, id: &str) -> Result<(Meta, Value)> {
         let mut stmt = conn
             .prepare(
-                "SELECT directory, title, version, time_created, model, slug, time_updated \
+                "SELECT directory, title, version, time_created, model, slug, time_updated, \
+                        parent_id \
                  FROM session WHERE id = ?1",
             )
             .map_err(sqlite_err)?;
@@ -1077,10 +1133,12 @@ mod store {
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })
             .map_err(sqlite_err)?;
-        let (directory, title, version, time_created, model_json, slug, time_updated) = row;
+        let (directory, title, version, time_created, model_json, slug, time_updated, parent_id) =
+            row;
         let timestamp = time_created
             .and_then(DateTime::from_timestamp_millis)
             .unwrap_or_else(Utc::now);
@@ -1092,6 +1150,7 @@ mod store {
             title: title.clone().filter(|t| !is_placeholder_title(t)),
             cli_version: version.clone(),
             model: model_json.as_deref().and_then(model_id),
+            lineage: lineage_from_parent_id(parent_id),
         };
         let info = serde_json::json!({
             "id": id,
@@ -1109,6 +1168,17 @@ mod store {
 
     fn is_placeholder_title(title: &str) -> bool {
         title.trim().is_empty() || title.starts_with("New session - ")
+    }
+
+    /// `session.parent_id` names the session that spawned this one (`OpenCode`'s
+    /// subagent/task tool starts a child session with its own row). A non-empty
+    /// value is always a spawn — `OpenCode` has no fork/continue relation that
+    /// reuses this column.
+    fn lineage_from_parent_id(parent_id: Option<String>) -> Option<Lineage> {
+        parent_id.filter(|id| !id.is_empty()).map(|parent| Lineage {
+            parent,
+            relation: Relation::Spawn,
+        })
     }
 
     fn model_id(model_json: &str) -> Option<String> {
@@ -1132,7 +1202,7 @@ mod store {
     mod tests {
         use super::super::OpenCode;
         use super::OpenCodeStore;
-        use crate::common::{Block, Role, Tool};
+        use crate::common::{Block, Relation, Role, Tool};
         use crate::transcript::{Codec, Store};
         use rusqlite::{Connection, params};
 
@@ -1151,13 +1221,13 @@ mod store {
             conn.execute_batch(
                 "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, \
                    version TEXT, time_created INTEGER, time_archived INTEGER, model TEXT, \
-                   slug TEXT, time_updated INTEGER);\
+                   slug TEXT, time_updated INTEGER, parent_id TEXT);\
                  CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);\
                  CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT);",
             )
             .unwrap();
             conn.execute(
-                "INSERT INTO session VALUES ('ses_1','/repo','Demo','1.15.0',1778834704515,NULL,'{\"id\":\"claude-opus-4-7\"}','clever-engine',1778834704516)",
+                "INSERT INTO session VALUES ('ses_1','/repo','Demo','1.15.0',1778834704515,NULL,'{\"id\":\"claude-opus-4-7\"}','clever-engine',1778834704516,NULL)",
                 [],
             )
             .unwrap();
@@ -1206,6 +1276,7 @@ mod store {
             assert_eq!(d.meta.title.as_deref(), Some("Demo"));
             assert_eq!(d.meta.model.as_deref(), Some("claude-opus-4-7"));
             assert_eq!(d.meta.cwd.as_deref(), Some("/repo"));
+            assert!(d.meta.lineage.is_none(), "no parent_id, no lineage");
 
             let native = store.load(&d.reference).unwrap();
             let msgs = OpenCode::to_common(&native).unwrap().body;
@@ -1230,13 +1301,43 @@ mod store {
             let path = make_db();
             let conn = Connection::open(&path).unwrap();
             conn.execute(
-                "INSERT INTO session VALUES ('ses_2','/repo','Archived','1.15.0',1778834704600,1778834704999,NULL,'quiet-harbor',1778834704601)",
+                "INSERT INTO session VALUES ('ses_2','/repo','Archived','1.15.0',1778834704600,1778834704999,NULL,'quiet-harbor',1778834704601,NULL)",
                 [],
             )
             .unwrap();
             drop(conn);
             let found = OpenCodeStore::new(&path).discover().unwrap();
             assert!(found.iter().all(|d| d.reference != "ses_2"));
+        }
+
+        /// `session.parent_id` names a spawning session; the signal is a
+        /// bare column read, so both `discover` and `load` surface it
+        /// without any extra query.
+        #[test]
+        fn parent_id_column_becomes_spawn_lineage() {
+            let path = make_db();
+            let conn = Connection::open(&path).unwrap();
+            conn.execute(
+                "INSERT INTO session VALUES ('ses_child','/repo','Task','1.15.0',1778834704700,NULL,NULL,'quiet-owl',1778834704701,'ses_1')",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+
+            let store = OpenCodeStore::new(&path);
+            let found = store.discover().unwrap();
+            let child = found
+                .iter()
+                .find(|d| d.reference == "ses_child")
+                .expect("child session discovered");
+            let lineage = child.meta.lineage.as_ref().expect("spawn lineage");
+            assert_eq!(lineage.parent, "ses_1");
+            assert_eq!(lineage.relation, Relation::Spawn);
+
+            let loaded = store.load(&child.reference).unwrap();
+            let lineage = loaded.meta.lineage.as_ref().expect("spawn lineage on load");
+            assert_eq!(lineage.parent, "ses_1");
+            assert_eq!(lineage.relation, Relation::Spawn);
         }
     }
 }
